@@ -116,6 +116,9 @@ def _resolve_endpoint(scope: Scope) -> str:
 
     Returns the route template (e.g. "/tiles/{model}/{run_id}/...") rather
     than the actual URL path to keep label cardinality bounded.
+
+    Recurses into Mount objects (used by FastAPI's include_router with a
+    prefix) to resolve the full route template including nested routes.
     """
     app: ASGIApp | None = scope.get("app")
     if app is None:
@@ -125,12 +128,27 @@ def _resolve_endpoint(scope: Scope) -> str:
     if routes is None:
         return scope.get("path", "unknown")
 
+    return _match_route(routes, scope) or scope.get("path", "unknown")
+
+
+def _match_route(routes: list, scope: Scope) -> str | None:
+    """Walk routes (including nested Mounts) to find the matching template."""
     for route in routes:
         match, _ = route.matches(scope)
         if match == Match.FULL:
-            return getattr(route, "path", scope.get("path", "unknown"))
-
-    return scope.get("path", "unknown")
+            # If this is a Mount with child routes, recurse to get the
+            # full template (mount prefix + child path)
+            child_routes = getattr(route, "routes", None)
+            if child_routes is not None:
+                mount_path = getattr(route, "path", "")
+                remaining = scope.get("path", "")[len(mount_path):]
+                sub_scope = {**scope, "path": remaining or "/"}
+                child_path = _match_route(child_routes, sub_scope)
+                if child_path is not None:
+                    return mount_path + child_path
+                return mount_path
+            return getattr(route, "path", None)
+    return None
 
 
 class PrometheusMiddleware:
@@ -153,6 +171,10 @@ class PrometheusMiddleware:
         start = time.monotonic()
         status_code = 500  # default in case of unhandled exception
 
+        # Snapshot scope before dispatch — Starlette mutates root_path
+        # and path_params during routing, which breaks route matching.
+        resolve_scope = dict(scope)
+
         async def send_wrapper(message: dict) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
@@ -166,7 +188,7 @@ class PrometheusMiddleware:
             ACTIVE_CONNECTIONS.dec()
 
             method = scope.get("method", "UNKNOWN")
-            endpoint = _resolve_endpoint(scope)
+            endpoint = _resolve_endpoint(resolve_scope)
             status = str(status_code)
 
             REQUEST_LATENCY.labels(

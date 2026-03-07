@@ -7,7 +7,7 @@ from prometheus_client import CollectorRegistry, REGISTRY
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 from weatherman.observability.metrics import (
@@ -131,6 +131,30 @@ class TestPrometheusMiddleware:
         # Both requests should be recorded under the template
         count = REQUEST_COUNT.labels(
             method="GET", endpoint="/items/{item_id}", status="200",
+        )._value.get()
+        assert count >= 2
+
+    def test_uses_route_template_for_mounted_subroutes(self):
+        """Mounted sub-routes (APIRouter with prefix) should resolve to the template."""
+
+        async def get_widget(request: Request) -> PlainTextResponse:
+            return PlainTextResponse(f"widget {request.path_params['widget_id']}")
+
+        app = Starlette(
+            routes=[
+                Mount("/api", routes=[
+                    Route("/widgets/{widget_id}", get_widget),
+                ]),
+            ],
+        )
+        app.add_middleware(PrometheusMiddleware)
+        mounted_client = TestClient(app, raise_server_exceptions=False)
+
+        mounted_client.get("/api/widgets/1")
+        mounted_client.get("/api/widgets/2")
+
+        count = REQUEST_COUNT.labels(
+            method="GET", endpoint="/api/widgets/{widget_id}", status="200",
         )._value.get()
         assert count >= 2
 
