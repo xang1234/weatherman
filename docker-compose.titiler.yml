@@ -24,7 +24,8 @@ services:
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
       AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
       AWS_S3_ENDPOINT: "${TITILER_S3_ENDPOINT:-}"
-      AWS_VIRTUAL_HOSTING: "FALSE"
+      # For non-AWS S3 (MinIO, etc.), uncomment to force path-style access:
+      # AWS_VIRTUAL_HOSTING: "FALSE"
 
       # CORS — allow frontend dev server and production origins
       TITILER_API_CORS_ORIGINS: "*"
@@ -54,7 +55,7 @@ services:
           memory: 1152M
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api"]
       interval: 30s
       timeout: 10s
       retries: 3

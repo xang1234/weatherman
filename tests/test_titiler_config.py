@@ -88,6 +88,12 @@ class TestTiTilerConfig:
         assert cfg.cors_origins == ["http://localhost:3000"]
         assert cfg.storage is storage
 
+    def test_gdal_merge_ranges_disabled(self):
+        storage = StorageConfig(bucket="b")
+        cfg = TiTilerConfig(storage=storage, gdal_http_merge_consecutive_ranges=False)
+        env = cfg.env_vars()
+        assert env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] == "NO"
+
     def test_vsi_cache_size_bytes(self):
         storage = StorageConfig(bucket="b")
         cfg = TiTilerConfig(storage=storage, cpl_vsil_curl_cache_size_mb=100)
@@ -173,11 +179,13 @@ class TestComposeGeneration:
 
     def test_compose_has_healthcheck(self):
         storage = StorageConfig(bucket="wx-data")
-        cfg = TiTilerConfig(storage=storage)
+        cfg = TiTilerConfig(storage=storage, port=8080)
         compose = generate_compose_dict(cfg)
         svc = compose["services"]["titiler"]
         assert "healthcheck" in svc
         assert "curl" in svc["healthcheck"]["test"]
+        # Verify the URL uses /api, not a non-existent /healthz
+        assert "http://localhost:8080/api" in svc["healthcheck"]["test"]
 
     def test_compose_has_memory_limits(self):
         storage = StorageConfig(bucket="wx-data")
@@ -192,3 +200,11 @@ class TestComposeGeneration:
         compose = generate_compose_dict(cfg)
         env = compose["services"]["titiler"]["environment"]
         assert env["AWS_S3_ENDPOINT"] == "http://minio:9000"
+
+    def test_compose_environment_has_credential_placeholders(self):
+        storage = StorageConfig(bucket="wx-data")
+        cfg = TiTilerConfig(storage=storage)
+        compose = generate_compose_dict(cfg)
+        env = compose["services"]["titiler"]["environment"]
+        assert env["AWS_ACCESS_KEY_ID"] == "${AWS_ACCESS_KEY_ID}"
+        assert env["AWS_SECRET_ACCESS_KEY"] == "${AWS_SECRET_ACCESS_KEY}"

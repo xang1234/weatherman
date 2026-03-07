@@ -45,6 +45,11 @@ class TiTilerConfig:
         """Build environment variable dict for the TiTiler container."""
         env: dict[str, str] = {}
 
+        # S3 credentials — use variable substitution placeholders so that
+        # generated Compose files never contain literal secrets.
+        env["AWS_ACCESS_KEY_ID"] = "${AWS_ACCESS_KEY_ID}"
+        env["AWS_SECRET_ACCESS_KEY"] = "${AWS_SECRET_ACCESS_KEY}"
+
         # S3 access configuration
         if self.storage.endpoint_url:
             env["AWS_S3_ENDPOINT"] = self.storage.endpoint_url
@@ -65,7 +70,9 @@ class TiTilerConfig:
         # GDAL performance tuning for cloud-hosted COGs
         env["GDAL_CACHEMAX"] = str(self.gdal_cachemax_mb)
         env["GDAL_BAND_BLOCK_CACHE"] = self.gdal_band_block_cache
-        env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
+        env["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = (
+            "YES" if self.gdal_http_merge_consecutive_ranges else "NO"
+        )
         env["GDAL_HTTP_MULTIPLEX"] = "YES" if self.gdal_http_multiplex else "NO"
         env["GDAL_HTTP_VERSION"] = str(self.gdal_http_version)
         env["CPL_VSIL_CURL_CACHE_SIZE"] = str(

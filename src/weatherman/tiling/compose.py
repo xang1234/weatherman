@@ -34,7 +34,7 @@ def generate_compose_dict(config: TiTilerConfig) -> dict:
             }
         },
         "healthcheck": {
-            "test": ["CMD", "curl", "-f", f"http://localhost:{config.port}/healthz"],
+            "test": ["CMD", "curl", "-f", f"http://localhost:{config.port}/api"],
             "interval": "30s",
             "timeout": "10s",
             "retries": 3,
