@@ -15,13 +15,14 @@ Response: CoverageJSON (application/prs.coverage+json)
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from typing import Annotated, Any, Callable
 
 import numpy as np
 import zarr
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 
 from weatherman.processing.geo import interpolate_at_point, wrap_longitude
@@ -106,6 +107,37 @@ def parse_datetime_filter(
             f"Expected an integer forecast hour."
         )
     return available_hours == hour
+
+
+def compute_etag(
+    model: str,
+    run_id: str,
+    lon: float,
+    lat: float,
+    parameter_names: list[str] | None,
+    datetime_filter: str | None,
+) -> str:
+    """Compute a deterministic ETag from the resolved query inputs.
+
+    Since published runs are immutable, the same (run_id + query) always
+    produces the same result — making this a stable cache key.
+    """
+    parts = [
+        model,
+        str(run_id),
+        f"{lon:.6f}",
+        f"{lat:.6f}",
+        ",".join(sorted(parameter_names)) if parameter_names else "*",
+        datetime_filter or "*",
+    ]
+    digest = hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    return f'"{digest}"'
+
+
+# One year; published runs are immutable so this is safe.
+_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+# "latest" resolves to a mutable alias — short cache + must-revalidate.
+_LATEST_CACHE_CONTROL = "public, max-age=60, must-revalidate"
 
 
 def _build_coverage_json(
@@ -380,11 +412,16 @@ async def edr_position(
             description="Forecast hour or range (e.g. '0', '0/24')",
         ),
     ] = None,
+    if_none_match: Annotated[
+        str | None,
+        Header(description="ETag for conditional request"),
+    ] = None,
     svc: EDRService = Depends(get_edr_service),
-) -> JSONResponse:
+) -> Response:
     """Return a CoverageJSON time-series at the given point.
 
     Supports 'latest' as run_id to resolve to the current published run.
+    Responses include ETag and Cache-Control headers for HTTP caching.
     """
     try:
         lon, lat = parse_wkt_point(coords)
@@ -397,6 +434,22 @@ async def edr_position(
     if parameter_name:
         param_list = [p.strip() for p in parameter_name.split(",") if p.strip()]
 
+    etag = compute_etag(
+        model=model,
+        run_id=str(resolved_run_id),
+        lon=lon,
+        lat=lat,
+        parameter_names=param_list,
+        datetime_filter=datetime_filter,
+    )
+
+    # 304 Not Modified if the client already has this exact response
+    if if_none_match and if_none_match.strip() == etag:
+        return Response(
+            status_code=304,
+            headers={"ETag": etag},
+        )
+
     result = svc.query_position(
         model=model,
         run_id=resolved_run_id,
@@ -406,7 +459,15 @@ async def edr_position(
         datetime_filter=datetime_filter,
     )
 
+    cache_control = (
+        _LATEST_CACHE_CONTROL if run_id == "latest" else _IMMUTABLE_CACHE_CONTROL
+    )
+
     return JSONResponse(
         content=result,
         media_type="application/prs.coverage+json",
+        headers={
+            "ETag": etag,
+            "Cache-Control": cache_control,
+        },
     )

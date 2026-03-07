@@ -11,6 +11,7 @@ import zarr
 from weatherman.edr.position import (
     EDRService,
     _build_coverage_json,
+    compute_etag,
     parse_datetime_filter,
     parse_wkt_point,
 )
@@ -409,3 +410,120 @@ class TestEDRRoute:
             params={"coords": "POINT(0 0)", "parameter-name": "ugrd_10m"},
         )
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# ETag + caching tests
+# ---------------------------------------------------------------------------
+
+class TestComputeEtag:
+    def test_deterministic(self):
+        """Same inputs always produce the same ETag."""
+        e1 = compute_etag("gfs", "20260306T00Z", 10.0, 20.0, ["tmp_2m"], "0/24")
+        e2 = compute_etag("gfs", "20260306T00Z", 10.0, 20.0, ["tmp_2m"], "0/24")
+        assert e1 == e2
+
+    def test_different_run_id_differs(self):
+        e1 = compute_etag("gfs", "20260306T00Z", 0.0, 0.0, None, None)
+        e2 = compute_etag("gfs", "20260306T06Z", 0.0, 0.0, None, None)
+        assert e1 != e2
+
+    def test_different_coords_differs(self):
+        e1 = compute_etag("gfs", "20260306T00Z", 10.0, 20.0, None, None)
+        e2 = compute_etag("gfs", "20260306T00Z", 11.0, 20.0, None, None)
+        assert e1 != e2
+
+    def test_parameter_order_irrelevant(self):
+        e1 = compute_etag("gfs", "20260306T00Z", 0.0, 0.0, ["a", "b"], None)
+        e2 = compute_etag("gfs", "20260306T00Z", 0.0, 0.0, ["b", "a"], None)
+        assert e1 == e2
+
+    def test_etag_is_quoted(self):
+        etag = compute_etag("gfs", "20260306T00Z", 0.0, 0.0, None, None)
+        assert etag.startswith('"') and etag.endswith('"')
+
+
+class TestCachingHeaders:
+    @pytest.fixture()
+    def client(self, tmp_path):
+        """Create a test client with EDR service wired up."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from weatherman.edr.position import (
+            init_edr_service,
+            router,
+            shutdown_edr_service,
+        )
+
+        model = "gfs"
+        run_id = RunID("20260306T00Z")
+        _create_test_zarr(tmp_path, model, run_id)
+
+        catalog = RunCatalog.new(model)
+        catalog.publish_run(run_id, layout=StorageLayout(model))
+
+        def catalog_loader(m: str) -> RunCatalog:
+            return catalog
+
+        def zarr_opener(zarr_path: str) -> zarr.Group:
+            return zarr.open_group(str(tmp_path / zarr_path), mode="r")
+
+        app = FastAPI()
+        app.include_router(router)
+        shutdown_edr_service()
+        init_edr_service(catalog_loader, zarr_opener)
+
+        yield TestClient(app)
+
+        shutdown_edr_service()
+
+    def test_response_has_etag(self, client):
+        resp = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 0)", "parameter-name": "tmp_2m"},
+        )
+        assert resp.status_code == 200
+        assert "ETag" in resp.headers
+        assert resp.headers["ETag"].startswith('"')
+
+    def test_304_on_matching_etag(self, client):
+        # First request to get ETag
+        resp1 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+        )
+        assert resp1.status_code == 200
+        etag = resp1.headers["ETag"]
+
+        # Second request with If-None-Match
+        resp2 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+            headers={"If-None-Match": etag},
+        )
+        assert resp2.status_code == 304
+        assert resp2.headers["ETag"] == etag
+
+    def test_200_on_mismatched_etag(self, client):
+        resp = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 0)"},
+            headers={"If-None-Match": '"stale-etag"'},
+        )
+        assert resp.status_code == 200
+
+    def test_latest_cache_control(self, client):
+        resp = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 0)"},
+        )
+        assert "must-revalidate" in resp.headers["Cache-Control"]
+
+    def test_explicit_run_immutable_cache_control(self, client):
+        resp = client.get(
+            "/v1/edr/collections/gfs/instances/20260306T00Z/position",
+            params={"coords": "POINT(0 0)"},
+        )
+        assert "immutable" in resp.headers["Cache-Control"]
+        assert "31536000" in resp.headers["Cache-Control"]
