@@ -33,16 +33,18 @@ class TestTiTilerConfig:
 
         assert env["AWS_S3_ENDPOINT"] == "http://minio:9000"
         assert env["AWS_VIRTUAL_HOSTING"] == "FALSE"
+        assert env["AWS_S3_FORCE_PATH_STYLE"] == "true"
         assert env["AWS_DEFAULT_REGION"] == "us-east-1"
 
     def test_env_vars_without_custom_endpoint(self):
-        """Real AWS S3 — no endpoint override, no path-style flag."""
+        """Real AWS S3 — no endpoint override, no path-style flags."""
         storage = StorageConfig(bucket="wx-data")
         cfg = TiTilerConfig(storage=storage)
         env = cfg.env_vars()
 
         assert "AWS_S3_ENDPOINT" not in env
         assert "AWS_VIRTUAL_HOSTING" not in env
+        assert "AWS_S3_FORCE_PATH_STYLE" not in env
 
     def test_cors_origins(self):
         storage = StorageConfig(bucket="wx-data")

@@ -53,9 +53,12 @@ class TiTilerConfig:
         # S3 access configuration
         if self.storage.endpoint_url:
             env["AWS_S3_ENDPOINT"] = self.storage.endpoint_url
-            # For non-AWS S3 (MinIO etc.), force path-style access
+            # For non-AWS S3 (MinIO etc.), force path-style access on both
+            # the GDAL layer (AWS_VIRTUAL_HOSTING) and boto3 layer
+            # (AWS_S3_FORCE_PATH_STYLE).
             env["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if self.storage.region:
+            env["AWS_S3_FORCE_PATH_STYLE"] = "true"
+        if self.storage.region is not None:
             env["AWS_DEFAULT_REGION"] = self.storage.region
 
         # CORS
