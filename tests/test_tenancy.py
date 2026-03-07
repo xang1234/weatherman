@@ -183,6 +183,12 @@ class TestTenantCacheKey:
         assert "acme" in k1
         assert "globex" in k2
 
+    def test_rejects_colon_in_tenant_id(self):
+        """Colons in tenant_id would create ambiguous cache keys."""
+        import pytest
+        with pytest.raises(ValueError, match="must not contain ':'"):
+            tenant_cache_key("a:b", "prefs")
+
 
 class TestSharedCacheKey:
     def test_tile_key(self):
@@ -374,6 +380,23 @@ class TestTenantIsolation:
         acme_row = repo.select_one("acme", _test_table.c.name == "item")
         assert acme_row is not None
         assert acme_row.value == "keep"
+
+    def test_update_rejects_tenant_id_change(self):
+        """Cannot reassign rows to a different tenant via update()."""
+        import pytest
+        engine = _make_engine()
+        repo = TenantRepository(engine, _test_table)
+
+        repo.insert("acme", name="item", value="val")
+
+        # Direct kwarg is caught by Python's own signature checking
+        with pytest.raises(TypeError):
+            repo.update("acme", _test_table.c.name == "item", tenant_id="globex")
+
+        # Row still belongs to acme
+        row = repo.select_one("acme", _test_table.c.name == "item")
+        assert row is not None
+        assert row.tenant_id == "acme"
 
     def test_insert_always_sets_tenant_id(self):
         """Even if caller doesn't mention tenant_id, it's set automatically."""

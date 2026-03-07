@@ -89,6 +89,8 @@ def tenant_cache_key(tenant_id: str, *parts: str) -> str:
     >>> tenant_cache_key("acme", "preferences", "dashboard")
     'tenant:acme:preferences:dashboard'
     """
+    if ":" in tenant_id:
+        raise ValueError(f"tenant_id must not contain ':': {tenant_id!r}")
     return f"tenant:{tenant_id}:" + ":".join(parts)
 
 
@@ -193,6 +195,8 @@ class TenantRepository:
         **values: Any,
     ) -> int:
         """Update rows scoped to tenant_id. Returns number of rows updated."""
+        if "tenant_id" in values:
+            raise ValueError("tenant_id cannot be changed via update()")
         query = (
             self._table.update()
             .where(self._tenant_filter(tenant_id), *filters)
