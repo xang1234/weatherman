@@ -29,6 +29,24 @@ variables:
     grib2_key: ":VGRD:10 m above ground:"
     level: "10 m above ground"
 
+  apcp_sfc:
+    long_name: "Total precipitation"
+    units: "kg/m^2"
+    grib2_key: ":APCP:surface:"
+    level: "surface"
+
+  prmsl:
+    long_name: "Pressure reduced to mean sea level"
+    units: "Pa"
+    grib2_key: ":PRMSL:mean sea level:"
+    level: "mean sea level"
+
+  tcdc_atm:
+    long_name: "Total cloud cover"
+    units: "%"
+    grib2_key: ":TCDC:entire atmosphere"
+    level: "entire atmosphere"
+
 layers:
   temperature:
     display_name: "Temperature at 2m"
@@ -45,3 +63,24 @@ layers:
     derived:
       method: magnitude
       sources: [ugrd_10m, vgrd_10m]
+
+  precipitation:
+    display_name: "Total Precipitation"
+    variable: apcp_sfc
+    units: "kg/m^2"
+    palette: precipitation
+    value_range: [0.0, 100.0]
+
+  pressure:
+    display_name: "Mean Sea Level Pressure"
+    variable: prmsl
+    units: "Pa"
+    palette: pressure
+    value_range: [92000.0, 106000.0]
+
+  cloud_cover:
+    display_name: "Total Cloud Cover"
+    variable: tcdc_atm
+    units: "%"
+    palette: cloud_cover
+    value_range: [0.0, 100.0]

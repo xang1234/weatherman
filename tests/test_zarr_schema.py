@@ -151,8 +151,8 @@ class TestZarrSchema:
         bytes_per_element = 4  # float32
         total = n_times * n_vars * n_lat * n_lon * bytes_per_element
         mb = total / (1024 * 1024)
-        # ADR says ~508 MB uncompressed
-        assert 400 < mb < 600, f"Unexpected size estimate: {mb:.0f} MB"
+        # ~170 MB per variable uncompressed (41 steps × 721 × 1440 × 4 bytes)
+        assert 400 < mb < 1200, f"Unexpected size estimate: {mb:.0f} MB"
 
     def test_chunk_covers_grid_efficiently(self):
         """512x512 chunks on a 1440x721 grid should produce ~6 chunks/timestep."""

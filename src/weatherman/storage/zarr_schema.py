@@ -190,10 +190,28 @@ PHASE1_VARIABLES: dict[str, VariableDef] = {
         grib_key=":VGRD:10 m above ground:",
         level="10 m above ground",
     ),
+    "apcp_sfc": VariableDef(
+        name="apcp_sfc",
+        long_name="Total precipitation",
+        units="kg/m^2",
+        grib_key=":APCP:surface:",
+        level="surface",
+    ),
+    "prmsl": VariableDef(
+        name="prmsl",
+        long_name="Pressure reduced to mean sea level",
+        units="Pa",
+        grib_key=":PRMSL:mean sea level:",
+        level="mean sea level",
+    ),
+    "tcdc_atm": VariableDef(
+        name="tcdc_atm",
+        long_name="Total cloud cover",
+        units="%",
+        grib_key=":TCDC:entire atmosphere",
+        level="entire atmosphere",
+    ),
 }
-
-# Future phases will add wave, pressure, precipitation, etc.
-# Each new variable just needs a VariableDef entry.
 
 
 # ---------------------------------------------------------------------------

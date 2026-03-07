@@ -24,11 +24,14 @@ from weatherman.storage.paths import RunID
 
 logger = logging.getLogger(__name__)
 
-# GFS variables required for Phase 1
+# GFS variables required for Phase 1 + Phase 2 multi-layer expansion
 DEFAULT_SEARCH_PATTERNS: dict[str, str] = {
     "tmp_2m": ":TMP:2 m above ground:",
     "ugrd_10m": ":UGRD:10 m above ground:",
     "vgrd_10m": ":VGRD:10 m above ground:",
+    "apcp_sfc": ":APCP:surface:",
+    "prmsl": ":PRMSL:mean sea level:",
+    "tcdc_atm": ":TCDC:entire atmosphere",
 }
 
 # GFS cycles run every 6 hours
