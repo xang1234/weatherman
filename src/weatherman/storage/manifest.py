@@ -30,7 +30,7 @@ Schema layout (v1):
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -90,7 +90,7 @@ class UIManifest:
         # Ensure schema_version is first for readability when inspecting JSON
         return {"schema_version": d.pop("schema_version"), **d}
 
-    def to_json(self, indent: int = 2) -> str:
+    def to_json(self, indent: int | None = 2) -> str:
         """Serialize to a JSON string."""
         return json.dumps(self.to_dict(), indent=indent)
 

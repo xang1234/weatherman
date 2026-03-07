@@ -17,7 +17,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pystac
@@ -127,16 +127,6 @@ def build_stac_item(config: StacItemConfig, layout: StorageLayout) -> pystac.Ite
 
     # Temporal extent: start = run datetime, end = last forecast hour
     start_dt = run_dt
-    end_dt = datetime(
-        run_dt.year,
-        run_dt.month,
-        run_dt.day,
-        run_dt.hour,
-        tzinfo=timezone.utc,
-    )
-    # Add forecast hours as timedelta
-    from datetime import timedelta
-
     end_dt = run_dt + timedelta(hours=config.forecast_hours[1])
 
     item = pystac.Item(
