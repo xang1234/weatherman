@@ -442,6 +442,14 @@ class TestComputeEtag:
         etag = compute_etag("gfs", "20260306T00Z", 0.0, 0.0, None, None)
         assert etag.startswith('"') and etag.endswith('"')
 
+    def test_wrapped_lon_produces_same_etag(self):
+        """ETag should use wrapped longitude so 181 == -179."""
+        from weatherman.processing.geo import wrap_longitude
+
+        e1 = compute_etag("gfs", "20260306T00Z", wrap_longitude(181.0), 0.0, None, None)
+        e2 = compute_etag("gfs", "20260306T00Z", wrap_longitude(-179.0), 0.0, None, None)
+        assert e1 == e2
+
 
 class TestCachingHeaders:
     @pytest.fixture()
@@ -504,6 +512,37 @@ class TestCachingHeaders:
         )
         assert resp2.status_code == 304
         assert resp2.headers["ETag"] == etag
+        assert resp2.content == b""  # RFC 9110: 304 MUST NOT include a body
+
+    def test_304_on_multi_value_if_none_match(self, client):
+        """Multi-value If-None-Match header (RFC 9110 §13.1.2)."""
+        resp1 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+        )
+        etag = resp1.headers["ETag"]
+
+        resp2 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+            headers={"If-None-Match": f'"stale-etag", {etag}'},
+        )
+        assert resp2.status_code == 304
+
+    def test_304_on_weak_etag(self, client):
+        """Weak ETag prefix W/ should be ignored for GET (weak comparison)."""
+        resp1 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+        )
+        etag = resp1.headers["ETag"]
+
+        resp2 = client.get(
+            "/v1/edr/collections/gfs/instances/latest/position",
+            params={"coords": "POINT(0 45)", "datetime": "0"},
+            headers={"If-None-Match": f"W/{etag}"},
+        )
+        assert resp2.status_code == 304
 
     def test_200_on_mismatched_etag(self, client):
         resp = client.get(

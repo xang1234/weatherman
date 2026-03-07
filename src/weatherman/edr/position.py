@@ -134,6 +134,24 @@ def compute_etag(
     return f'"{digest}"'
 
 
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """Check if any ETag in an If-None-Match header matches.
+
+    Handles multi-value headers (``"a", "b"``) and weak ETags (``W/"a"``),
+    per RFC 9110 §8.8.3 (weak comparison for GET).
+    """
+    for token in if_none_match.split(","):
+        token = token.strip()
+        if token == "*":
+            return True
+        # Strip weak indicator prefix for weak comparison
+        if token.startswith("W/"):
+            token = token[2:]
+        if token == etag:
+            return True
+    return False
+
+
 # One year; published runs are immutable so this is safe.
 _IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 # "latest" resolves to a mutable alias — short cache + must-revalidate.
@@ -429,6 +447,7 @@ async def edr_position(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     resolved_run_id = svc.resolve_run_id(model, run_id)
+    wrapped_lon = wrap_longitude(lon)
 
     param_list: list[str] | None = None
     if parameter_name:
@@ -437,14 +456,14 @@ async def edr_position(
     etag = compute_etag(
         model=model,
         run_id=str(resolved_run_id),
-        lon=lon,
+        lon=wrapped_lon,
         lat=lat,
         parameter_names=param_list,
         datetime_filter=datetime_filter,
     )
 
     # 304 Not Modified if the client already has this exact response
-    if if_none_match and if_none_match.strip() == etag:
+    if if_none_match and _etag_matches(if_none_match, etag):
         return Response(
             status_code=304,
             headers={"ETag": etag},

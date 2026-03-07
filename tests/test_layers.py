@@ -174,6 +174,26 @@ class TestValidation:
         with pytest.raises(ValueError, match="must specify either"):
             load_registry(p)
 
+    def test_empty_string_variable_rejected(self, tmp_path: Path):
+        content = dedent("""\
+            variables:
+              a:
+                long_name: A
+                units: K
+                grib2_key: ":A:"
+            layers:
+              bad:
+                display_name: "Bad"
+                variable: ""
+                units: K
+                palette: x
+                value_range: [0, 1]
+        """)
+        p = tmp_path / "bad.yaml"
+        p.write_text(content)
+        with pytest.raises(ValueError, match="unknown variable"):
+            load_registry(p)
+
     def test_missing_file(self, tmp_path: Path):
         with pytest.raises(FileNotFoundError):
             load_registry(tmp_path / "nope.yaml")

@@ -228,17 +228,17 @@ def load_registry(config_path: Path | str) -> LayerRegistry:
         entry = _parse_layer(layer_id, l_raw)
 
         # Validate: must have exactly one of variable or derived
-        if entry.variable and entry.derived:
+        if entry.variable is not None and entry.derived is not None:
             raise ValueError(
                 f"Layer '{layer_id}' has both 'variable' and 'derived' — pick one"
             )
-        if not entry.variable and not entry.derived:
+        if entry.variable is None and entry.derived is None:
             raise ValueError(
                 f"Layer '{layer_id}' must specify either 'variable' or 'derived'"
             )
 
         # Validate references
-        if entry.variable and entry.variable not in variables:
+        if entry.variable is not None and entry.variable not in variables:
             raise ValueError(
                 f"Layer '{layer_id}' references unknown variable '{entry.variable}'"
             )
