@@ -186,6 +186,218 @@ def validate_geographic_crs(crs_wkt: str | None, epsg: int | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Anti-meridian handling
+# ---------------------------------------------------------------------------
+
+def wrap_longitude(lon: float) -> float:
+    """Wrap a longitude value into the canonical [-180, 180) range.
+
+    Handles arbitrary inputs (e.g. 190 -> -170, -200 -> 160).
+
+    Args:
+        lon: Longitude in degrees (any range).
+
+    Returns:
+        Longitude in [-180, 180).
+    """
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
+def crosses_antimeridian(lon_west: float, lon_east: float) -> bool:
+    """Detect whether a longitude range crosses the anti-meridian (±180°).
+
+    Uses the convention that *lon_west* is the western edge and
+    *lon_east* is the eastern edge of the query region.  A crossing
+    is indicated when the wrapped western edge is greater than the
+    wrapped eastern edge (i.e. the range wraps around ±180°).
+
+    Both inputs are wrapped to [-180, 180) before comparison, so
+    callers can pass raw user input (e.g. 170 to 190).
+
+    Args:
+        lon_west: Western longitude bound (degrees).
+        lon_east: Eastern longitude bound (degrees).
+
+    Returns:
+        True if the range crosses the anti-meridian.
+    """
+    return wrap_longitude(lon_west) > wrap_longitude(lon_east)
+
+
+@dataclass(frozen=True)
+class LonRange:
+    """A contiguous longitude range within [-180, 180)."""
+
+    west: float
+    east: float
+
+
+def split_antimeridian(
+    lon_west: float, lon_east: float,
+) -> tuple[LonRange, ...]:
+    """Split a longitude range into sub-ranges that don't cross ±180°.
+
+    If the range does not cross the anti-meridian a single ``LonRange``
+    is returned.  Otherwise two ranges are returned:
+    ``[lon_west, 180)`` and ``[-180, lon_east]``.
+
+    Both inputs are wrapped to [-180, 180) first.
+
+    Args:
+        lon_west: Western longitude bound (degrees).
+        lon_east: Eastern longitude bound (degrees).
+
+    Returns:
+        One or two ``LonRange`` objects covering the requested extent.
+    """
+    w = wrap_longitude(lon_west)
+    e = wrap_longitude(lon_east)
+
+    if w <= e:
+        return (LonRange(west=w, east=e),)
+
+    # Crosses anti-meridian: split into west-side and east-side ranges
+    return (
+        LonRange(west=w, east=180.0),   # western portion up to +180
+        LonRange(west=-180.0, east=e),   # eastern portion from -180
+    )
+
+
+def _lon_slice(lon_coords: np.ndarray, rng: LonRange) -> slice:
+    """Return an index slice into *lon_coords* for the given range.
+
+    Assumes *lon_coords* is sorted ascending in [-180, 180).
+    """
+    i_start = int(np.searchsorted(lon_coords, rng.west, side="left"))
+    i_stop = int(np.searchsorted(lon_coords, rng.east, side="right"))
+    return slice(i_start, i_stop)
+
+
+def extract_longitudes(
+    data: np.ndarray,
+    lon_coords: np.ndarray,
+    lon_west: float,
+    lon_east: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract a longitude sub-range from a grid, handling anti-meridian.
+
+    Splits the request when it crosses ±180° and concatenates the two
+    halves so the returned array has contiguous longitude coverage from
+    west to east.
+
+    Args:
+        data: Array with longitude as the last axis.
+        lon_coords: 1-D sorted longitude coordinate array in [-180, 180).
+        lon_west: Western longitude bound (degrees, any range).
+        lon_east: Eastern longitude bound (degrees, any range).
+
+    Returns:
+        Tuple of (sub_data, sub_lon) with matching longitude axes.
+    """
+    ranges = split_antimeridian(lon_west, lon_east)
+
+    if len(ranges) == 1:
+        s = _lon_slice(lon_coords, ranges[0])
+        return data[..., s], lon_coords[s]
+
+    # Two ranges — extract each and concatenate along the lon axis
+    parts_data = []
+    parts_lon = []
+    for rng in ranges:
+        s = _lon_slice(lon_coords, rng)
+        parts_data.append(data[..., s])
+        parts_lon.append(lon_coords[s])
+
+    return (
+        np.concatenate(parts_data, axis=-1),
+        np.concatenate(parts_lon, axis=0),
+    )
+
+
+def interpolate_at_point(
+    data: np.ndarray,
+    lat_coords: np.ndarray,
+    lon_coords: np.ndarray,
+    lat: float,
+    lon: float,
+) -> float:
+    """Bilinear interpolation on a regular grid, anti-meridian-safe.
+
+    For points near ±180°, the function wraps the grid so that the
+    four surrounding cells are always available, even when they straddle
+    the boundary.
+
+    Args:
+        data: 2-D array (lat, lon).
+        lat_coords: 1-D latitude coordinate (descending, north-to-south).
+        lon_coords: 1-D longitude coordinate (ascending, [-180, 180)).
+        lat: Query latitude (degrees).
+        lon: Query longitude (degrees, any range).
+
+    Returns:
+        Interpolated scalar value.
+
+    Raises:
+        ValueError: If the query point is outside the latitude range.
+    """
+    lon = wrap_longitude(lon)
+    n_lat, n_lon = data.shape
+
+    # --- latitude index (descending) ---
+    # lat_coords is descending, so flip for searchsorted
+    lat_desc = lat_coords  # already descending
+    if lat > lat_desc[0] or lat < lat_desc[-1]:
+        raise ValueError(
+            f"Latitude {lat} outside grid range [{lat_desc[-1]}, {lat_desc[0]}]"
+        )
+    # searchsorted needs ascending; use flipped view
+    lat_asc = lat_desc[::-1]
+    j_asc = int(np.searchsorted(lat_asc, lat, side="right")) - 1
+    j_asc = np.clip(j_asc, 0, n_lat - 2)
+    # Map back to descending index
+    j0 = n_lat - 2 - j_asc
+    j1 = j0 + 1
+
+    # --- longitude index (ascending, wrapping) ---
+    i0 = int(np.searchsorted(lon_coords, lon, side="right")) - 1
+
+    # Handle wraparound: if i0 is at the last index or before the first
+    if i0 < 0:
+        i0 = n_lon - 1
+    i1 = (i0 + 1) % n_lon
+
+    # Longitude fractions (handle wrap distance)
+    lon0 = lon_coords[i0]
+    lon1 = lon_coords[i1]
+    dx = lon1 - lon0
+    if dx <= 0:
+        # Wraparound: lon0 is near +180, lon1 is near -180
+        dx += 360.0
+    dlon = lon - lon0
+    if dlon < 0:
+        dlon += 360.0
+    fx = dlon / dx
+
+    # Latitude fractions (descending: j0 is higher lat than j1)
+    lat0 = lat_coords[j0]
+    lat1 = lat_coords[j1]
+    fy = (lat0 - lat) / (lat0 - lat1)
+
+    # Bilinear weights
+    v00 = float(data[j0, i0])
+    v01 = float(data[j0, i1])
+    v10 = float(data[j1, i0])
+    v11 = float(data[j1, i1])
+
+    return (
+        v00 * (1 - fx) * (1 - fy)
+        + v01 * fx * (1 - fy)
+        + v10 * (1 - fx) * fy
+        + v11 * fx * fy
+    )
+
+
+# ---------------------------------------------------------------------------
 # Combined normalization
 # ---------------------------------------------------------------------------
 
