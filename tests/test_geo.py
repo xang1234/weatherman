@@ -267,12 +267,29 @@ class TestCrossesAntimeridian:
     def test_zero_width_does_not_cross(self):
         assert not crosses_antimeridian(170, 170)
 
+    def test_east_boundary_180_does_not_cross(self):
+        # 170 to 180 is a narrow strip at the eastern edge, not a crossing.
+        # 180 wraps to -180, but should not be treated as a crossing.
+        assert not crosses_antimeridian(170, 180)
+        assert not crosses_antimeridian(0, 180)
+
+    def test_west_boundary_neg180_does_not_cross(self):
+        assert not crosses_antimeridian(-180, 0)
+        assert not crosses_antimeridian(-180, 170)
+
 
 class TestSplitAntimeridian:
     def test_no_split_needed(self):
         ranges = split_antimeridian(-10, 10)
         assert len(ranges) == 1
         assert ranges[0] == LonRange(west=-10.0, east=10.0)
+
+    def test_east_180_no_split(self):
+        # 170 to 180 should be a single range (180 wraps to -180)
+        ranges = split_antimeridian(170, 180)
+        assert len(ranges) == 1
+        assert ranges[0].west == pytest.approx(170.0)
+        assert ranges[0].east == pytest.approx(-180.0)
 
     def test_splits_crossing(self):
         ranges = split_antimeridian(170, -170)

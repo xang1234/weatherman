@@ -208,11 +208,14 @@ def crosses_antimeridian(lon_west: float, lon_east: float) -> bool:
 
     Uses the convention that *lon_west* is the western edge and
     *lon_east* is the eastern edge of the query region.  A crossing
-    is indicated when the wrapped western edge is greater than the
-    wrapped eastern edge (i.e. the range wraps around ±180°).
+    is indicated when the wrapped western edge is strictly greater than
+    the wrapped eastern edge (i.e. the range wraps around ±180°).
 
     Both inputs are wrapped to [-180, 180) before comparison, so
     callers can pass raw user input (e.g. 170 to 190).
+
+    Note: When both edges wrap to the same value (e.g. both 180 and -180
+    wrap to -180), the range is zero-width and does not cross.
 
     Args:
         lon_west: Western longitude bound (degrees).
@@ -221,7 +224,13 @@ def crosses_antimeridian(lon_west: float, lon_east: float) -> bool:
     Returns:
         True if the range crosses the anti-meridian.
     """
-    return wrap_longitude(lon_west) > wrap_longitude(lon_east)
+    w = wrap_longitude(lon_west)
+    e = wrap_longitude(lon_east)
+    # When east wraps to -180 (e.g. input was 180), treat it as the
+    # upper boundary of the canonical range to avoid false crossings.
+    if e == -180.0 and w != -180.0:
+        return False
+    return w > e
 
 
 @dataclass(frozen=True)
@@ -252,6 +261,11 @@ def split_antimeridian(
     """
     w = wrap_longitude(lon_west)
     e = wrap_longitude(lon_east)
+
+    # When east wraps to -180 (e.g. input was 180), treat it as the
+    # upper boundary — no crossing.
+    if e == -180.0 and w != -180.0:
+        return (LonRange(west=w, east=e),)
 
     if w <= e:
         return (LonRange(west=w, east=e),)

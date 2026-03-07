@@ -350,6 +350,7 @@ class TestEDRRoute:
 
         app = FastAPI()
         app.include_router(router)
+        shutdown_edr_service()  # clean up any leaked state from prior tests
         init_edr_service(catalog_loader, zarr_opener)
 
         yield TestClient(app)
