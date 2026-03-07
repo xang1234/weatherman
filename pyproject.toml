@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "weatherman"
+version = "0.1.0"
+description = "Maritime Weather & Dry Bulk AIS Platform"
+requires-python = ">=3.11"
+dependencies = [
+    "herbie-data>=2024.8",
+    "rasterio>=1.4.4",
+    "sqlalchemy>=2.0.48",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/weatherman"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
