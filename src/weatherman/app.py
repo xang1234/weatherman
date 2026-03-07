@@ -14,7 +14,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -34,6 +34,11 @@ from weatherman.storage.config import StorageConfig
 from weatherman.storage.manifest import UIManifest
 from weatherman.storage.object_store import LocalObjectStore, ObjectStore
 from weatherman.storage.paths import RunID, StorageLayout
+from weatherman.edr.position import (
+    init_edr_service,
+    shutdown_edr_service,
+)
+from weatherman.edr.position import router as edr_router
 from weatherman.tenancy import TenantMiddleware
 from weatherman.tiling.router import (
     CatalogLoader,
@@ -152,6 +157,23 @@ def _make_storage_config() -> StorageConfig:
     )
 
 
+def _make_zarr_opener(store: ObjectStore) -> Callable[[str], Any]:
+    """Create a Zarr opener that resolves paths through the object store.
+
+    For LocalObjectStore this means opening from the filesystem.
+    """
+    import zarr
+
+    def open_zarr(zarr_path: str) -> zarr.Group:
+        if isinstance(store, LocalObjectStore):
+            full_path = str(store._root / zarr_path)
+            return zarr.open_group(full_path, mode="r")
+        # Future: S3-backed zarr.open_group via fsspec
+        raise NotImplementedError("S3 Zarr opener not yet implemented")
+
+    return open_zarr
+
+
 def _make_catalog_loader(store: ObjectStore) -> CatalogLoader:
     """Create a catalog loader callable shared between API routes and TileService."""
 
@@ -180,6 +202,7 @@ def create_app(
         "TITILER_BASE_URL", "http://localhost:8080"
     )
     catalog_loader = _make_catalog_loader(store)
+    zarr_opener = _make_zarr_opener(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -187,10 +210,12 @@ def create_app(
         setup_logging(service_name="weatherman")
         setup_tracing(service_name="weatherman")
         init_tile_service(storage_config, titiler_url, catalog_loader)
+        init_edr_service(catalog_loader, zarr_opener)
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
         # Shutdown
+        shutdown_edr_service()
         await shutdown_tile_service()
         shutdown_tracing()
         clear_checks()
@@ -217,6 +242,7 @@ def create_app(
     app.include_router(_make_api_router(store))
     app.include_router(health_router)
     app.include_router(tile_router)
+    app.include_router(edr_router)
 
     # Metrics endpoint (plain Starlette route, not a router)
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])
