@@ -13,6 +13,7 @@ See ADR: docs/adr/001-zarr-dataset-schema.md
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -60,7 +61,9 @@ def make_lat_array(grid: GridResolution) -> np.ndarray:
 def make_lon_array(grid: GridResolution) -> np.ndarray:
     """Generate longitude coordinate array in [-180, 180) convention."""
     spec = _GRID_SPECS[grid]
-    return np.linspace(-180.0, 180.0 - spec["step"], spec["lon_count"], dtype=np.float32)
+    # arange is semantically correct for half-open intervals with uniform step.
+    # Generate in float64 to avoid step-accumulation errors, then downcast.
+    return np.arange(-180.0, 180.0, spec["step"], dtype=np.float64).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +143,25 @@ class VariableDef:
     chunks: ChunkSpec = field(default_factory=ChunkSpec)
     compressor: CompressionCodec = field(default_factory=CompressionCodec)
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VariableDef):
+            return NotImplemented
+        # NaN-safe: math.isnan handles the NaN != NaN problem
+        for f in self.__dataclass_fields__:
+            a, b = getattr(self, f), getattr(other, f)
+            if isinstance(a, float) and isinstance(b, float):
+                if math.isnan(a) and math.isnan(b):
+                    continue
+            if a != b:
+                return False
+        return True
+
+    def __hash__(self) -> int:
+        # Replace NaN with a sentinel for consistent hashing
+        fv = 0 if math.isnan(self.fill_value) else self.fill_value
+        return hash((self.name, self.long_name, self.units, self.grib_key,
+                      self.dtype, fv, self.level, self.chunks, self.compressor))
+
     @property
     def dims(self) -> tuple[str, ...]:
         return ("time", "lat", "lon")
@@ -193,7 +215,7 @@ class ZarrSchema:
     """
 
     grid: GridResolution
-    forecast_hours: list[int]
+    forecast_hours: tuple[int, ...]
     variables: dict[str, VariableDef]
     global_attrs: dict[str, str] = field(default_factory=dict)
 
@@ -217,7 +239,7 @@ class ZarrSchema:
 # The default schema used by the GRIB2-to-Zarr pipeline
 GFS_SCHEMA = ZarrSchema(
     grid=GridResolution.GFS_025,
-    forecast_hours=list(range(0, 121, 3)),  # 0..120 by 3h = 41 steps
+    forecast_hours=tuple(range(0, 121, 3)),  # 0..120 by 3h = 41 steps
     variables=PHASE1_VARIABLES,
     global_attrs={
         "Conventions": "CF-1.8",

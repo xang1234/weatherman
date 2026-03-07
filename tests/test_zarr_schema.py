@@ -102,6 +102,13 @@ class TestVariableDef:
         assert np.isnan(v.fill_value)
         assert v.level is None
 
+    def test_equality_with_nan_fill_value(self):
+        """Two VariableDefs with NaN fill_value should compare equal."""
+        a = VariableDef(name="x", long_name="X", units="K", grib_key=":X:")
+        b = VariableDef(name="x", long_name="X", units="K", grib_key=":X:")
+        assert a == b
+        assert hash(a) == hash(b)
+
     def test_grib_keys_match_gfs_downloader(self):
         """Ensure schema GRIB keys match the GFS downloader patterns."""
         from weatherman.ingest.gfs import DEFAULT_SEARCH_PATTERNS
