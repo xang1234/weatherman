@@ -1,0 +1,47 @@
+# Layer definitions for the weatherman platform.
+#
+# Adding a new weather layer requires ONLY a new entry here.
+# No code changes needed (design principle #5).
+#
+# Structure:
+#   variables: Source data extracted from GRIB2 into Zarr
+#   layers:    Display layers rendered as COG tiles on the map
+#
+# Most layers map 1:1 to a variable, but derived layers (e.g. wind_speed)
+# combine multiple source variables via a computation method.
+
+variables:
+  tmp_2m:
+    long_name: "Temperature at 2m above ground"
+    units: "K"
+    grib2_key: ":TMP:2 m above ground:"
+    level: "2 m above ground"
+
+  ugrd_10m:
+    long_name: "U-component of wind at 10m above ground"
+    units: "m/s"
+    grib2_key: ":UGRD:10 m above ground:"
+    level: "10 m above ground"
+
+  vgrd_10m:
+    long_name: "V-component of wind at 10m above ground"
+    units: "m/s"
+    grib2_key: ":VGRD:10 m above ground:"
+    level: "10 m above ground"
+
+layers:
+  temperature:
+    display_name: "Temperature at 2m"
+    variable: tmp_2m
+    units: "K"
+    palette: temperature
+    value_range: [220.0, 330.0]
+
+  wind_speed:
+    display_name: "Wind Speed at 10m"
+    units: "m/s"
+    palette: wind_speed
+    value_range: [0.0, 50.0]
+    derived:
+      method: magnitude
+      sources: [ugrd_10m, vgrd_10m]
