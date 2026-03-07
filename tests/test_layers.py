@@ -9,6 +9,7 @@ import pytest
 
 from weatherman.layers import (
     DerivedSpec,
+    HerbieSource,
     LayerRegistry,
     load_registry,
     get_layer_registry,
@@ -243,8 +244,6 @@ class TestRegistryAccessors:
 class TestDownloadSources:
     def test_groups_by_herbie_source(self):
         """Bundled config groups atmo and wave variables by source."""
-        from weatherman.layers import HerbieSource
-
         reg = get_layer_registry()
         sources = reg.download_sources()
 
