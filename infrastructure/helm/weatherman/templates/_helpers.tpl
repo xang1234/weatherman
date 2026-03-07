@@ -13,7 +13,6 @@ Selector labels for a specific component.
 */}}
 {{- define "weatherman.selectorLabels" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}
-app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end }}
 

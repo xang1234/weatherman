@@ -43,7 +43,7 @@ tileService:
       # users from hitting a pod that can't serve tiles.
       initialDelaySeconds: 5
       periodSeconds: 5
-      timeoutSeconds: 5
+      timeoutSeconds: 3
       failureThreshold: 2
       successThreshold: 1
     startup:
@@ -92,7 +92,7 @@ catalogService:
       # service since catalog reads are less latency-sensitive.
       initialDelaySeconds: 5
       periodSeconds: 5
-      timeoutSeconds: 5
+      timeoutSeconds: 3
       failureThreshold: 3
       successThreshold: 1
     startup:
@@ -137,7 +137,7 @@ ingestionService:
       # 15s to remove (5s * 3 failures).
       initialDelaySeconds: 10
       periodSeconds: 5
-      timeoutSeconds: 5
+      timeoutSeconds: 3
       failureThreshold: 3
       successThreshold: 1
     startup:
