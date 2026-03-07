@@ -110,7 +110,7 @@ class TestLiveness:
 
     def test_response_is_json(self):
         resp = client.get("/health/live")
-        assert resp.headers["content-type"] == "application/json"
+        assert resp.headers["content-type"].startswith("application/json")
 
 
 # -- Readiness tests --

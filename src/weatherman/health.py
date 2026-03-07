@@ -42,7 +42,6 @@ class DependencyChecker(Protocol):
 
 _CHECK_CACHE_TTL_S = 5.0
 _PER_CHECK_TIMEOUT_S = 2.0
-_TOTAL_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -64,6 +63,15 @@ class ReadinessState:
 
 
 _cached_state: ReadinessState | None = None
+_cache_lock: asyncio.Lock | None = None
+
+
+def _get_cache_lock() -> asyncio.Lock:
+    """Lazily create the cache lock (must be created within a running event loop)."""
+    global _cache_lock
+    if _cache_lock is None:
+        _cache_lock = asyncio.Lock()
+    return _cache_lock
 
 
 async def _run_single_check(checker: DependencyChecker) -> CheckResult:
@@ -80,7 +88,9 @@ async def _run_single_check(checker: DependencyChecker) -> CheckResult:
             latency_ms=round(elapsed_ms, 2),
             critical=checker.critical,
         )
-    except (TimeoutError, Exception):
+    except asyncio.CancelledError:
+        raise
+    except Exception:
         elapsed_ms = (time.monotonic() - start) * 1000
         return CheckResult(
             name=checker.name,
@@ -149,9 +159,10 @@ def register_check(checker: DependencyChecker) -> None:
 
 def clear_checks() -> None:
     """Remove all registered checkers (for testing)."""
-    global _cached_state
+    global _cached_state, _cache_lock
     _checkers.clear()
     _cached_state = None
+    _cache_lock = None
 
 
 @router.get("/live", summary="Liveness probe")
@@ -175,8 +186,13 @@ async def readiness() -> JSONResponse:
     if _cached_state is not None and (now - _cached_state._cached_at) < _CHECK_CACHE_TTL_S:
         state = _cached_state
     else:
-        state = await _evaluate_readiness(_checkers)
-        _cached_state = state
+        lock = _get_cache_lock()
+        async with lock:
+            # Double-check after acquiring lock — another coroutine may have refreshed
+            now = time.monotonic()
+            if _cached_state is None or (now - _cached_state._cached_at) >= _CHECK_CACHE_TTL_S:
+                _cached_state = await _evaluate_readiness(_checkers)
+            state = _cached_state
 
     body = {
         "status": state.status,
