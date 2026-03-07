@@ -11,10 +11,8 @@ export function useManifest({ model, runId }: UseManifestOptions): UIManifest | 
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 
   useEffect(() => {
-    if (!runId) {
-      setManifest(null)
-      return
-    }
+    setManifest(null)
+    if (!runId) return
 
     const controller = new AbortController()
 
