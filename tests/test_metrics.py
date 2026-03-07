@@ -12,7 +12,9 @@ from starlette.testclient import TestClient
 
 from weatherman.observability.metrics import (
     ACTIVE_CONNECTIONS,
+    DATA_LAST_PUBLISH,
     PIPELINE_ERRORS,
+    PIPELINE_RUNS,
     PIPELINE_STEP_DURATION,
     REQUEST_COUNT,
     REQUEST_LATENCY,
@@ -36,7 +38,8 @@ def _reset_metrics():
     so tests remain independent.
     """
     # Collect all label-value combos and reset
-    for collector in [REQUEST_LATENCY, REQUEST_COUNT, PIPELINE_STEP_DURATION, PIPELINE_ERRORS]:
+    for collector in [REQUEST_LATENCY, REQUEST_COUNT, PIPELINE_STEP_DURATION,
+                      PIPELINE_ERRORS, DATA_LAST_PUBLISH, PIPELINE_RUNS]:
         # _metrics is a dict of child metrics keyed by label values
         if hasattr(collector, "_metrics"):
             collector._metrics.clear()
@@ -61,7 +64,7 @@ def _make_app() -> Starlette:
             Route("/", homepage),
             Route("/items/{item_id}", item),
             Route("/error", error),
-            Route("/metrics", lambda r: metrics_endpoint()),
+            Route("/metrics", metrics_endpoint),
         ],
     )
     app.add_middleware(PrometheusMiddleware)
@@ -241,3 +244,32 @@ class TestBucketBoundaries:
         buckets = list(PIPELINE_STEP_DURATION._upper_bounds)
         expected = [1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, float("inf")]
         assert buckets == expected
+
+
+# ---------------------------------------------------------------------------
+# Data freshness & pipeline run metrics
+# ---------------------------------------------------------------------------
+
+class TestDataFreshnessMetrics:
+    def test_data_last_publish_records_timestamp(self):
+        import time
+        now = time.time()
+        DATA_LAST_PUBLISH.labels(model="gfs").set(now)
+        recorded = DATA_LAST_PUBLISH.labels(model="gfs")._value.get()
+        assert recorded == pytest.approx(now)
+
+    def test_data_last_publish_per_model(self):
+        DATA_LAST_PUBLISH.labels(model="gfs").set(100.0)
+        DATA_LAST_PUBLISH.labels(model="ecmwf").set(200.0)
+        assert DATA_LAST_PUBLISH.labels(model="gfs")._value.get() == 100.0
+        assert DATA_LAST_PUBLISH.labels(model="ecmwf")._value.get() == 200.0
+
+    def test_pipeline_runs_counter(self):
+        PIPELINE_RUNS.labels(model="gfs", status="success").inc()
+        PIPELINE_RUNS.labels(model="gfs", status="success").inc()
+        PIPELINE_RUNS.labels(model="gfs", status="failure").inc()
+
+        success = PIPELINE_RUNS.labels(model="gfs", status="success")._value.get()
+        failure = PIPELINE_RUNS.labels(model="gfs", status="failure")._value.get()
+        assert success == 2
+        assert failure == 1

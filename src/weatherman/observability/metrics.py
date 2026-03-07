@@ -75,6 +75,22 @@ PIPELINE_ERRORS = Counter(
     labelnames=["step"],
 )
 
+# ---------------------------------------------------------------------------
+# Data freshness metrics
+# ---------------------------------------------------------------------------
+
+DATA_LAST_PUBLISH = Gauge(
+    "data_last_publish_timestamp_seconds",
+    "Unix timestamp of the last successful publish",
+    labelnames=["model"],
+)
+
+PIPELINE_RUNS = Counter(
+    "pipeline_runs_total",
+    "Total pipeline runs by model and outcome",
+    labelnames=["model", "status"],
+)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline timing helper
@@ -203,7 +219,7 @@ class PrometheusMiddleware:
 # /metrics endpoint
 # ---------------------------------------------------------------------------
 
-def metrics_endpoint() -> Response:
+def metrics_endpoint(request: Request) -> Response:
     """FastAPI/Starlette route handler that serves Prometheus metrics."""
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
