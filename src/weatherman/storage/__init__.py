@@ -15,6 +15,10 @@ from weatherman.storage.stac import (
     QCResult, RunProvenance, COGAsset, StacItemConfig,
     build_stac_item, build_stac_item_json,
 )
+from weatherman.storage.manifest import (
+    ValueRange, LayerConfig, UIManifest, ManifestConfig,
+    build_manifest, build_manifest_json, SCHEMA_VERSION,
+)
 
 __all__ = [
     "RunID", "StorageLayout", "StorageConfig",
@@ -27,4 +31,6 @@ __all__ = [
     "publish_run", "PublishError", "PublishVerificationError",
     "QCResult", "RunProvenance", "COGAsset", "StacItemConfig",
     "build_stac_item", "build_stac_item_json",
+    "ValueRange", "LayerConfig", "UIManifest", "ManifestConfig",
+    "build_manifest", "build_manifest_json", "SCHEMA_VERSION",
 ]
