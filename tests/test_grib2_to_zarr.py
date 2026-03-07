@@ -10,7 +10,7 @@ import pytest
 import xarray as xr
 import zarr
 
-from weatherman.processing.geo import normalize_longitude
+from weatherman.processing.geo import normalize_grid, normalize_longitude
 from weatherman.processing.grib2_to_zarr import (
     ConversionResult,
     convert_grib2_to_zarr,
@@ -229,11 +229,14 @@ class TestIngestGrib2File:
         grib_file = tmp_path / "test.grib2"
         grib_file.touch()
 
-        # Build expected data from a known dataset
+        # Build expected data using the same normalization path as production
         ref_ds = _make_fake_grib_dataset(5, 8, lon_convention="0_360")
-        expected_data = normalize_longitude(
-            ref_ds["t2m"].values, ref_ds.coords["longitude"].values
+        expected_result = normalize_grid(
+            ref_ds["t2m"].values,
+            ref_ds.coords["latitude"].values,
+            ref_ds.coords["longitude"].values,
         )
+        expected_data = expected_result.data
 
         # Mock returns this exact dataset (as a context manager)
         from unittest.mock import MagicMock
@@ -257,7 +260,7 @@ class TestIngestGrib2File:
         grib_file.touch()
 
         with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
-                    side_effect=_mock_open_dataset(5, 8, "-180_180")):
+                    side_effect=_mock_open_dataset(5, 8, "neg180_180")):
             # Write to forecast hour 6 (time index 2)
             ingest_grib2_file(store, small_schema, "tmp_2m", 6, grib_file)
 
@@ -269,19 +272,21 @@ class TestIngestGrib2File:
         assert not np.any(np.isnan(root["tmp_2m"][2, :, :]))
 
     def test_writes_provenance_to_store(self, tmp_path, small_schema):
-        """Provenance attributes are written on first ingest."""
-        store = init_zarr_store(small_schema, tmp_path / "test.zarr")
+        """Provenance attributes are written at init time."""
+        from weatherman.processing.geo import GridProvenance
 
-        grib_file = tmp_path / "test.grib2"
-        grib_file.touch()
-
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
-                    side_effect=_mock_open_dataset(5, 8, "0_360")):
-            ingest_grib2_file(store, small_schema, "tmp_2m", 0, grib_file)
+        prov = GridProvenance(
+            source_crs="EPSG:4326",
+            source_lon_convention="0_360",
+            source_lat_order="north_to_south",
+            source_grid_resolution=45.0,
+            source_grid_shape=(5, 8),
+            steps_applied=("lon_roll_0_360_to_neg180_180",),
+        )
+        store = init_zarr_store(small_schema, tmp_path / "test.zarr", provenance=prov)
 
         root = zarr.open_group(str(store), mode="r")
-        assert "provenance:source_crs" in root.attrs
-        assert "provenance:source_lon_convention" in root.attrs
+        assert root.attrs["provenance:source_crs"] == "EPSG:4326"
         assert root.attrs["provenance:source_lon_convention"] == "0_360"
         assert "lon_roll" in root.attrs["provenance:normalization_steps"][0]
 

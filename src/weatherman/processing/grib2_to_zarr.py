@@ -31,7 +31,6 @@ from zarr.codecs import BloscCodec, BytesCodec
 from weatherman.processing.geo import (
     GridProvenance,
     normalize_grid,
-    validate_geographic_crs,
 )
 from weatherman.storage.zarr_schema import VariableDef, ZarrSchema
 
@@ -53,7 +52,11 @@ def _blosc_codec(var_def: VariableDef) -> BloscCodec:
 # Store initialization
 # ---------------------------------------------------------------------------
 
-def init_zarr_store(schema: ZarrSchema, store_path: str | Path) -> Path:
+def init_zarr_store(
+    schema: ZarrSchema,
+    store_path: str | Path,
+    provenance: GridProvenance | None = None,
+) -> Path:
     """Create an empty Zarr store with coordinate arrays and data variables.
 
     The store is pre-allocated: data variable arrays are created at full
@@ -63,6 +66,9 @@ def init_zarr_store(schema: ZarrSchema, store_path: str | Path) -> Path:
     Args:
         schema: The dataset schema defining dimensions, variables, and codecs.
         store_path: Local filesystem path for the Zarr store.
+        provenance: Optional grid provenance metadata to write as
+            global attributes. Should be provided when the source
+            grid info is known at init time.
 
     Returns:
         The resolved store path.
@@ -74,6 +80,10 @@ def init_zarr_store(schema: ZarrSchema, store_path: str | Path) -> Path:
 
     # Write global attributes
     root.attrs.update(schema.global_attrs)
+
+    # Write provenance at init time (single-writer, no race)
+    if provenance is not None:
+        root.attrs.update(provenance.to_attrs())
 
     # -- Coordinate arrays (small, written once, no chunking needed) --
     # Zarr v3 forbids data + dtype together; data's dtype is inferred.
@@ -199,19 +209,24 @@ def ingest_grib2_file(
         grib_var = data_vars[0]
         data = ds[grib_var].values.astype(np.float32)
 
+        # cfgrib can include singleton dimensions (step, valid_time, etc.)
+        if data.ndim > 2:
+            data = data.squeeze()
+
         # Extract source coordinates
         lon_dim = "longitude" if "longitude" in ds.coords else "lon"
         lat_dim = "latitude" if "latitude" in ds.coords else "lat"
         src_lon = ds.coords[lon_dim].values
         src_lat = ds.coords[lat_dim].values
 
-        # Extract CRS info for provenance
-        crs_wkt = ds.attrs.get("GRIB_gridType", None)
-        # cfgrib doesn't expose EPSG directly; GFS is always geographic
-        source_crs = validate_geographic_crs(
-            crs_wkt=crs_wkt if isinstance(crs_wkt, str) else None,
-            epsg=None,
-        )
+        # Validate GRIB grid type — must be regular lat/lon
+        grid_type = ds.attrs.get("GRIB_gridType", "")
+        if grid_type and grid_type not in ("regular_ll", "reduced_ll", ""):
+            raise ValueError(
+                f"Unexpected GRIB grid type '{grid_type}' — "
+                f"only regular_ll grids are supported without reprojection"
+            )
+        source_crs = "EPSG:4326"
 
     # Normalize longitude and latitude conventions, capture provenance
     result = normalize_grid(
@@ -230,13 +245,9 @@ def ingest_grib2_file(
             f"got {data.shape}, expected ({expected_lat}, {expected_lon})"
         )
 
-    # Write into pre-allocated Zarr array and record provenance
+    # Write into pre-allocated Zarr array
     root = zarr.open_group(str(store_path), mode="r+")
     root[variable_name][time_idx, :, :] = data
-
-    # Write provenance on first ingest (all variables share the same grid)
-    if "provenance:source_crs" not in root.attrs:
-        root.attrs.update(result.provenance.to_attrs())
 
     logger.debug(
         "Ingested %s fxx=%03d into %s [time_idx=%d]",
@@ -310,8 +321,19 @@ def convert_grib2_to_zarr(
     store_path = Path(store_path)
     result = ConversionResult(store_path=store_path)
 
-    # Step 1: Initialize store
-    init_zarr_store(schema, store_path)
+    # Build default provenance — GFS source grid is [0, 360) north-to-south.
+    # The normalization steps will be applied during ingestion.
+    default_provenance = GridProvenance(
+        source_crs="EPSG:4326",
+        source_lon_convention="0_360",
+        source_lat_order="north_to_south",
+        source_grid_resolution=schema.grid.step,
+        source_grid_shape=(schema.grid.lat_count, schema.grid.lon_count),
+        steps_applied=("lon_roll_0_360_to_neg180_180",),
+    )
+
+    # Step 1: Initialize store (provenance written at init, no race)
+    init_zarr_store(schema, store_path, provenance=default_provenance)
 
     # Step 2: Ingest each variable/forecast-hour pair
     hours_seen: set[int] = set()

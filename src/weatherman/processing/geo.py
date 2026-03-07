@@ -75,9 +75,11 @@ def normalize_longitude(data: np.ndarray, src_lon: np.ndarray) -> np.ndarray:
         Rolled data array (same shape, new longitude order).
     """
     if src_lon[0] >= 0 and src_lon[-1] > 180:
-        # For a global [0, 360) grid, the halfway point is always at 180 degrees.
-        # Using len//2 avoids float-precision issues with searchsorted.
-        roll_idx = len(src_lon) // 2
+        # Find the index where 180° falls in the source grid.
+        # 180.0 is exactly representable in IEEE 754, and weather grids
+        # use clean fractional steps (0.25°, 0.5°, 1°), so searchsorted
+        # is reliable here.
+        roll_idx = int(np.searchsorted(src_lon, 180.0))
         return np.roll(data, -roll_idx, axis=-1)
     return data
 
