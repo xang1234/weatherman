@@ -10,9 +10,9 @@ import pytest
 import xarray as xr
 import zarr
 
+from weatherman.processing.geo import normalize_longitude
 from weatherman.processing.grib2_to_zarr import (
     ConversionResult,
-    _normalize_longitude,
     convert_grib2_to_zarr,
     finalize_store,
     ingest_grib2_file,
@@ -181,7 +181,7 @@ class TestInitZarrStore:
 
 
 # ---------------------------------------------------------------------------
-# _normalize_longitude tests
+# normalize_longitude tests
 # ---------------------------------------------------------------------------
 
 class TestNormalizeLongitude:
@@ -191,7 +191,7 @@ class TestNormalizeLongitude:
         # Data: values 0..7 so we can track the roll
         data = np.arange(n_lon, dtype=np.float32).reshape(1, n_lon)
 
-        rolled = _normalize_longitude(data, src_lon)
+        rolled = normalize_longitude(data, src_lon)
 
         # 180° is at index 4 (0, 45, 90, 135, 180, 225, 270, 315)
         # After roll: [180, 225, 270, 315, 0, 45, 90, 135] → [4, 5, 6, 7, 0, 1, 2, 3]
@@ -203,7 +203,7 @@ class TestNormalizeLongitude:
         src_lon = np.linspace(-180, 180 - (360 / n_lon), n_lon)
         data = np.arange(n_lon, dtype=np.float32).reshape(1, n_lon)
 
-        result = _normalize_longitude(data, src_lon)
+        result = normalize_longitude(data, src_lon)
         np.testing.assert_array_equal(result, data)
 
     def test_handles_2d_data(self):
@@ -211,7 +211,7 @@ class TestNormalizeLongitude:
         src_lon = np.linspace(0, 360 - (360 / n_lon), n_lon)
         data = np.arange(n_lat * n_lon, dtype=np.float32).reshape(n_lat, n_lon)
 
-        rolled = _normalize_longitude(data, src_lon)
+        rolled = normalize_longitude(data, src_lon)
         assert rolled.shape == data.shape
         # Each row should be rolled the same way
         for row in range(n_lat):
@@ -231,7 +231,7 @@ class TestIngestGrib2File:
 
         # Build expected data from a known dataset
         ref_ds = _make_fake_grib_dataset(5, 8, lon_convention="0_360")
-        expected_data = _normalize_longitude(
+        expected_data = normalize_longitude(
             ref_ds["t2m"].values, ref_ds.coords["longitude"].values
         )
 
@@ -267,6 +267,23 @@ class TestIngestGrib2File:
         assert np.all(np.isnan(root["tmp_2m"][1, :, :]))
         # Time index 2 should have data
         assert not np.any(np.isnan(root["tmp_2m"][2, :, :]))
+
+    def test_writes_provenance_to_store(self, tmp_path, small_schema):
+        """Provenance attributes are written on first ingest."""
+        store = init_zarr_store(small_schema, tmp_path / "test.zarr")
+
+        grib_file = tmp_path / "test.grib2"
+        grib_file.touch()
+
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
+                    side_effect=_mock_open_dataset(5, 8, "0_360")):
+            ingest_grib2_file(store, small_schema, "tmp_2m", 0, grib_file)
+
+        root = zarr.open_group(str(store), mode="r")
+        assert "provenance:source_crs" in root.attrs
+        assert "provenance:source_lon_convention" in root.attrs
+        assert root.attrs["provenance:source_lon_convention"] == "0_360"
+        assert "lon_roll" in root.attrs["provenance:normalization_steps"][0]
 
     def test_rejects_unknown_variable(self, tmp_path, small_schema):
         store = init_zarr_store(small_schema, tmp_path / "test.zarr")

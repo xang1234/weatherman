@@ -28,6 +28,11 @@ import xarray as xr
 import zarr
 from zarr.codecs import BloscCodec, BytesCodec
 
+from weatherman.processing.geo import (
+    GridProvenance,
+    normalize_grid,
+    validate_geographic_crs,
+)
 from weatherman.storage.zarr_schema import VariableDef, ZarrSchema
 
 logger = logging.getLogger(__name__)
@@ -137,29 +142,6 @@ def init_zarr_store(schema: ZarrSchema, store_path: str | Path) -> Path:
 # GRIB2 ingestion (one file at a time)
 # ---------------------------------------------------------------------------
 
-def _normalize_longitude(data: np.ndarray, src_lon: np.ndarray) -> np.ndarray:
-    """Roll data from [0, 360) longitude convention to [-180, 180).
-
-    GFS GRIB2 files use longitude [0, 360). Our canonical store uses
-    [-180, 180). This function detects the convention and rolls the
-    data along the longitude axis so that the first column corresponds
-    to -180°.
-
-    Args:
-        data: 2-D array (lat, lon) of field values.
-        src_lon: 1-D longitude coordinate from the source file.
-
-    Returns:
-        Rolled data array (same shape, new longitude order).
-    """
-    if src_lon[0] >= 0 and src_lon[-1] > 180:
-        # For a global [0, 360) grid, the halfway point is always at 180°.
-        # Using len//2 avoids float-precision issues with searchsorted.
-        roll_idx = len(src_lon) // 2
-        return np.roll(data, -roll_idx, axis=-1)
-    return data
-
-
 def ingest_grib2_file(
     store_path: str | Path,
     schema: ZarrSchema,
@@ -217,12 +199,27 @@ def ingest_grib2_file(
         grib_var = data_vars[0]
         data = ds[grib_var].values.astype(np.float32)
 
-        # Get source longitude for normalization
+        # Extract source coordinates
         lon_dim = "longitude" if "longitude" in ds.coords else "lon"
+        lat_dim = "latitude" if "latitude" in ds.coords else "lat"
         src_lon = ds.coords[lon_dim].values
+        src_lat = ds.coords[lat_dim].values
 
-    # Normalize longitude from [0, 360) → [-180, 180) if needed
-    data = _normalize_longitude(data, src_lon)
+        # Extract CRS info for provenance
+        crs_wkt = ds.attrs.get("GRIB_gridType", None)
+        # cfgrib doesn't expose EPSG directly; GFS is always geographic
+        source_crs = validate_geographic_crs(
+            crs_wkt=crs_wkt if isinstance(crs_wkt, str) else None,
+            epsg=None,
+        )
+
+    # Normalize longitude and latitude conventions, capture provenance
+    result = normalize_grid(
+        data, src_lat, src_lon,
+        source_crs=source_crs,
+        grid_resolution=schema.grid.step,
+    )
+    data = result.data
 
     # Validate shape against schema
     expected_lat = schema.grid.lat_count
@@ -233,9 +230,13 @@ def ingest_grib2_file(
             f"got {data.shape}, expected ({expected_lat}, {expected_lon})"
         )
 
-    # Write into pre-allocated Zarr array
+    # Write into pre-allocated Zarr array and record provenance
     root = zarr.open_group(str(store_path), mode="r+")
     root[variable_name][time_idx, :, :] = data
+
+    # Write provenance on first ingest (all variables share the same grid)
+    if "provenance:source_crs" not in root.attrs:
+        root.attrs.update(result.provenance.to_attrs())
 
     logger.debug(
         "Ingested %s fxx=%03d into %s [time_idx=%d]",
