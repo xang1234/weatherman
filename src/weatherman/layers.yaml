@@ -44,7 +44,7 @@ variables:
   tcdc_atm:
     long_name: "Total cloud cover"
     units: "%"
-    grib2_key: ":TCDC:entire atmosphere"
+    grib2_key: ":TCDC:entire atmosphere:(?!.*ave)"
     level: "entire atmosphere"
 
 layers:
@@ -69,7 +69,7 @@ layers:
     variable: apcp_sfc
     units: "kg/m^2"
     palette: precipitation
-    value_range: [0.0, 100.0]
+    value_range: [0.0, 250.0]
 
   pressure:
     display_name: "Mean Sea Level Pressure"

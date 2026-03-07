@@ -31,7 +31,7 @@ DEFAULT_SEARCH_PATTERNS: dict[str, str] = {
     "vgrd_10m": ":VGRD:10 m above ground:",
     "apcp_sfc": ":APCP:surface:",
     "prmsl": ":PRMSL:mean sea level:",
-    "tcdc_atm": ":TCDC:entire atmosphere",
+    "tcdc_atm": ":TCDC:entire atmosphere:(?!.*ave)",
 }
 
 # GFS cycles run every 6 hours

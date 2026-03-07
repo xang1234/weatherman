@@ -85,6 +85,9 @@ class TestVariableDef:
         assert "tmp_2m" in PHASE1_VARIABLES
         assert "ugrd_10m" in PHASE1_VARIABLES
         assert "vgrd_10m" in PHASE1_VARIABLES
+        assert "apcp_sfc" in PHASE1_VARIABLES
+        assert "prmsl" in PHASE1_VARIABLES
+        assert "tcdc_atm" in PHASE1_VARIABLES
 
     def test_variable_dims(self):
         v = VariableDef(

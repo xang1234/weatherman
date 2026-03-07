@@ -208,7 +208,7 @@ PHASE1_VARIABLES: dict[str, VariableDef] = {
         name="tcdc_atm",
         long_name="Total cloud cover",
         units="%",
-        grib_key=":TCDC:entire atmosphere",
+        grib_key=":TCDC:entire atmosphere:(?!.*ave)",
         level="entire atmosphere",
     ),
 }
