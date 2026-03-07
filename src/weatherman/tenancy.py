@@ -18,7 +18,7 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from weatherman.observability.logging import bind_context, clear_context
+from weatherman.observability.logging import bind_context, unbind_context
 
 DEFAULT_TENANT = "default"
 
@@ -49,7 +49,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             return response
         finally:
-            clear_context()
+            unbind_context("tenant_id")
 
     @staticmethod
     def _extract_tenant_id(request: Request) -> str:
