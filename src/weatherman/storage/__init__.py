@@ -11,6 +11,10 @@ from weatherman.storage.locks import (
     PublishLock, FilePublishLock, NullPublishLock, PublishLockTimeout,
 )
 from weatherman.storage.publish import publish_run, PublishError, PublishVerificationError
+from weatherman.storage.stac import (
+    QCResult, RunProvenance, COGAsset, StacItemConfig,
+    build_stac_item, build_stac_item_json,
+)
 
 __all__ = [
     "RunID", "StorageLayout", "StorageConfig",
@@ -21,4 +25,6 @@ __all__ = [
     "ObjectStore", "LocalObjectStore",
     "PublishLock", "FilePublishLock", "NullPublishLock", "PublishLockTimeout",
     "publish_run", "PublishError", "PublishVerificationError",
+    "QCResult", "RunProvenance", "COGAsset", "StacItemConfig",
+    "build_stac_item", "build_stac_item_json",
 ]
