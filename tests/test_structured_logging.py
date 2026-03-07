@@ -5,7 +5,6 @@ import logging
 from unittest.mock import patch
 
 import pytest
-import structlog
 
 from weatherman.observability.logging import (
     bind_context,
