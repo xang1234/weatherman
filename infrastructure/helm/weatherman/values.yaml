@@ -1,0 +1,201 @@
+# -- Global defaults --
+global:
+  image:
+    repository: weatherman
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# -- Tile Service --
+# Serves dynamic map tiles via TiTiler. User-facing, latency-sensitive.
+# Readiness: fast detection (5s period, 2 failures = 10s to remove from LB)
+# Liveness: moderate (10s period, 3 failures = 30s to restart)
+tileService:
+  replicaCount: 2
+  image:
+    repository: ""  # defaults to global
+    tag: ""
+  port: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  probes:
+    liveness:
+      httpGet:
+        path: /health/live
+        port: http
+      # No dependency checks — only verifies process + event loop.
+      # 30s to restart (10s * 3 failures) avoids restarts during brief GC pauses.
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /health/ready
+        port: http
+      # Checks TiTiler reachability + published run availability.
+      # 10s to remove from endpoints (5s * 2 failures) — fast enough to prevent
+      # users from hitting a pod that can't serve tiles.
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 2
+      successThreshold: 1
+    startup:
+      httpGet:
+        path: /health/live
+        port: http
+      # Tile service starts quickly (FastAPI + uvicorn), but allow 30s for
+      # cold-start scenarios (container image pull, volume mount).
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 6  # 6 * 5s = 30s max startup
+
+# -- Catalog Service --
+# Manages run catalog index, STAC items, retention/GC. Internal API.
+# Similar probe profile to tile service but slightly more tolerant on readiness
+# since it's not directly user-facing for map tiles.
+catalogService:
+  replicaCount: 1
+  image:
+    repository: ""
+    tag: ""
+  port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  probes:
+    liveness:
+      httpGet:
+        path: /health/live
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /health/ready
+        port: http
+      # Checks metadata DB connectivity + object storage.
+      # 15s to remove (5s * 3 failures) — slightly more tolerant than tile
+      # service since catalog reads are less latency-sensitive.
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+    startup:
+      httpGet:
+        path: /health/live
+        port: http
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 6  # 30s max startup
+
+# -- Ingestion Service --
+# Event-driven download of model data. Tolerates brief outages of upstream
+# data sources (NOAA/ECMWF) — retries handle transient failures.
+ingestionService:
+  replicaCount: 1
+  image:
+    repository: ""
+    tag: ""
+  port: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  probes:
+    liveness:
+      httpGet:
+        path: /health/live
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /health/ready
+        port: http
+      # Checks object storage writable + queue connectivity.
+      # 15s to remove (5s * 3 failures).
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+    startup:
+      httpGet:
+        path: /health/live
+        port: http
+      # Ingestion may pre-load source configs / Herbie templates at startup.
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 12  # 60s max startup
+
+# -- Pipeline Workers --
+# Argo-managed COG processing jobs. Long-running, CPU-intensive.
+# These need generous startup probes — COG processing loads rasterio,
+# GDAL, and potentially large model configs on first run.
+pipelineWorker:
+  replicaCount: 1
+  image:
+    repository: ""
+    tag: ""
+  port: 8000
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  probes:
+    liveness:
+      httpGet:
+        path: /health/live
+        port: http
+      # Pipeline workers do heavy CPU work (GRIB→COG conversion).
+      # Use longer period + higher threshold to avoid killing pods during
+      # legitimate heavy processing that may starve the event loop briefly.
+      initialDelaySeconds: 10
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 4  # 60s to restart
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /health/ready
+        port: http
+      # Checks object storage writable (for COG output).
+      # Workers can tolerate being temporarily unready without user impact.
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3  # 30s to remove
+      successThreshold: 1
+    startup:
+      httpGet:
+        path: /health/live
+        port: http
+      # Slow startup: loads GDAL, rasterio, model configs, possibly
+      # downloads colormaps or projection data on first run.
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 12  # 120s max startup (per bead spec)
