@@ -240,6 +240,32 @@ class TestRegistryAccessors:
         assert reg.source_variable("nonexistent") is None
 
 
+class TestDownloadSources:
+    def test_groups_by_herbie_source(self):
+        """Bundled config groups atmo and wave variables by source."""
+        from weatherman.layers import HerbieSource
+
+        reg = get_layer_registry()
+        sources = reg.download_sources()
+
+        gfs_source = HerbieSource(model="gfs", product="pgrb2.0p25")
+        wave_source = HerbieSource(model="gfs_wave", product="global.0p25")
+
+        assert gfs_source in sources
+        assert wave_source in sources
+        assert "tmp_2m" in sources[gfs_source]
+        assert "htsgw_sfc" in sources[wave_source]
+
+    def test_all_variables_accounted_for(self):
+        """Every variable appears in exactly one download source group."""
+        reg = get_layer_registry()
+        sources = reg.download_sources()
+        all_vars = set()
+        for group in sources.values():
+            all_vars.update(group.keys())
+        assert all_vars == set(reg.variable_names)
+
+
 class TestDefaultRegistry:
     def test_loads_bundled_config(self):
         """The bundled layers.yaml should load without errors."""
@@ -262,10 +288,14 @@ class TestDefaultRegistry:
 
     def test_bundled_grib_keys_match_downloader(self):
         """Bundled config should match the GFS downloader patterns."""
-        from weatherman.ingest.gfs import DEFAULT_SEARCH_PATTERNS
+        from weatherman.ingest.gfs import (
+            DEFAULT_SEARCH_PATTERNS,
+            DEFAULT_WAVE_SEARCH_PATTERNS,
+        )
 
         reg = get_layer_registry()
         patterns = reg.grib2_search_patterns()
-        for var_name, expected_key in DEFAULT_SEARCH_PATTERNS.items():
+        all_expected = {**DEFAULT_SEARCH_PATTERNS, **DEFAULT_WAVE_SEARCH_PATTERNS}
+        for var_name, expected_key in all_expected.items():
             assert var_name in patterns, f"Missing variable: {var_name}"
             assert patterns[var_name] == expected_key

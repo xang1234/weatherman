@@ -24,7 +24,7 @@ from weatherman.storage.paths import RunID
 
 logger = logging.getLogger(__name__)
 
-# GFS variables required for Phase 1 + Phase 2 multi-layer expansion
+# GFS atmospheric variables
 DEFAULT_SEARCH_PATTERNS: dict[str, str] = {
     "tmp_2m": ":TMP:2 m above ground:",
     "ugrd_10m": ":UGRD:10 m above ground:",
@@ -32,6 +32,13 @@ DEFAULT_SEARCH_PATTERNS: dict[str, str] = {
     "apcp_sfc": ":APCP:surface:",
     "prmsl": ":PRMSL:mean sea level:",
     "tcdc_atm": ":TCDC:entire atmosphere:(?!.*ave)",
+}
+
+# GFS-Wave (WW3) variables — accessed via Herbie model="gfs_wave"
+DEFAULT_WAVE_SEARCH_PATTERNS: dict[str, str] = {
+    "htsgw_sfc": ":HTSGW:surface:",
+    "perpw_sfc": ":PERPW:surface:",
+    "dirpw_sfc": ":DIRPW:surface:",
 }
 
 # GFS cycles run every 6 hours
@@ -72,13 +79,19 @@ class CycleDownloadResult:
         return sum(d.size_bytes for d in self.downloads)
 
 
-def _herbie_for_hour(run_id: RunID, forecast_hour: int) -> Herbie:
+def _herbie_for_hour(
+    run_id: RunID,
+    forecast_hour: int,
+    *,
+    model: str = "gfs",
+    product: str = "pgrb2.0p25",
+) -> Herbie:
     """Create a Herbie instance for a specific forecast hour."""
     cycle_dt = run_id.as_datetime
     return Herbie(
         cycle_dt.strftime("%Y-%m-%d %H:%M"),
-        model="gfs",
-        product="pgrb2.0p25",
+        model=model,
+        product=product,
         fxx=forecast_hour,
     )
 
@@ -89,8 +102,11 @@ def download_variable(
     variable_name: str,
     search_pattern: str,
     staging_dir: Path,
+    *,
+    model: str = "gfs",
+    product: str = "pgrb2.0p25",
 ) -> DownloadResult:
-    """Download a single GFS variable for one forecast hour.
+    """Download a single GFS/GFS-Wave variable for one forecast hour.
 
     Uses Herbie's subset download (GRIB2 index-based) to pull only the
     needed variable, not the full file.
@@ -101,6 +117,8 @@ def download_variable(
         variable_name: Short name for the variable (e.g. "tmp_2m").
         search_pattern: Herbie search/regex pattern for the variable.
         staging_dir: Local directory to stage downloaded files.
+        model: Herbie model name (default: "gfs").
+        product: Herbie product name (default: "pgrb2.0p25").
 
     Returns:
         DownloadResult with the local path and file size.
@@ -109,7 +127,7 @@ def download_variable(
         FileNotFoundError: If download produces no file.
         RuntimeError: If Herbie cannot find the data.
     """
-    h = _herbie_for_hour(run_id, forecast_hour)
+    h = _herbie_for_hour(run_id, forecast_hour, model=model, product=product)
 
     dest_dir = staging_dir / "grib2" / variable_name
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -156,8 +174,10 @@ def download_gfs_cycle(
     *,
     forecast_hours: list[int] | None = None,
     variables: dict[str, str] | None = None,
+    model: str = "gfs",
+    product: str = "pgrb2.0p25",
 ) -> CycleDownloadResult:
-    """Download all required variables for a GFS cycle.
+    """Download all required variables for a model cycle.
 
     Iterates over forecast hours and variables, downloading each via
     Herbie's index-based subsetting. Partial failures are captured in
@@ -167,7 +187,9 @@ def download_gfs_cycle(
         run_id: The GFS cycle to download (e.g. RunID("20260306T00Z")).
         staging_dir: Local directory for staging GRIB2 files.
         forecast_hours: Which forecast hours to fetch (default: 0-120 by 3h).
-        variables: Dict of {name: herbie_search_pattern} (default: Phase 1 set).
+        variables: Dict of {name: herbie_search_pattern} (default: atmo GFS set).
+        model: Herbie model name (default: "gfs").
+        product: Herbie product name (default: "pgrb2.0p25").
 
     Returns:
         CycleDownloadResult with per-file results and any errors.
@@ -191,7 +213,8 @@ def download_gfs_cycle(
     result = CycleDownloadResult(run_id=run_id)
 
     logger.info(
-        "Starting GFS download for %s: %d hours x %d variables",
+        "Starting %s download for %s: %d hours x %d variables",
+        model,
         run_id,
         len(forecast_hours),
         len(variables),
@@ -206,6 +229,8 @@ def download_gfs_cycle(
                     variable_name=var_name,
                     search_pattern=search_pattern,
                     staging_dir=run_staging,
+                    model=model,
+                    product=product,
                 )
                 result.downloads.append(dl)
             except Exception as exc:

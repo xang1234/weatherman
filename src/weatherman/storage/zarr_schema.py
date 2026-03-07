@@ -211,6 +211,28 @@ PHASE1_VARIABLES: dict[str, VariableDef] = {
         grib_key=":TCDC:entire atmosphere:(?!.*ave)",
         level="entire atmosphere",
     ),
+    # GFS-Wave (WW3) variables
+    "htsgw_sfc": VariableDef(
+        name="htsgw_sfc",
+        long_name="Significant height of combined wind waves and swell",
+        units="m",
+        grib_key=":HTSGW:surface:",
+        level="surface",
+    ),
+    "perpw_sfc": VariableDef(
+        name="perpw_sfc",
+        long_name="Primary wave mean period",
+        units="s",
+        grib_key=":PERPW:surface:",
+        level="surface",
+    ),
+    "dirpw_sfc": VariableDef(
+        name="dirpw_sfc",
+        long_name="Primary wave direction",
+        units="degree",
+        grib_key=":DIRPW:surface:",
+        level="surface",
+    ),
 }
 
 

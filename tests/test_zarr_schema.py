@@ -88,6 +88,9 @@ class TestVariableDef:
         assert "apcp_sfc" in PHASE1_VARIABLES
         assert "prmsl" in PHASE1_VARIABLES
         assert "tcdc_atm" in PHASE1_VARIABLES
+        assert "htsgw_sfc" in PHASE1_VARIABLES
+        assert "perpw_sfc" in PHASE1_VARIABLES
+        assert "dirpw_sfc" in PHASE1_VARIABLES
 
     def test_variable_dims(self):
         v = VariableDef(
@@ -114,17 +117,21 @@ class TestVariableDef:
 
     def test_grib_keys_match_gfs_downloader(self):
         """Ensure schema GRIB keys match the GFS downloader patterns."""
-        from weatherman.ingest.gfs import DEFAULT_SEARCH_PATTERNS
+        from weatherman.ingest.gfs import (
+            DEFAULT_SEARCH_PATTERNS,
+            DEFAULT_WAVE_SEARCH_PATTERNS,
+        )
         from weatherman.storage.zarr_schema import PHASE1_VARIABLES
 
+        all_patterns = {**DEFAULT_SEARCH_PATTERNS, **DEFAULT_WAVE_SEARCH_PATTERNS}
         for var_name, var_def in PHASE1_VARIABLES.items():
-            assert var_name in DEFAULT_SEARCH_PATTERNS, (
-                f"Schema variable {var_name} not found in GFS downloader"
+            assert var_name in all_patterns, (
+                f"Schema variable {var_name} not found in downloader patterns"
             )
-            assert var_def.grib_key == DEFAULT_SEARCH_PATTERNS[var_name], (
+            assert var_def.grib_key == all_patterns[var_name], (
                 f"GRIB key mismatch for {var_name}: "
                 f"schema={var_def.grib_key!r}, "
-                f"downloader={DEFAULT_SEARCH_PATTERNS[var_name]!r}"
+                f"downloader={all_patterns[var_name]!r}"
             )
 
 
@@ -155,7 +162,7 @@ class TestZarrSchema:
         total = n_times * n_vars * n_lat * n_lon * bytes_per_element
         mb = total / (1024 * 1024)
         # ~170 MB per variable uncompressed (41 steps × 721 × 1440 × 4 bytes)
-        assert 400 < mb < 1200, f"Unexpected size estimate: {mb:.0f} MB"
+        assert 400 < mb < 1800, f"Unexpected size estimate: {mb:.0f} MB"
 
     def test_chunk_covers_grid_efficiently(self):
         """512x512 chunks on a 1440x721 grid should produce ~6 chunks/timestep."""

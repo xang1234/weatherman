@@ -47,6 +47,31 @@ variables:
     grib2_key: ":TCDC:entire atmosphere:(?!.*ave)"
     level: "entire atmosphere"
 
+  # GFS-Wave (WW3) variables — separate Herbie model source
+  htsgw_sfc:
+    long_name: "Significant height of combined wind waves and swell"
+    units: "m"
+    grib2_key: ":HTSGW:surface:"
+    level: "surface"
+    herbie_model: "gfs_wave"
+    herbie_product: "global.0p25"
+
+  perpw_sfc:
+    long_name: "Primary wave mean period"
+    units: "s"
+    grib2_key: ":PERPW:surface:"
+    level: "surface"
+    herbie_model: "gfs_wave"
+    herbie_product: "global.0p25"
+
+  dirpw_sfc:
+    long_name: "Primary wave direction"
+    units: "degree"
+    grib2_key: ":DIRPW:surface:"
+    level: "surface"
+    herbie_model: "gfs_wave"
+    herbie_product: "global.0p25"
+
 layers:
   temperature:
     display_name: "Temperature at 2m"
@@ -84,3 +109,24 @@ layers:
     units: "%"
     palette: cloud_cover
     value_range: [0.0, 100.0]
+
+  wave_height:
+    display_name: "Significant Wave Height"
+    variable: htsgw_sfc
+    units: "m"
+    palette: wave_height
+    value_range: [0.0, 15.0]
+
+  wave_period:
+    display_name: "Peak Wave Period"
+    variable: perpw_sfc
+    units: "s"
+    palette: wave_period
+    value_range: [0.0, 25.0]
+
+  wave_direction:
+    display_name: "Mean Wave Direction"
+    variable: dirpw_sfc
+    units: "degree"
+    palette: wave_direction
+    value_range: [0.0, 360.0]

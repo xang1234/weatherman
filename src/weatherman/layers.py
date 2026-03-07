@@ -46,6 +46,18 @@ _CONFIG_PATH = Path(__file__).parent / "layers.yaml"
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_HERBIE_MODEL = "gfs"
+DEFAULT_HERBIE_PRODUCT = "pgrb2.0p25"
+
+
+@dataclass(frozen=True)
+class HerbieSource:
+    """Identifies a Herbie model/product combination for downloading."""
+
+    model: str = DEFAULT_HERBIE_MODEL
+    product: str = DEFAULT_HERBIE_PRODUCT
+
+
 @dataclass(frozen=True)
 class VariableConfig:
     """Parsed variable entry from the YAML config."""
@@ -55,6 +67,8 @@ class VariableConfig:
     units: str
     grib2_key: str
     level: str | None = None
+    herbie_model: str = DEFAULT_HERBIE_MODEL
+    herbie_product: str = DEFAULT_HERBIE_PRODUCT
 
 
 @dataclass(frozen=True)
@@ -135,6 +149,20 @@ class LayerRegistry:
             for entry in self._layers.values()
         ]
 
+    def download_sources(self) -> dict[HerbieSource, dict[str, str]]:
+        """Group variables by their Herbie download source.
+
+        Returns a dict mapping ``HerbieSource(model, product)`` to
+        ``{variable_name: grib2_search_pattern}``.  This lets the
+        downloader iterate over source models and fetch each group
+        with the correct Herbie configuration.
+        """
+        sources: dict[HerbieSource, dict[str, str]] = {}
+        for name, vc in self._variables.items():
+            key = HerbieSource(model=vc.herbie_model, product=vc.herbie_product)
+            sources.setdefault(key, {})[name] = vc.grib2_key
+        return sources
+
     # -- COG pipeline helpers -----------------------------------------------
 
     def source_variable(self, layer_id: str) -> str | None:
@@ -181,6 +209,8 @@ def _parse_variable(name: str, raw: dict[str, Any]) -> VariableConfig:
         units=raw["units"],
         grib2_key=raw["grib2_key"],
         level=raw.get("level"),
+        herbie_model=raw.get("herbie_model", DEFAULT_HERBIE_MODEL),
+        herbie_product=raw.get("herbie_product", DEFAULT_HERBIE_PRODUCT),
     )
 
 
