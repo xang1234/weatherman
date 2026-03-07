@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Optional, Sequence
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.sampling import (
     ALWAYS_ON,
     ParentBased,
@@ -27,7 +27,7 @@ from opentelemetry.sdk.trace.sampling import (
 
 if TYPE_CHECKING:
     from opentelemetry.context import Context
-    from opentelemetry.trace import Link, SpanKind
+    from opentelemetry.trace import Link, SpanKind, TraceState
     from opentelemetry.util.types import Attributes
 
 
@@ -58,11 +58,12 @@ class RouteAwareSampler(Sampler):
         kind: Optional["SpanKind"] = None,
         attributes: "Attributes" = None,
         links: Optional[Sequence["Link"]] = None,
+        trace_state: Optional["TraceState"] = None,
     ) -> SamplingResult:
         path = _extract_path(attributes)
         delegate = self._low if _is_low_rate(path) else self._high
         return delegate.should_sample(
-            parent_context, trace_id, name, kind, attributes, links
+            parent_context, trace_id, name, kind, attributes, links, trace_state
         )
 
     def get_description(self) -> str:
@@ -90,14 +91,19 @@ def _is_low_rate(path: str | None) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
+_provider: TracerProvider | None = None
+
 
 def setup_tracing(
     service_name: str = "weatherman",
     *,
     otlp_endpoint: str | None = None,
     tile_sample_rate: float | None = None,
+    exporter: SpanExporter | None = None,
 ) -> TracerProvider:
     """Initialise the OTel TracerProvider and auto-instrument FastAPI + httpx.
+
+    Idempotent — returns the existing provider on subsequent calls.
 
     Parameters
     ----------
@@ -109,7 +115,15 @@ def setup_tracing(
     tile_sample_rate:
         Fraction of tile requests to sample (0.0–1.0).  Falls back to the
         ``WEATHERMAN_TILE_SAMPLE_RATE`` env var, then 0.01 (1 %).
+    exporter:
+        Optional span exporter override.  Useful for tests (pass an
+        ``InMemorySpanExporter``) to avoid requiring a running collector.
+        Defaults to OTLP/gRPC.
     """
+    global _provider
+    if _provider is not None:
+        return _provider
+
     if tile_sample_rate is None:
         tile_sample_rate = float(
             os.environ.get("WEATHERMAN_TILE_SAMPLE_RATE", "0.01")
@@ -125,12 +139,12 @@ def setup_tracing(
 
     provider = TracerProvider(resource=resource, sampler=sampler)
 
-    # OTLP/gRPC exporter — import lazily so tests can skip if collector is down
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-        OTLPSpanExporter,
-    )
+    if exporter is None:
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
 
-    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
     provider.add_span_processor(BatchSpanProcessor(exporter))
 
     trace.set_tracer_provider(provider)
@@ -139,10 +153,28 @@ def setup_tracing(
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-    FastAPIInstrumentor.instrument()
+    FastAPIInstrumentor().instrument()
     HTTPXClientInstrumentor().instrument()
 
+    _provider = provider
     return provider
+
+
+def shutdown_tracing() -> None:
+    """Shut down the TracerProvider and reset global state.
+
+    Call during application shutdown or test teardown.
+    """
+    global _provider
+    if _provider is not None:
+        _provider.shutdown()
+        _provider = None
+
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+        FastAPIInstrumentor().uninstrument()
+        HTTPXClientInstrumentor().uninstrument()
 
 
 def get_tracer(name: str = "weatherman") -> trace.Tracer:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExporter
 from opentelemetry.sdk.trace.sampling import Decision
 
 from weatherman.observability.tracing import RouteAwareSampler, _extract_path, _is_low_rate
@@ -59,6 +60,17 @@ class TestRouteAwareSampler:
         drop_count = sum(1 for d in decisions if d == Decision.DROP)
         assert drop_count > 1800
 
+    def test_forwards_trace_state(self) -> None:
+        """trace_state parameter should be accepted and forwarded."""
+        from opentelemetry.trace import TraceState
+
+        ts = TraceState([("vendor", "value")])
+        attrs = {"url.path": "/api/v1/runs"}
+        result = self.sampler.should_sample(
+            None, _TRACE_IDS[0], "GET", attributes=attrs, trace_state=ts
+        )
+        assert result.decision == Decision.RECORD_AND_SAMPLE
+
     def test_description(self) -> None:
         desc = self.sampler.get_description()
         assert "RouteAwareSampler" in desc
@@ -86,6 +98,42 @@ class TestHelpers:
 
     def test_is_low_rate_none(self) -> None:
         assert _is_low_rate(None) is False
+
+
+class _NoOpExporter(SpanExporter):
+    """Minimal exporter that discards all spans — used in tests."""
+
+    def export(self, spans):
+        from opentelemetry.sdk.trace.export import SpanExportResult
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self):
+        pass
+
+
+class TestSetupTracing:
+    def teardown_method(self) -> None:
+        from weatherman.observability.tracing import shutdown_tracing
+        shutdown_tracing()
+
+    def test_setup_is_idempotent(self) -> None:
+        """Calling setup_tracing() twice returns the same provider."""
+        from weatherman.observability.tracing import setup_tracing
+
+        exporter = _NoOpExporter()
+        p1 = setup_tracing(exporter=exporter)
+        p2 = setup_tracing(exporter=exporter)
+        assert p1 is p2
+
+    def test_shutdown_allows_reinit(self) -> None:
+        """After shutdown_tracing(), setup_tracing() creates a new provider."""
+        from weatherman.observability.tracing import setup_tracing, shutdown_tracing
+
+        exporter = _NoOpExporter()
+        p1 = setup_tracing(exporter=exporter)
+        shutdown_tracing()
+        p2 = setup_tracing(exporter=exporter)
+        assert p1 is not p2
 
 
 class TestGetTracer:
