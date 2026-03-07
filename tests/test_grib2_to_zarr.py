@@ -82,7 +82,10 @@ def small_schema():
 def _make_fake_grib_dataset(
     n_lat: int, n_lon: int, lon_convention: str = "0_360"
 ) -> xr.Dataset:
-    """Create a synthetic dataset mimicking cfgrib output."""
+    """Create a synthetic dataset mimicking cfgrib output.
+
+    Returns a fresh dataset each call (safe for repeated use in mocks).
+    """
     data = np.random.randn(n_lat, n_lon).astype(np.float32)
 
     if lon_convention == "0_360":
@@ -96,6 +99,23 @@ def _make_fake_grib_dataset(
         {"t2m": xr.DataArray(data, dims=["latitude", "longitude"])},
         coords={"latitude": lat, "longitude": lon},
     )
+
+
+def _mock_open_dataset(n_lat: int, n_lon: int, lon_convention: str = "0_360"):
+    """Return a mock for xr.open_dataset that supports context manager protocol.
+
+    Each call produces a fresh dataset to avoid closed-dataset reuse bugs.
+    """
+    from unittest.mock import MagicMock
+
+    def _open(*args, **kwargs):
+        ds = _make_fake_grib_dataset(n_lat, n_lon, lon_convention)
+        cm = MagicMock(wraps=ds)
+        cm.__enter__ = MagicMock(return_value=ds)
+        cm.__exit__ = MagicMock(return_value=False)
+        return cm
+
+    return _open
 
 
 # ---------------------------------------------------------------------------
@@ -206,17 +226,24 @@ class TestIngestGrib2File:
     def test_ingests_single_file(self, tmp_path, small_schema):
         store = init_zarr_store(small_schema, tmp_path / "test.zarr")
 
-        # Create a fake GRIB2 file (just needs to exist for the path check)
         grib_file = tmp_path / "test.grib2"
         grib_file.touch()
 
-        fake_ds = _make_fake_grib_dataset(5, 8, lon_convention="0_360")
+        # Build expected data from a known dataset
+        ref_ds = _make_fake_grib_dataset(5, 8, lon_convention="0_360")
         expected_data = _normalize_longitude(
-            fake_ds["t2m"].values, fake_ds.coords["longitude"].values
+            ref_ds["t2m"].values, ref_ds.coords["longitude"].values
         )
 
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset") as mock_open:
-            mock_open.return_value = fake_ds
+        # Mock returns this exact dataset (as a context manager)
+        from unittest.mock import MagicMock
+        def _open(*a, **kw):
+            cm = MagicMock(wraps=ref_ds)
+            cm.__enter__ = MagicMock(return_value=ref_ds)
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset", side_effect=_open):
             ingest_grib2_file(store, small_schema, "tmp_2m", 0, grib_file)
 
         root = zarr.open_group(str(store), mode="r")
@@ -229,10 +256,8 @@ class TestIngestGrib2File:
         grib_file = tmp_path / "test.grib2"
         grib_file.touch()
 
-        fake_ds = _make_fake_grib_dataset(5, 8, lon_convention="-180_180")
-
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset") as mock_open:
-            mock_open.return_value = fake_ds
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
+                    side_effect=_mock_open_dataset(5, 8, "-180_180")):
             # Write to forecast hour 6 (time index 2)
             ingest_grib2_file(store, small_schema, "tmp_2m", 6, grib_file)
 
@@ -272,10 +297,8 @@ class TestIngestGrib2File:
         grib_file.touch()
 
         # Wrong shape: 10×16 instead of 5×8
-        wrong_ds = _make_fake_grib_dataset(10, 16)
-
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset") as mock_open:
-            mock_open.return_value = wrong_ds
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
+                    side_effect=_mock_open_dataset(10, 16)):
             with pytest.raises(ValueError, match="Shape mismatch"):
                 ingest_grib2_file(store, small_schema, "tmp_2m", 0, grib_file)
 
@@ -315,10 +338,8 @@ class TestConvertGrib2ToZarr:
         grib_dir = self._setup_fake_gribs(tmp_path, small_schema)
         store_path = tmp_path / "output.zarr"
 
-        fake_ds = _make_fake_grib_dataset(5, 8)
-
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset") as mock_open:
-            mock_open.return_value = fake_ds
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
+                    side_effect=_mock_open_dataset(5, 8)):
             result = convert_grib2_to_zarr(small_schema, grib_dir, store_path)
 
         assert result.success
@@ -330,8 +351,9 @@ class TestConvertGrib2ToZarr:
         root = zarr.open_consolidated(str(store_path))
         assert "tmp_2m" in dict(root.members())
         assert "ugrd_10m" in dict(root.members())
-        # No NaN left (all hours written)
+        # No NaN left (all hours written for both variables)
         assert not np.any(np.isnan(root["tmp_2m"][:]))
+        assert not np.any(np.isnan(root["ugrd_10m"][:]))
 
     def test_partial_failure(self, tmp_path, small_schema):
         """Missing GRIB2 files result in errors but don't abort."""
@@ -343,10 +365,9 @@ class TestConvertGrib2ToZarr:
             (var_dir / f"f{fhour:03d}.grib2").touch()
 
         store_path = tmp_path / "output.zarr"
-        fake_ds = _make_fake_grib_dataset(5, 8)
 
-        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset") as mock_open:
-            mock_open.return_value = fake_ds
+        with patch("weatherman.processing.grib2_to_zarr.xr.open_dataset",
+                    side_effect=_mock_open_dataset(5, 8)):
             result = convert_grib2_to_zarr(small_schema, grib_dir, store_path)
 
         assert not result.success

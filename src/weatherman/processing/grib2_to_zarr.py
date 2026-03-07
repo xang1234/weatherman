@@ -153,8 +153,9 @@ def _normalize_longitude(data: np.ndarray, src_lon: np.ndarray) -> np.ndarray:
         Rolled data array (same shape, new longitude order).
     """
     if src_lon[0] >= 0 and src_lon[-1] > 180:
-        # Find the index where longitude would be 180°
-        roll_idx = int(np.searchsorted(src_lon, 180.0))
+        # For a global [0, 360) grid, the halfway point is always at 180°.
+        # Using len//2 avoids float-precision issues with searchsorted.
+        roll_idx = len(src_lon) // 2
         return np.roll(data, -roll_idx, axis=-1)
     return data
 
@@ -171,6 +172,10 @@ def ingest_grib2_file(
     Opens the GRIB2 via cfgrib, extracts the data values, normalizes
     the longitude convention, and writes into the pre-allocated array
     at the correct time index.
+
+    Note: This function is NOT safe for concurrent calls on the same
+    store path.  Zarr directory stores have no built-in locking, so
+    parallel writes must be coordinated externally.
 
     Args:
         store_path: Path to the initialized Zarr store.
@@ -202,25 +207,22 @@ def ingest_grib2_file(
     time_idx = schema.forecast_hours.index(forecast_hour)
 
     # Read GRIB2 via cfgrib (xarray handles eccodes/cfgrib backend)
-    ds = xr.open_dataset(str(grib2_path), engine="cfgrib")
+    with xr.open_dataset(str(grib2_path), engine="cfgrib") as ds:
+        # cfgrib names the data variable by its GRIB shortName (e.g. "t2m", "10u")
+        # — we just need the first (and usually only) data variable.
+        data_vars = list(ds.data_vars)
+        if not data_vars:
+            raise ValueError(f"No data variables found in {grib2_path}")
 
-    # cfgrib names the data variable by its GRIB shortName (e.g. "t2m", "10u")
-    # — we just need the first (and usually only) data variable.
-    data_vars = list(ds.data_vars)
-    if not data_vars:
-        raise ValueError(f"No data variables found in {grib2_path}")
+        grib_var = data_vars[0]
+        data = ds[grib_var].values.astype(np.float32)
 
-    grib_var = data_vars[0]
-    data = ds[grib_var].values.astype(np.float32)
-
-    # Get source longitude for normalization
-    lon_dim = "longitude" if "longitude" in ds.coords else "lon"
-    src_lon = ds.coords[lon_dim].values
+        # Get source longitude for normalization
+        lon_dim = "longitude" if "longitude" in ds.coords else "lon"
+        src_lon = ds.coords[lon_dim].values
 
     # Normalize longitude from [0, 360) → [-180, 180) if needed
     data = _normalize_longitude(data, src_lon)
-
-    ds.close()
 
     # Validate shape against schema
     expected_lat = schema.grid.lat_count
@@ -296,7 +298,9 @@ def convert_grib2_to_zarr(
 
     Args:
         schema: The Zarr dataset schema.
-        grib2_dir: Root directory containing the downloaded GRIB2 files.
+        grib2_dir: Run-level staging directory (e.g. staging/<run_id>/).
+            This is the directory passed as ``staging_dir`` to
+            ``download_variable`` — NOT the parent staging root.
         store_path: Output path for the Zarr store.
 
     Returns:
