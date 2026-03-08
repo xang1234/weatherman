@@ -112,8 +112,11 @@ class TestLatChecks:
         result = check_geometry(store_path, _SCHEMA)
 
         assert not result.passed
-        # Should detect values mismatch (flipped vs expected)
-        assert any(i.coordinate == "lat" for i in result.issues)
+        # Should detect both values mismatch AND not_descending
+        assert any(i.kind == "values_mismatch" and i.coordinate == "lat"
+                    for i in result.issues)
+        assert any(i.kind == "not_descending" and i.coordinate == "lat"
+                    for i in result.issues)
 
 
 class TestLonChecks:
@@ -140,7 +143,11 @@ class TestLonChecks:
         result = check_geometry(store_path, _SCHEMA)
 
         assert not result.passed
-        assert any(i.coordinate == "lon" for i in result.issues)
+        # Should detect both values mismatch AND convention violation
+        assert any(i.kind == "values_mismatch" and i.coordinate == "lon"
+                    for i in result.issues)
+        assert any(i.kind == "convention_violation" and i.coordinate == "lon"
+                    for i in result.issues)
 
 
 class TestAntimeridian:
@@ -206,6 +213,83 @@ class TestPolar:
     def test_poles_with_data_pass(self, tmp_path):
         result = check_geometry(_make_store(tmp_path), _SCHEMA)
 
+        polar_issues = [i for i in result.issues if i.kind == "polar_gap"]
+        assert len(polar_issues) == 0
+
+
+class TestWaveOnlySchema:
+    def test_wave_only_store_no_false_polar_gap(self, tmp_path):
+        """Wave variables have NaN at south pole (Antarctica = land).
+
+        When only wave variables exist, _pick_global_var falls back to
+        the wave variable but should still be used. This test verifies
+        the wave-only case doesn't crash, though polar_gap may fire
+        (accepted: no atmospheric variable to check against).
+        """
+        wave_schema = ZarrSchema(
+            grid=GridResolution.GFS_025,
+            forecast_hours=(0,),
+            variables={
+                "htsgw_sfc": VariableDef(
+                    name="htsgw_sfc", long_name="Wave height", units="m",
+                    grib_key=":HTSGW:surface:", level="surface",
+                ),
+            },
+        )
+        path = tmp_path / "wave.zarr"
+        root = zarr.open_group(str(path), mode="w")
+        root.create_array("lat", data=make_lat_array(GridResolution.GFS_025))
+        root.create_array("lon", data=make_lon_array(GridResolution.GFS_025))
+        shape = wave_schema.shape
+        arr = root.create_array(
+            "htsgw_sfc", shape=shape, dtype="float32",
+            fill_value=float("nan"), chunks=(1, 721, 1440),
+        )
+        arr[0, :, :] = np.ones((shape[1], shape[2]), dtype=np.float32)
+
+        # No crash; coordinate checks should pass
+        result = check_geometry(path, wave_schema)
+        coord_issues = [i for i in result.issues
+                        if i.kind in ("missing_coordinate", "shape_mismatch",
+                                      "values_mismatch")]
+        assert len(coord_issues) == 0
+
+    def test_mixed_schema_prefers_atmospheric_var(self, tmp_path):
+        """When both atmospheric and wave vars exist, prefers atmospheric."""
+        mixed_schema = ZarrSchema(
+            grid=GridResolution.GFS_025,
+            forecast_hours=(0,),
+            variables={
+                # Wave variable listed FIRST
+                "htsgw_sfc": VariableDef(
+                    name="htsgw_sfc", long_name="Wave height", units="m",
+                    grib_key=":HTSGW:surface:", level="surface",
+                ),
+                "tmp_2m": VariableDef(
+                    name="tmp_2m", long_name="Temperature", units="K",
+                    grib_key=":TMP:2 m above ground:", level="2 m above ground",
+                ),
+            },
+        )
+        path = tmp_path / "mixed.zarr"
+        root = zarr.open_group(str(path), mode="w")
+        root.create_array("lat", data=make_lat_array(GridResolution.GFS_025))
+        root.create_array("lon", data=make_lon_array(GridResolution.GFS_025))
+        shape = mixed_schema.shape
+        for var_name in mixed_schema.variables:
+            arr = root.create_array(
+                var_name, shape=shape, dtype="float32",
+                fill_value=float("nan"), chunks=(1, 721, 1440),
+            )
+            # Wave var has NaN at south pole (land), atmospheric has data
+            data = np.ones((shape[1], shape[2]), dtype=np.float32)
+            if var_name == "htsgw_sfc":
+                data[-1, :] = np.nan  # south pole = land = NaN for waves
+            arr[0, :, :] = data
+
+        result = check_geometry(path, mixed_schema)
+
+        # Should NOT flag polar_gap because tmp_2m (atmospheric) is selected
         polar_issues = [i for i in result.issues if i.kind == "polar_gap"]
         assert len(polar_issues) == 0
 

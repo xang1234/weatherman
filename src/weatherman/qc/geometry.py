@@ -66,6 +66,29 @@ class GeometryResult:
 _COORD_ATOL = 1e-4
 
 
+# Variables with large expected NaN coverage (ocean-only data).
+# These are unsuitable for anti-meridian and polar gap checks because
+# they legitimately have NaN over all land areas.
+_OCEAN_ONLY_VARS = frozenset({"htsgw_sfc", "perpw_sfc", "dirpw_sfc"})
+
+
+def _pick_global_var(root: zarr.Group, schema: ZarrSchema) -> str | None:
+    """Select a variable suitable for spatial coverage checks.
+
+    Prefers globally-filled atmospheric variables over ocean-only wave
+    variables, which have legitimate NaN over land (e.g., Antarctica).
+    """
+    fallback = None
+    for var_name in schema.variables:
+        if var_name not in root:
+            continue
+        if var_name not in _OCEAN_ONLY_VARS:
+            return var_name
+        if fallback is None:
+            fallback = var_name
+    return fallback
+
+
 def check_geometry(
     store_path: str | Path,
     schema: ZarrSchema,
@@ -133,7 +156,6 @@ def _check_lat(
                 f"Latitude values differ from schema (max diff: {max_diff:.6f}°)",
             )
         )
-        return
 
     # Monotonicity: must be descending (north to south)
     diffs = np.diff(lat)
@@ -204,7 +226,6 @@ def _check_lon(
                 f"Longitude values differ from schema (max diff: {max_diff:.6f}°)",
             )
         )
-        return
 
     # Monotonicity: must be ascending
     diffs = np.diff(lon)
@@ -218,24 +239,25 @@ def _check_lon(
         )
 
     # Convention: must be [-180, 180)
-    if float(np.min(lon)) < -180.0 - _COORD_ATOL:
+    lon_min = float(np.min(lon))
+    lon_max = float(np.max(lon))
+    expected_max = 180.0 - schema.grid.step  # e.g., 179.75 for 0.25°
+
+    if lon_min < -180.0 - _COORD_ATOL:
         result.issues.append(
             GeometryIssue(
                 "lon", "convention_violation",
-                f"Longitude values below -180°: min={float(np.min(lon)):.4f}",
+                f"Longitude values below -180°: min={lon_min:.4f}",
             )
         )
-    if float(np.max(lon)) >= 180.0 - _COORD_ATOL:
-        # For GFS 0.25°, max should be 179.75
-        expected_max = 180.0 - schema.grid.step
-        if not np.isclose(float(np.max(lon)), expected_max, atol=_COORD_ATOL):
-            result.issues.append(
-                GeometryIssue(
-                    "lon", "convention_violation",
-                    f"Longitude max {float(np.max(lon)):.4f}° should be "
-                    f"{expected_max}° for [-180, 180) convention",
-                )
+    if lon_max > expected_max + _COORD_ATOL:
+        result.issues.append(
+            GeometryIssue(
+                "lon", "convention_violation",
+                f"Longitude max {lon_max:.4f}° exceeds expected "
+                f"{expected_max}° for [-180, 180) convention",
             )
+        )
 
     # Uniform spacing
     if len(lon) > 1:
@@ -273,16 +295,11 @@ def _check_antimeridian(
     west_cols = slice(0, edge_width)           # near -180°
     east_cols = slice(len(lon) - edge_width, len(lon))  # near +180°
 
-    first_var = None
-    for var_name in schema.variables:
-        if var_name in root:
-            first_var = var_name
-            break
-
-    if first_var is None:
+    check_var = _pick_global_var(root, schema)
+    if check_var is None:
         return
 
-    arr = root[first_var]
+    arr = root[check_var]
     if not np.issubdtype(arr.dtype, np.floating):
         return
 
@@ -324,16 +341,11 @@ def _check_polar(
     if "lat" not in root:
         return
 
-    first_var = None
-    for var_name in schema.variables:
-        if var_name in root:
-            first_var = var_name
-            break
-
-    if first_var is None:
+    check_var = _pick_global_var(root, schema)
+    if check_var is None:
         return
 
-    arr = root[first_var]
+    arr = root[check_var]
     if not np.issubdtype(arr.dtype, np.floating):
         return
 
