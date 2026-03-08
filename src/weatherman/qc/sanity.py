@@ -45,6 +45,7 @@ class PhysicalBounds:
     min: float
     max: float
     max_nan_fraction: float = 0.05  # default: flag if >5% NaN
+    skip_all_zeros: bool = False    # True for accumulation fields (e.g. apcp)
 
 
 # Bounds are wider than display ranges.  Sources:
@@ -60,7 +61,7 @@ PHYSICAL_BOUNDS: dict[str, PhysicalBounds] = {
     "tmp_2m": PhysicalBounds(min=150.0, max=350.0),
     "ugrd_10m": PhysicalBounds(min=-150.0, max=150.0),
     "vgrd_10m": PhysicalBounds(min=-150.0, max=150.0),
-    "apcp_sfc": PhysicalBounds(min=0.0, max=2000.0),
+    "apcp_sfc": PhysicalBounds(min=0.0, max=2000.0, skip_all_zeros=True),
     "prmsl": PhysicalBounds(min=85000.0, max=110000.0),
     "tcdc_atm": PhysicalBounds(min=0.0, max=100.0),
     # Wave variables: NaN over land is expected (~70% of global grid)
@@ -183,14 +184,32 @@ def _check_variable(
 
         is_float = np.issubdtype(time_slice.dtype, np.floating)
         if is_float:
-            finite_mask = np.isfinite(time_slice)
+            nan_mask = np.isnan(time_slice)
+            inf_mask = np.isinf(time_slice)
+            finite_mask = ~nan_mask & ~inf_mask
             finite_vals = time_slice[finite_mask]
-            nan_count = np.sum(~finite_mask)
+            nan_count = int(np.sum(nan_mask))
+            inf_count = int(np.sum(inf_mask))
         else:
             finite_vals = time_slice.ravel()
             nan_count = 0
+            inf_count = 0
 
         total_cells = time_slice.size
+
+        # -- Check 0: Infinite values --
+        if inf_count > 0:
+            result.issues.append(
+                SanityIssue(
+                    variable=var_name,
+                    kind="out_of_bounds",
+                    detail=f"fhour={fhour}: {inf_count} infinite value(s)",
+                )
+            )
+            logger.warning(
+                "QC sanity: %s fhour=%d has %d infinite values",
+                var_name, fhour, inf_count,
+            )
 
         # -- Check 1: Out-of-bounds values --
         if finite_vals.size > 0:
@@ -216,7 +235,11 @@ def _check_variable(
                 )
 
         # -- Check 2: All-zeros slice --
-        if finite_vals.size > 0 and np.all(finite_vals == 0.0):
+        if (
+            not bounds.skip_all_zeros
+            and finite_vals.size > 0
+            and np.all(finite_vals == 0.0)
+        ):
             result.issues.append(
                 SanityIssue(
                     variable=var_name,

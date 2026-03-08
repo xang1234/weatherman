@@ -175,6 +175,67 @@ class TestExcessiveNaN:
         assert len(nan_issues) == 0
 
 
+class TestSkipAllZeros:
+    def test_accumulation_field_all_zeros_passes(self, tmp_path):
+        """apcp_sfc at fhour=0 is legitimately all zeros — should not flag."""
+        schema = ZarrSchema(
+            grid=GridResolution.GFS_025,
+            forecast_hours=(0, 3),
+            variables={
+                "apcp_sfc": VariableDef(
+                    name="apcp_sfc", long_name="Total precipitation",
+                    units="kg/m^2", grib_key=":APCP:surface:", level="surface",
+                ),
+            },
+        )
+        bounds = {"apcp_sfc": PhysicalBounds(min=0.0, max=2000.0, skip_all_zeros=True)}
+        path = tmp_path / "test.zarr"
+        root = zarr.open_group(str(path), mode="w")
+        shape = schema.shape
+        arr = root.create_array(
+            "apcp_sfc", shape=shape, dtype="float32",
+            fill_value=float("nan"), chunks=(1, 721, 1440),
+        )
+        arr[0, :, :] = np.zeros((shape[1], shape[2]), dtype=np.float32)
+        arr[1, :, :] = np.full((shape[1], shape[2]), 5.0, dtype=np.float32)
+
+        result = check_sanity(path, schema, bounds)
+
+        zeros = [i for i in result.issues if i.kind == "all_zeros"]
+        assert len(zeros) == 0
+
+
+class TestInfiniteValues:
+    def test_detects_inf(self, tmp_path):
+        store_path = _make_store(tmp_path)
+        root = zarr.open_group(str(store_path), mode="r+")
+        data = np.full((721, 1440), 280.0, dtype=np.float32)
+        data[0, 0] = np.inf
+        root["tmp_2m"][0, :, :] = data
+
+        result = check_sanity(store_path, _SCHEMA, _TEST_BOUNDS)
+
+        assert not result.passed
+        oob = [i for i in result.issues if i.kind == "out_of_bounds"]
+        assert any("infinite" in i.detail for i in oob)
+
+    def test_inf_not_counted_as_nan(self, tmp_path):
+        """Infinities should not inflate the NaN fraction."""
+        store_path = _make_store(tmp_path)
+        root = zarr.open_group(str(store_path), mode="r+")
+        data = np.full((721, 1440), 280.0, dtype=np.float32)
+        data[0, 0] = np.inf  # 1 cell out of ~1M — well under 5% NaN threshold
+        root["tmp_2m"][0, :, :] = data
+
+        result = check_sanity(store_path, _SCHEMA, _TEST_BOUNDS)
+
+        nan_issues = [
+            i for i in result.issues
+            if i.kind == "excessive_nan" and i.variable == "tmp_2m"
+        ]
+        assert len(nan_issues) == 0
+
+
 class TestMissingVariable:
     def test_skips_missing_variables(self, tmp_path):
         """Missing variables are the completeness check's job, not sanity's."""
