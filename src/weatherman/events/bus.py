@@ -62,11 +62,8 @@ class EventBus:
         self._counter += 1
         return str(self._counter)
 
-    async def publish(self, event: ServerEvent) -> int:
-        """Broadcast an event to all matching subscribers.
-
-        Returns the number of subscribers that received the event.
-        """
+    def _deliver(self, event: ServerEvent) -> int:
+        """Deliver an event to all matching subscribers (sync internal)."""
         self._replay_buffer.append(event)
         delivered = 0
         for sub in list(self._subscribers.values()):
@@ -80,6 +77,21 @@ class EventBus:
                         extra={"sub_id": sub.id, "event_id": event.id},
                     )
         return delivered
+
+    async def publish(self, event: ServerEvent) -> int:
+        """Broadcast an event to all matching subscribers (async API).
+
+        Returns the number of subscribers that received the event.
+        """
+        return self._deliver(event)
+
+    def publish_sync(self, event: ServerEvent) -> int:
+        """Broadcast an event from synchronous code.
+
+        Same as ``publish()`` but callable without await. Safe because the
+        underlying delivery only uses ``put_nowait`` (no I/O).
+        """
+        return self._deliver(event)
 
     def subscribe(
         self,

@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Callable
 
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.lifecycle import RunLifecycle, RunState
 from weatherman.storage.locks import NullPublishLock, PublishLock
 from weatherman.storage.object_store import ObjectStore
 from weatherman.storage.paths import RunID, StorageLayout
+
+# Type for the optional post-publish callback.
+# Signature: (model, run_id, published_at) -> None
+OnPublishedCallback = Callable[[str, RunID, datetime], None]
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,7 @@ def publish_run(
     processing_version: str = "",
     now: datetime | None = None,
     lock: PublishLock | None = None,
+    on_published: OnPublishedCallback | None = None,
 ) -> None:
     """Execute the atomic publish sequence for a validated run.
 
@@ -66,6 +72,9 @@ def publish_run(
         lock: Per-model advisory lock.  Prevents concurrent publishes
               for the same model from corrupting the catalog.  Defaults
               to ``NullPublishLock`` (no-op) when not provided.
+        on_published: Optional callback invoked after successful publish
+              (after catalog + lifecycle update, before staging cleanup).
+              Signature: ``(model, run_id, published_at) -> None``.
 
     Raises:
         PublishError: If staging has no artifacts.
@@ -85,6 +94,7 @@ def publish_run(
             run_id=run_id,
             processing_version=processing_version,
             now=now,
+            on_published=on_published,
         )
 
 
@@ -97,6 +107,7 @@ def _publish_run_inner(
     run_id: RunID,
     processing_version: str,
     now: datetime,
+    on_published: OnPublishedCallback | None = None,
 ) -> None:
     """Core publish logic, called while holding the per-model lock."""
     model = layout.model
@@ -153,6 +164,16 @@ def _publish_run_inner(
         context="artifacts published, catalog updated",
         now=now,
     )
+
+    # -- Step 4b: Notify subscribers (best-effort, never blocks publish) --
+    if on_published is not None:
+        try:
+            on_published(model, run_id, now)
+        except Exception:
+            logger.warning(
+                "on_published callback failed for %s/%s",
+                model, run_id, exc_info=True,
+            )
 
     # -- Step 5: Clean up staging (best-effort) --
     _cleanup_staging(store, staging_keys, model, run_id)
