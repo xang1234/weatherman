@@ -1,0 +1,206 @@
+"""Tests for the SSE push channel — EventBus and /events/stream endpoint."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from weatherman.events.bus import EventBus, ServerEvent
+from weatherman.events.router import _format_sse
+
+
+# ---------------------------------------------------------------------------
+# Helper to run async tests without pytest-asyncio
+# ---------------------------------------------------------------------------
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# EventBus unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestServerEvent:
+    def test_default_tenant_is_broadcast(self):
+        ev = ServerEvent(id="1", event="test", data="{}")
+        assert ev.tenant_id == "*"
+
+
+class TestEventBus:
+    def test_next_event_id_monotonic(self):
+        bus = EventBus(replay_limit=50)
+        ids = [bus.next_event_id() for _ in range(5)]
+        assert ids == ["1", "2", "3", "4", "5"]
+
+    def test_publish_delivers_to_subscriber(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            event = ServerEvent(id="1", event="test", data='{"ok":true}', tenant_id="t1")
+            async with bus.subscribe("t1") as events:
+                await bus.publish(event)
+                received = await asyncio.wait_for(events.__anext__(), timeout=1)
+                assert received == event
+
+        run(_test())
+
+    def test_tenant_filtering(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            ev_t1 = ServerEvent(id="1", event="x", data="", tenant_id="t1")
+            ev_t2 = ServerEvent(id="2", event="x", data="", tenant_id="t2")
+            ev_all = ServerEvent(id="3", event="x", data="", tenant_id="*")
+
+            async with bus.subscribe("t1") as events:
+                await bus.publish(ev_t1)
+                await bus.publish(ev_t2)  # should NOT be delivered
+                await bus.publish(ev_all)
+
+                got1 = await asyncio.wait_for(events.__anext__(), timeout=1)
+                got2 = await asyncio.wait_for(events.__anext__(), timeout=1)
+                assert got1.id == "1"
+                assert got2.id == "3"
+
+        run(_test())
+
+    def test_replay_on_reconnect(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            for i in range(1, 6):
+                await bus.publish(
+                    ServerEvent(id=str(i), event="x", data=str(i), tenant_id="t1")
+                )
+
+            async with bus.subscribe("t1", last_event_id="3") as events:
+                got = []
+                for _ in range(2):
+                    got.append(await asyncio.wait_for(events.__anext__(), timeout=1))
+                assert [e.id for e in got] == ["4", "5"]
+
+        run(_test())
+
+    def test_replay_filters_by_tenant(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            await bus.publish(ServerEvent(id="1", event="x", data="", tenant_id="t1"))
+            await bus.publish(ServerEvent(id="2", event="x", data="", tenant_id="t2"))
+            await bus.publish(ServerEvent(id="3", event="x", data="", tenant_id="t1"))
+
+            async with bus.subscribe("t1", last_event_id="0") as events:
+                got = []
+                for _ in range(2):
+                    got.append(await asyncio.wait_for(events.__anext__(), timeout=1))
+                assert [e.id for e in got] == ["1", "3"]
+
+        run(_test())
+
+    def test_subscriber_count(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            assert bus.subscriber_count == 0
+            async with bus.subscribe("t1"):
+                assert bus.subscriber_count == 1
+            assert bus.subscriber_count == 0
+
+        run(_test())
+
+    def test_publish_returns_delivery_count(self):
+        async def _test():
+            bus = EventBus(replay_limit=50)
+            event = ServerEvent(id="1", event="x", data="", tenant_id="t1")
+            async with bus.subscribe("t1"):
+                async with bus.subscribe("t2"):
+                    count = await bus.publish(event)
+                    assert count == 1  # only t1 subscriber
+
+        run(_test())
+
+
+# ---------------------------------------------------------------------------
+# SSE formatting
+# ---------------------------------------------------------------------------
+
+
+class TestFormatSSE:
+    def test_basic_format(self):
+        event = ServerEvent(id="42", event="run.published", data='{"model":"gfs"}')
+        result = _format_sse(event)
+        assert result == (
+            'id: 42\nevent: run.published\ndata: {"model":"gfs"}\n\n'
+        )
+
+    def test_multiline_data(self):
+        event = ServerEvent(id="1", event="test", data="line1\nline2")
+        result = _format_sse(event)
+        assert "data: line1\n" in result
+        assert "data: line2\n" in result
+
+
+# ---------------------------------------------------------------------------
+# SSE endpoint integration test
+# ---------------------------------------------------------------------------
+
+
+def test_stream_endpoint():
+    """Integration test: connect to /events/stream and receive an event."""
+    import os
+    import tempfile
+    import threading
+
+    import httpx
+
+    from weatherman.events.router import init_event_bus, get_event_bus, shutdown_event_bus
+
+    async def _test():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ["WEATHERMAN_DATA_DIR"] = tmpdir
+            try:
+                # Init bus before app — lifespan doesn't run in ASGI transport
+                init_event_bus()
+                from weatherman.app import create_app
+
+                app = create_app(data_dir=tmpdir)
+                bus = get_event_bus()
+
+                async def publish_after_delay():
+                    """Publish an event after a short delay to let the stream connect."""
+                    await asyncio.sleep(0.2)
+                    event = ServerEvent(
+                        id=bus.next_event_id(),
+                        event="run.published",
+                        data='{"model":"gfs"}',
+                        tenant_id="default",
+                    )
+                    await bus.publish(event)
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://test",
+                ) as client:
+                    # Schedule publish concurrently
+                    publish_task = asyncio.create_task(publish_after_delay())
+
+                    async with client.stream("GET", "/events/stream") as resp:
+                        assert resp.status_code == 200
+                        assert "text/event-stream" in resp.headers["content-type"]
+
+                        # Read SSE chunks until we get the event
+                        chunks = []
+                        async for chunk in resp.aiter_text():
+                            chunks.append(chunk)
+                            if "run.published" in chunk:
+                                break
+
+                        text = "".join(chunks)
+                        assert "event: run.published" in text
+                        assert 'data: {"model":"gfs"}' in text
+
+                    await publish_task
+            finally:
+                shutdown_event_bus()
+                os.environ.pop("WEATHERMAN_DATA_DIR", None)
+
+    run(_test())

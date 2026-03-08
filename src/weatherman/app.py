@@ -39,6 +39,11 @@ from weatherman.edr.position import (
     shutdown_edr_service,
 )
 from weatherman.edr.position import router as edr_router
+from weatherman.events.router import (
+    init_event_bus,
+    shutdown_event_bus,
+)
+from weatherman.events import router as events_router
 from weatherman.tenancy import TenantMiddleware
 from weatherman.tiling.router import (
     CatalogLoader,
@@ -211,10 +216,12 @@ def create_app(
         setup_tracing(service_name="weatherman")
         init_tile_service(storage_config, titiler_url, catalog_loader)
         init_edr_service(catalog_loader, zarr_opener)
+        init_event_bus()
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
         # Shutdown
+        shutdown_event_bus()
         shutdown_edr_service()
         await shutdown_tile_service()
         shutdown_tracing()
@@ -243,6 +250,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(tile_router)
     app.include_router(edr_router)
+    app.include_router(events_router)
 
     # Metrics endpoint (plain Starlette route, not a router)
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])
