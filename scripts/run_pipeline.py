@@ -16,8 +16,8 @@ Usage:
     uv run python scripts/run_pipeline.py --data-dir /tmp/wx-data
 
 After running, start the stack:
-    docker compose -f docker-compose.dev.yml up -d   # TiTiler
-    WEATHERMAN_DATA_DIR=.data TITILER_COG_ROOT=/data uv run python -m weatherman
+    uv run python scripts/run_titiler.py              # TiTiler on :8080
+    WEATHERMAN_DATA_DIR=.data TITILER_COG_ROOT=.data uv run python -m weatherman
     cd frontend && npx vite dev
 """
 
@@ -280,10 +280,11 @@ def main() -> None:
     logger.info("  Catalog:  %s/%s", data_dir, layout.catalog_path)
     logger.info("")
     logger.info("To view weather on the map:")
-    logger.info("  1. docker compose -f docker-compose.dev.yml up -d")
+    logger.info("  1. uv run python scripts/run_titiler.py")
     logger.info(
-        "  2. WEATHERMAN_DATA_DIR=%s TITILER_COG_ROOT=/data"
+        "  2. WEATHERMAN_DATA_DIR=%s TITILER_COG_ROOT=%s"
         " uv run python -m weatherman",
+        data_dir,
         data_dir,
     )
     logger.info("  3. cd frontend && npx vite dev")

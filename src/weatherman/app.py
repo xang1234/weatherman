@@ -263,7 +263,8 @@ def create_app(
         # Startup
         setup_logging(service_name="weatherman")
         setup_tracing(service_name="weatherman")
-        cog_root = os.environ.get("TITILER_COG_ROOT")
+        cog_root_env = os.environ.get("TITILER_COG_ROOT")
+        cog_root = str(Path(cog_root_env).resolve()) if cog_root_env else None
         init_tile_service(
             storage_config, titiler_url, catalog_loader, cog_root=cog_root,
         )
