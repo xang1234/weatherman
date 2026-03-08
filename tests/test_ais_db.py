@@ -90,11 +90,11 @@ class TestAISPositionsSchema:
         col_names = [c[0] for c in cols]
 
         expected = [
-            "imommsi", "mmsi", "lrimoshipno", "movementid",
-            "shipname", "shiptype", "vessel_class", "dwt", "callsign",
+            "imo", "mmsi", "imommsi", "lrimoshipno", "movementid",
+            "vessel_name", "shiptype", "vessel_class", "dwt", "callsign",
             "beam", "length",
-            "movementdatetime", "movement_date", "latitude", "longitude",
-            "speed", "heading", "draught", "max_draught", "movestatus",
+            "timestamp", "date", "lat", "lon",
+            "sog", "heading", "draught", "max_draught", "movestatus",
             "destination", "destinationtidied", "eta",
             "additionalinfo", "tenant_id",
         ]
@@ -111,15 +111,15 @@ class TestAISPositionsSchema:
     def test_insert_and_query(self, con: duckdb.DuckDBPyConnection) -> None:
         con.execute("""
             INSERT INTO ais_positions (
-                imommsi, mmsi, lrimoshipno, movementid,
-                shipname, shiptype, vessel_class, dwt, callsign,
+                imo, mmsi, imommsi, lrimoshipno, movementid,
+                vessel_name, shiptype, vessel_class, dwt, callsign,
                 beam, length,
-                movementdatetime, movement_date, latitude, longitude,
-                speed, heading, draught, max_draught, movestatus,
+                "timestamp", "date", lat, lon,
+                sog, heading, draught, max_draught, movestatus,
                 destination, destinationtidied, eta,
                 additionalinfo, tenant_id
             ) VALUES (
-                '9876543-211234567', 211234567, '9876543', 'mov-001',
+                '9876543', 211234567, '9876543-211234567', '9876543', 'mov-001',
                 'MV BULK CARRIER', 'Cargo', 'Capesize', 180000, 'ABCD1',
                 45.0, 292.0,
                 '2025-12-25 12:00:00', '2025-12-25', 1.35, 103.8,
@@ -129,8 +129,8 @@ class TestAISPositionsSchema:
             )
         """)
         rows = con.execute(
-            "SELECT mmsi, shipname, speed FROM ais_positions "
-            "WHERE movement_date = '2025-12-25'"
+            "SELECT mmsi, vessel_name, sog FROM ais_positions "
+            "WHERE date = '2025-12-25'"
         ).fetchall()
         assert len(rows) == 1
         assert rows[0][0] == 211234567

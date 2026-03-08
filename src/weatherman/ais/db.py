@@ -29,18 +29,19 @@ logger = logging.getLogger(__name__)
 
 # Schema version — bump when altering the table DDL so that downstream
 # migrations (manual for now) know what to expect.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 AIS_POSITIONS_DDL = """\
 CREATE TABLE IF NOT EXISTS ais_positions (
-    -- Core identifiers
-    imommsi         VARCHAR,        -- composite '{imo}-{mmsi}' from source
+    -- Core identifiers (canonical names)
+    imo             VARCHAR,        -- parsed from imommsi ('{imo}-{mmsi}')
     mmsi            BIGINT,
+    imommsi         VARCHAR,        -- original composite key, kept for traceability
     lrimoshipno     VARCHAR,        -- LR/IMO ship number
     movementid      VARCHAR,        -- row-level unique ID from source
 
     -- Vessel info
-    shipname        VARCHAR,
+    vessel_name     VARCHAR,        -- source: shipname
     shiptype        VARCHAR,        -- e.g. 'Cargo'
     vessel_class    VARCHAR,        -- e.g. 'Capesize', 'Valemax'
     dwt             BIGINT,         -- deadweight tonnage
@@ -48,12 +49,12 @@ CREATE TABLE IF NOT EXISTS ais_positions (
     beam            DOUBLE,
     length          DOUBLE,
 
-    -- Position / movement
-    movementdatetime TIMESTAMP,     -- position timestamp
-    movement_date   DATE,           -- partition key
-    latitude        DOUBLE,
-    longitude       DOUBLE,
-    speed           DOUBLE,         -- SOG
+    -- Position / movement (canonical names)
+    timestamp       TIMESTAMP,      -- source: movementdatetime
+    date            DATE,           -- source: movement_date (partition key)
+    lat             DOUBLE,         -- source: latitude
+    lon             DOUBLE,         -- source: longitude
+    sog             DOUBLE,         -- source: speed (speed over ground)
     heading         DOUBLE,
     draught         DOUBLE,
     max_draught     DOUBLE,
@@ -70,10 +71,10 @@ CREATE TABLE IF NOT EXISTS ais_positions (
 );
 """
 
-# Index on movement_date for efficient daily queries (snapshot, tile generation).
+# Index on date for efficient daily queries (snapshot, tile generation).
 AIS_DATE_INDEX_DDL = """\
 CREATE INDEX IF NOT EXISTS idx_ais_positions_date
-    ON ais_positions (movement_date);
+    ON ais_positions (date);
 """
 
 # Index on mmsi for vessel-level lookups (track queries).
