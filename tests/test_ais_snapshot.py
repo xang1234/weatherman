@@ -108,11 +108,13 @@ class TestLatestPositionPick:
         )
 
         rows = ais_con.execute(
-            "SELECT mmsi, sog FROM ais_snapshot WHERE mmsi = 211234567"
+            'SELECT mmsi, sog, "timestamp" FROM ais_snapshot WHERE mmsi = 211234567'
         ).fetchall()
         assert len(rows) == 1
-        # Should pick the 12:00 report (speed=12.5), not the 06:00 one (speed=8.0)
-        assert rows[0][1] == 12.5
+        # Must pick the 12:00 report (speed=12.5), not the 06:00 one (speed=8.0)
+        assert rows[0][1] == 12.5  # sog from late report
+        assert rows[0][1] != 8.0   # NOT the early report's sog
+        assert rows[0][2].hour == 12  # timestamp from the later report
 
 
 class TestIdempotency:

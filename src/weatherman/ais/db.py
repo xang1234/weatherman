@@ -136,9 +136,13 @@ class AISDatabase:
         return self._con
 
     def _ensure_schema(self) -> None:
-        """Create the ais_positions table and indexes if they don't exist."""
+        """Create the ais_positions table, ais_snapshot table, and indexes."""
         assert self._con is not None
         self._con.execute(AIS_POSITIONS_DDL)
         self._con.execute(AIS_DATE_INDEX_DDL)
         self._con.execute(AIS_MMSI_INDEX_DDL)
+
+        from weatherman.ais.snapshot import ensure_snapshot_schema
+        ensure_snapshot_schema(self._con)
+
         logger.info("AIS schema ensured (version %d)", SCHEMA_VERSION)

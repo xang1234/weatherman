@@ -28,6 +28,10 @@ import duckdb
 logger = logging.getLogger(__name__)
 
 # DDL for the snapshot table — one row per vessel per date.
+# Columns chosen for MVT tile properties (bead wx-45a.6.1) plus vessel
+# detail popup fields.  Columns excluded from ais_positions: imommsi,
+# lrimoshipno, movementid, beam, length, additionalinfo — these are
+# lookup-only fields not needed for map rendering or basic popups.
 AIS_SNAPSHOT_DDL = """\
 CREATE TABLE IF NOT EXISTS ais_snapshot (
     mmsi            BIGINT,
@@ -36,11 +40,13 @@ CREATE TABLE IF NOT EXISTS ais_snapshot (
     shiptype        VARCHAR,
     vessel_class    VARCHAR,
     dwt             BIGINT,
+    callsign        VARCHAR,
     lat             DOUBLE,
     lon             DOUBLE,
     sog             DOUBLE,
     heading         DOUBLE,
     draught         DOUBLE,
+    max_draught     DOUBLE,
     destination     VARCHAR,
     destinationtidied VARCHAR,
     eta             TIMESTAMP,
@@ -62,8 +68,8 @@ CREATE INDEX IF NOT EXISTS idx_ais_snapshot_date
 # most recent report.  Ties broken arbitrarily (both are equally "latest").
 SNAPSHOT_QUERY = """\
 SELECT
-    mmsi, imo, vessel_name, shiptype, vessel_class, dwt,
-    lat, lon, sog, heading, draught,
+    mmsi, imo, vessel_name, shiptype, vessel_class, dwt, callsign,
+    lat, lon, sog, heading, draught, max_draught,
     destination, destinationtidied, eta, movestatus,
     "timestamp", "date", tenant_id
 FROM (
@@ -115,8 +121,6 @@ def build_snapshot(
         "Building AIS snapshot",
         extra={"snapshot_date": str(snapshot_date), "tenant_id": tenant_id},
     )
-
-    ensure_snapshot_schema(con)
 
     con.begin()
     try:
