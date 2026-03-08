@@ -27,6 +27,7 @@ computed from the standard slippy-map formula.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date
 
 import duckdb
@@ -64,6 +65,24 @@ DEFAULT_EXTENT = 4096
 # Zoom range supported for AIS tiles.
 MIN_ZOOM = 0
 MAX_ZOOM = 12
+
+# Low zooms need thinning to prevent giant global tiles.
+_LOD_GRID_SIZE = {
+    0: 24,
+    1: 32,
+    2: 48,
+    3: 64,
+}
+
+
+@dataclass(frozen=True)
+class GeneratedTile:
+    """Encoded AIS tile plus lightweight rendering stats."""
+
+    tile_bytes: bytes
+    feature_count: int
+    raw_feature_count: int
+    thinned: bool
 
 
 def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
@@ -138,6 +157,125 @@ def _row_to_feature(
     }
 
 
+def _mercator_bounds(
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+) -> tuple[float, float, float, float]:
+    """Convert WGS-84 tile bounds to Web Mercator bounds."""
+    return (
+        _lon_to_mx(west),
+        _lat_to_my(south),
+        _lon_to_mx(east),
+        _lat_to_my(north),
+    )
+
+
+def _thin_rows(
+    rows: list[tuple],
+    *,
+    merc_bounds: tuple[float, float, float, float],
+    z: int,
+) -> list[tuple]:
+    """Reduce low-zoom vessel density by keeping one vessel per coarse cell."""
+    grid_size = _LOD_GRID_SIZE.get(z)
+    if grid_size is None or len(rows) <= grid_size:
+        return rows
+
+    west, south, east, north = merc_bounds
+    width = east - west
+    height = north - south
+    if width <= 0 or height <= 0:
+        return rows
+
+    kept: dict[tuple[int, int], tuple] = {}
+    for row in rows:
+        lat = float(row[-2])
+        lon = float(row[-1])
+        mx = _lon_to_mx(lon)
+        my = _lat_to_my(lat)
+        x_bucket = int((mx - west) / width * grid_size)
+        y_bucket = int((my - south) / height * grid_size)
+        x_bucket = max(0, min(grid_size - 1, x_bucket))
+        y_bucket = max(0, min(grid_size - 1, y_bucket))
+        bucket = (x_bucket, y_bucket)
+
+        current = kept.get(bucket)
+        if current is None:
+            kept[bucket] = row
+            continue
+
+        # Prefer the vessel with the higher speed, then the larger DWT.
+        current_sog = float(current[3] or 0.0)
+        current_dwt = float(current[7] or 0.0)
+        new_sog = float(row[3] or 0.0)
+        new_dwt = float(row[7] or 0.0)
+        if (new_sog, new_dwt) > (current_sog, current_dwt):
+            kept[bucket] = row
+
+    return list(kept.values())
+
+
+def generate_tile_with_stats(
+    *,
+    con: duckdb.DuckDBPyConnection,
+    snapshot_date: date,
+    tenant_id: str,
+    z: int,
+    x: int,
+    y: int,
+    extent: int = DEFAULT_EXTENT,
+) -> GeneratedTile:
+    """Generate a single MVT tile plus feature-count stats."""
+    west, south, east, north = tile_bounds(z, x, y)
+
+    # At the antimeridian, west > east (e.g., tile spanning 170° to -170°).
+    query = _TILE_QUERY_ANTIMERIDIAN if west > east else _TILE_QUERY
+
+    rows = con.execute(
+        query,
+        {
+            "snapshot_date": snapshot_date,
+            "tenant_id": tenant_id,
+            "west": west,
+            "south": south,
+            "east": east,
+            "north": north,
+        },
+    ).fetchall()
+
+    if not rows:
+        return GeneratedTile(
+            tile_bytes=b"",
+            feature_count=0,
+            raw_feature_count=0,
+            thinned=False,
+        )
+
+    merc_bounds = _mercator_bounds(west, south, east, north)
+    filtered_rows = _thin_rows(rows, merc_bounds=merc_bounds, z=z)
+    features = [_row_to_feature(row) for row in filtered_rows]
+
+    tile_bytes = mvt.encode(
+        [{
+            "name": "vessels",
+            "features": features,
+        }],
+        default_options={
+            "quantize_bounds": merc_bounds,
+            "extents": extent,
+        },
+    )
+
+    return GeneratedTile(
+        tile_bytes=tile_bytes,
+        feature_count=len(features),
+        raw_feature_count=len(rows),
+        thinned=len(filtered_rows) != len(rows),
+    )
+
+
 def generate_tile(
     *,
     con: duckdb.DuckDBPyConnection,
@@ -168,44 +306,12 @@ def generate_tile(
     bytes
         Encoded MVT tile, or ``b""`` if no vessels fall within the tile.
     """
-    west, south, east, north = tile_bounds(z, x, y)
-
-    # At the antimeridian, west > east (e.g., tile spanning 170° to -170°).
-    query = _TILE_QUERY_ANTIMERIDIAN if west > east else _TILE_QUERY
-
-    rows = con.execute(
-        query,
-        {
-            "snapshot_date": snapshot_date,
-            "tenant_id": tenant_id,
-            "west": west,
-            "south": south,
-            "east": east,
-            "north": north,
-        },
-    ).fetchall()
-
-    if not rows:
-        return b""
-
-    features = [_row_to_feature(row) for row in rows]
-
-    # quantize_bounds must be in the same CRS as the feature geometries
-    # (Web Mercator meters) for correct non-linear latitude mapping.
-    merc_bounds = (
-        _lon_to_mx(west),
-        _lat_to_my(south),
-        _lon_to_mx(east),
-        _lat_to_my(north),
-    )
-
-    return mvt.encode(
-        [{
-            "name": "vessels",
-            "features": features,
-        }],
-        default_options={
-            "quantize_bounds": merc_bounds,
-            "extents": extent,
-        },
-    )
+    return generate_tile_with_stats(
+        con=con,
+        snapshot_date=snapshot_date,
+        tenant_id=tenant_id,
+        z=z,
+        x=x,
+        y=y,
+        extent=extent,
+    ).tile_bytes

@@ -20,10 +20,11 @@ from datetime import date
 from typing import Annotated, Optional
 
 import duckdb
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from fastapi.responses import JSONResponse
 
-from weatherman.ais.mvt import MAX_ZOOM, MIN_ZOOM, generate_tile
+from weatherman.ais.mvt import MAX_ZOOM, MIN_ZOOM, GeneratedTile, generate_tile_with_stats
+from weatherman.observability.metrics import AIS_TILE_BYTES, AIS_TILE_FEATURES
 from weatherman.tenancy import get_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,9 @@ class AISTileService:
         z: int,
         x: int,
         y: int,
-    ) -> bytes:
+    ) -> GeneratedTile:
         """Generate an MVT tile for the given parameters."""
-        return generate_tile(
+        return generate_tile_with_stats(
             con=self.connection,
             snapshot_date=snapshot_date,
             tenant_id=tenant_id,
@@ -78,6 +79,15 @@ class AISTileService:
             x=x,
             y=y,
         )
+
+    def latest_snapshot_date(self) -> date | None:
+        """Return the newest available AIS snapshot date."""
+        row = self.connection.execute(
+            'SELECT MAX("date") FROM ais_snapshot'
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return row[0]
 
 
 # Module-level singleton
@@ -133,6 +143,23 @@ def get_ais_tile_service() -> AISTileService:
 
 
 @router.get(
+    "/latest",
+    summary="Latest available AIS snapshot date",
+)
+async def get_latest_snapshot_date(
+    svc: AISTileService = Depends(get_ais_tile_service),
+) -> JSONResponse:
+    """Return the latest available AIS snapshot date for frontend bootstrap."""
+    snapshot_date = svc.latest_snapshot_date()
+    if snapshot_date is None:
+        raise HTTPException(status_code=404, detail="No AIS snapshots available")
+    return JSONResponse(
+        content={"snapshot_date": snapshot_date.isoformat()},
+        headers={"Cache-Control": "public, max-age=60, must-revalidate"},
+    )
+
+
+@router.get(
     "/{snapshot_date}/{z}/{x}/{y}.pbf",
     summary="Get an AIS vector tile",
     response_class=Response,
@@ -161,15 +188,23 @@ def get_ais_tile(
             detail=f"Tile {z}/{x}/{y} out of range (max {max_tile} at zoom {z})",
         )
 
-    tile_bytes = svc.get_tile(
+    generated = svc.get_tile(
         snapshot_date=snapshot_date,
         tenant_id=tenant_id,
         z=z,
         x=x,
         y=y,
     )
+    zoom_label = str(z)
+    thinned_label = "true" if generated.thinned else "false"
+    AIS_TILE_FEATURES.labels(zoom=zoom_label, thinned=thinned_label).observe(
+        generated.feature_count
+    )
+    AIS_TILE_BYTES.labels(zoom=zoom_label, thinned=thinned_label).observe(
+        len(generated.tile_bytes)
+    )
 
-    if not tile_bytes:
+    if not generated.tile_bytes:
         # Empty tile — return 204 with cache headers so clients don't re-request.
         return Response(
             status_code=204,
@@ -177,7 +212,7 @@ def get_ais_tile(
         )
 
     return Response(
-        content=tile_bytes,
+        content=generated.tile_bytes,
         media_type=CONTENT_TYPE_MVT,
         headers={"Cache-Control": CACHE_IMMUTABLE},
     )

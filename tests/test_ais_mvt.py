@@ -19,6 +19,7 @@ from weatherman.ais.mvt import (
     MIN_ZOOM,
     _lat_to_my,
     _lon_to_mx,
+    generate_tile_with_stats,
     generate_tile,
     tile_bounds,
 )
@@ -223,6 +224,57 @@ class TestGenerateTile:
             for key, val in feat["properties"].items():
                 # No None values should appear
                 assert val is not None, f"Property '{key}' is None"
+
+    def test_low_zoom_thins_dense_tiles(self, tmp_path: Path, ais_con: duckdb.DuckDBPyConnection):
+        rows = []
+        for i in range(120):
+            rows.append(
+                f"""SELECT
+                    '900000{i:03d}-21{i:06d}' AS imommsi,
+                    70000 + {i} AS dwt,
+                    11.0 AS max_draught,
+                    'Supramax' AS vessel_class,
+                    CAST(210000000 + {i} AS BIGINT) AS mmsi,
+                    '900000{i:03d}' AS lrimoshipno,
+                    TIMESTAMP '2025-12-25 12:00:00' AS movementdatetime,
+                    {5 + (i % 20) * 0.1} AS latitude,
+                    {90 + (i % 30) * 0.1} AS longitude,
+                    'VESSEL {i}' AS shipname,
+                    'Cargo' AS shiptype,
+                    32.0 AS beam,
+                    10.0 AS draught,
+                    180.0 AS length,
+                    {5 + (i % 15)} AS speed,
+                    90.0 AS heading,
+                    'SINGAPORE' AS destination,
+                    'Singapore' AS destinationtidied,
+                    TIMESTAMP '2025-12-30 06:00:00' AS eta,
+                    'Under way using engine' AS movestatus,
+                    'CALL{i}' AS callsign,
+                    NULL AS additionalinfo,
+                    'mov-{i:03d}' AS movementid"""
+            )
+        _write_test_parquet(tmp_path, "movement_date=2025-12-25", " UNION ALL ".join(rows))
+        load_day(
+            f"{tmp_path}/movement_date=2025-12-25/*",
+            load_date=SNAPSHOT_DATE,
+            tenant_id=TENANT,
+            con=ais_con,
+        )
+        build_snapshot(snapshot_date=SNAPSHOT_DATE, tenant_id=TENANT, con=ais_con)
+
+        generated = generate_tile_with_stats(
+            con=ais_con,
+            snapshot_date=SNAPSHOT_DATE,
+            tenant_id=TENANT,
+            z=0,
+            x=0,
+            y=0,
+        )
+
+        assert generated.raw_feature_count == 120
+        assert generated.feature_count < generated.raw_feature_count
+        assert generated.thinned is True
 
 
 # -- Projection accuracy tests --
@@ -452,6 +504,32 @@ class TestAISTileJsonEndpoint:
         resp = client.get(f"/ais/tiles/{SNAPSHOT_DATE}/tilejson.json")
         data = resp.json()
         assert data["tiles"][0].startswith("http")
+
+
+class TestAISLatestEndpoint:
+    def test_latest_snapshot_endpoint(self, client):
+        resp = client.get("/ais/tiles/latest")
+        assert resp.status_code == 200
+        assert resp.json() == {"snapshot_date": "2025-12-25"}
+
+    def test_latest_snapshot_not_found_for_empty_db(self, tmp_path: Path):
+        from weatherman.ais.db import AISDatabase
+        import weatherman.ais.router as mod
+
+        db_path = str(tmp_path / "empty.duckdb")
+        db = AISDatabase(db_path)
+        db.connect()
+        db.close()
+
+        mod._service = None
+        app = FastAPI()
+        init_ais_tile_service(db_path)
+        app.include_router(router)
+        client = TestClient(app)
+        resp = client.get("/ais/tiles/latest")
+        shutdown_ais_tile_service()
+
+        assert resp.status_code == 404
 
 
 class TestAISTileService:

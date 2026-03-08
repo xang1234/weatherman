@@ -18,6 +18,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from weatherman.caching import etag_matches as _etag_matches
 from typing import Annotated, Any, Callable
@@ -27,7 +30,8 @@ import zarr
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 
-from weatherman.processing.geo import interpolate_at_point, wrap_longitude
+from weatherman.observability.metrics import EDR_QUERY_DURATION
+from weatherman.processing.geo import wrap_longitude
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.paths import RunID, StorageLayout
 
@@ -145,6 +149,73 @@ _IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 # "latest" resolves to a mutable alias — short cache + must-revalidate.
 _LATEST_CACHE_CONTROL = "public, max-age=60, must-revalidate"
 
+_POINT_CACHE_SIZE = 256
+
+
+@dataclass(frozen=True)
+class _InterpolationPlan:
+    j0: int
+    j1: int
+    i0: int
+    i1: int
+    w00: float
+    w01: float
+    w10: float
+    w11: float
+
+
+def _build_interpolation_plan(
+    lat_coords: np.ndarray,
+    lon_coords: np.ndarray,
+    lat: float,
+    lon: float,
+) -> _InterpolationPlan:
+    """Precompute grid indices and bilinear weights for a query point."""
+    lon = wrap_longitude(lon)
+    n_lat = len(lat_coords)
+    n_lon = len(lon_coords)
+
+    if lat > float(lat_coords[0]) or lat < float(lat_coords[-1]):
+        raise ValueError(
+            f"Latitude {lat} outside grid range [{float(lat_coords[-1])}, {float(lat_coords[0])}]"
+        )
+
+    lat_asc = lat_coords[::-1]
+    j_asc = int(np.searchsorted(lat_asc, lat, side="right")) - 1
+    j_asc = int(np.clip(j_asc, 0, n_lat - 2))
+    j0 = n_lat - 2 - j_asc
+    j1 = j0 + 1
+
+    i0 = int(np.searchsorted(lon_coords, lon, side="right")) - 1
+    if i0 < 0:
+        i0 = n_lon - 1
+    i1 = (i0 + 1) % n_lon
+
+    lon0 = float(lon_coords[i0])
+    lon1 = float(lon_coords[i1])
+    dx = lon1 - lon0
+    if dx <= 0:
+        dx += 360.0
+    dlon = lon - lon0
+    if dlon < 0:
+        dlon += 360.0
+    fx = dlon / dx
+
+    lat0 = float(lat_coords[j0])
+    lat1 = float(lat_coords[j1])
+    fy = (lat0 - lat) / (lat0 - lat1)
+
+    return _InterpolationPlan(
+        j0=j0,
+        j1=j1,
+        i0=i0,
+        i1=i1,
+        w00=(1 - fx) * (1 - fy),
+        w01=fx * (1 - fy),
+        w10=(1 - fx) * fy,
+        w11=fx * fy,
+    )
+
 
 def _build_coverage_json(
     lon: float,
@@ -232,6 +303,52 @@ class EDRService:
     ) -> None:
         self._catalog_loader = catalog_loader
         self._zarr_opener = zarr_opener
+        self._point_cache: OrderedDict[tuple[object, ...], _InterpolationPlan] = OrderedDict()
+
+    def _point_cache_key(
+        self,
+        model: str,
+        run_id: RunID,
+        lat_coords: np.ndarray,
+        lon_coords: np.ndarray,
+        lat: float,
+        lon: float,
+    ) -> tuple[object, ...]:
+        """Build a bounded-cardinality key for interpolation-plan caching."""
+        return (
+            model,
+            str(run_id),
+            round(lat, 6),
+            round(wrap_longitude(lon), 6),
+            len(lat_coords),
+            len(lon_coords),
+            float(lat_coords[0]),
+            float(lat_coords[-1]),
+            float(lon_coords[0]),
+            float(lon_coords[-1]),
+        )
+
+    def _get_interpolation_plan(
+        self,
+        model: str,
+        run_id: RunID,
+        lat_coords: np.ndarray,
+        lon_coords: np.ndarray,
+        lat: float,
+        lon: float,
+    ) -> tuple[_InterpolationPlan, bool]:
+        """Return a cached interpolation plan for a point, or build one."""
+        key = self._point_cache_key(model, run_id, lat_coords, lon_coords, lat, lon)
+        cached = self._point_cache.get(key)
+        if cached is not None:
+            self._point_cache.move_to_end(key)
+            return cached, True
+
+        plan = _build_interpolation_plan(lat_coords, lon_coords, lat, lon)
+        self._point_cache[key] = plan
+        if len(self._point_cache) > _POINT_CACHE_SIZE:
+            self._point_cache.popitem(last=False)
+        return plan, False
 
     def resolve_run_id(self, model: str, run_id_or_latest: str) -> RunID:
         """Resolve 'latest' to the current published run, or validate a literal."""
@@ -266,6 +383,8 @@ class EDRService:
 
         Returns a CoverageJSON dict.
         """
+        started = time.monotonic()
+        cache_hit = False
         zarr_store_path = self.zarr_path(model, run_id)
 
         try:
@@ -321,6 +440,13 @@ class EDRService:
         else:
             query_vars = available_vars
 
+        try:
+            plan, cache_hit = self._get_interpolation_plan(
+                model, run_id, lat_coords, lon_coords, lat, wrapped_lon,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         # Sample each variable at the query point for each time step
         parameters: dict[str, list[float | None]] = {}
         variable_metadata: dict[str, dict[str, str]] = {}
@@ -334,22 +460,34 @@ class EDRService:
                 "units": str(arr.attrs.get("units", "")),
             }
 
-            values: list[float | None] = []
-            for t_idx in time_indices:
-                slab = np.asarray(arr[int(t_idx), :, :])
-                val = interpolate_at_point(
-                    slab, lat_coords, lon_coords, lat, wrapped_lon,
-                )
-                values.append(None if np.isnan(val) else round(val, 4))
+            v00 = np.asarray(arr[:, plan.j0, plan.i0])[time_mask]
+            v01 = np.asarray(arr[:, plan.j0, plan.i1])[time_mask]
+            v10 = np.asarray(arr[:, plan.j1, plan.i0])[time_mask]
+            v11 = np.asarray(arr[:, plan.j1, plan.i1])[time_mask]
+            blended = (
+                v00 * plan.w00
+                + v01 * plan.w01
+                + v10 * plan.w10
+                + v11 * plan.w11
+            )
+            values = [
+                None if np.isnan(val) else round(float(val), 4)
+                for val in blended
+            ]
             parameters[var_name] = values
 
-        return _build_coverage_json(
+        result = _build_coverage_json(
             lon=float(wrapped_lon),
             lat=float(lat),
             forecast_hours=[int(h) for h in selected_hours],
             parameters=parameters,
             variable_metadata=variable_metadata,
         )
+        EDR_QUERY_DURATION.labels(
+            model=model,
+            cache_hit="true" if cache_hit else "false",
+        ).observe(time.monotonic() - started)
+        return result
 
 
 # ---------------------------------------------------------------------------

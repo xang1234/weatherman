@@ -30,6 +30,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sqlalchemy as sa
+
+from weatherman.events.emissions import emit_run_published
 from weatherman.ingest.gfs import (
     DEFAULT_SEARCH_PATTERNS,
     download_gfs_cycle,
@@ -37,6 +40,7 @@ from weatherman.ingest.gfs import (
 )
 from weatherman.processing.cog import grib2_to_cog, wind_speed_to_cog
 from weatherman.storage.catalog import RunCatalog
+from weatherman.storage.lifecycle import DuplicateRun, RunLifecycle, RunState
 from weatherman.storage.manifest import (
     LayerConfig,
     ManifestConfig,
@@ -45,6 +49,7 @@ from weatherman.storage.manifest import (
 )
 from weatherman.storage.object_store import LocalObjectStore
 from weatherman.storage.paths import RunID, StorageLayout
+from weatherman.storage.publish import publish_run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +92,8 @@ LAYER_CONFIGS = [
         value_range=ValueRange(min=0.0, max=250.0),
     ),
 ]
+
+PROCESSING_VERSION = "local-dev"
 
 
 def parse_args() -> argparse.Namespace:
@@ -165,7 +172,7 @@ def step_generate_cogs(
         # Temperature (direct: tmp_2m → temperature)
         tmp_grib = grib2_dir / "grib2" / "tmp_2m" / f"f{fhour:03d}.grib2"
         if tmp_grib.exists():
-            cog_path = data_dir / layout.cog_path(run_id, "temperature", fhour)
+            cog_path = data_dir / layout.staging_cog_path(run_id, "temperature", fhour)
             grib2_to_cog(tmp_grib, cog_path)
             total += 1
             generated_layers.add("temperature")
@@ -175,7 +182,7 @@ def step_generate_cogs(
         u_grib = grib2_dir / "grib2" / "ugrd_10m" / f"f{fhour:03d}.grib2"
         v_grib = grib2_dir / "grib2" / "vgrd_10m" / f"f{fhour:03d}.grib2"
         if u_grib.exists() and v_grib.exists():
-            cog_path = data_dir / layout.cog_path(run_id, "wind_speed", fhour)
+            cog_path = data_dir / layout.staging_cog_path(run_id, "wind_speed", fhour)
             wind_speed_to_cog(u_grib, v_grib, cog_path)
             total += 1
             generated_layers.add("wind_speed")
@@ -184,7 +191,7 @@ def step_generate_cogs(
         # Precipitation (direct: apcp_sfc → precipitation)
         apcp_grib = grib2_dir / "grib2" / "apcp_sfc" / f"f{fhour:03d}.grib2"
         if apcp_grib.exists():
-            cog_path = data_dir / layout.cog_path(run_id, "precipitation", fhour)
+            cog_path = data_dir / layout.staging_cog_path(run_id, "precipitation", fhour)
             grib2_to_cog(apcp_grib, cog_path)
             total += 1
             generated_layers.add("precipitation")
@@ -219,33 +226,79 @@ def step_write_manifest(
         forecast_hours=forecast_hours,
     )
     manifest = build_manifest(config)
-    manifest_path = layout.manifest_path(run_id)
+    manifest_path = layout.staging_manifest_path(run_id)
     store.write_bytes(manifest_path, manifest.to_json().encode("utf-8"))
     logger.info("  %s (layers: %s)", manifest_path, [l.id for l in active_layers])
 
+def _lifecycle_for_data_dir(data_dir: Path) -> RunLifecycle:
+    """Create or open the local pipeline lifecycle database."""
+    engine = sa.create_engine(f"sqlite:///{data_dir / '.pipeline-lifecycle.sqlite3'}")
+    lifecycle = RunLifecycle(engine)
+    lifecycle.create_tables()
+    return lifecycle
 
-def step_update_catalog(
+
+def _emit_run_published_if_available(model: str, run_id: RunID, published_at: datetime) -> None:
+    """Emit run.published when an in-process event bus is available."""
+    try:
+        emit_run_published(model=model, run_id=run_id, published_at=published_at)
+    except RuntimeError:
+        logger.debug("No in-process event bus available for run.published emission")
+
+
+def step_publish_run(
     run_id: RunID,
     store: LocalObjectStore,
     layout: StorageLayout,
+    data_dir: Path,
 ) -> None:
-    """Create or update the run catalog."""
-    logger.info("Step 4/4: Updating run catalog")
+    """Publish staged artifacts via the canonical publish helper."""
+    logger.info("Step 4/4: Publishing staged artifacts")
     catalog_path = layout.catalog_path
+    if store.exists(catalog_path):
+        catalog = RunCatalog.from_json(store.read_bytes(catalog_path).decode("utf-8"))
+    else:
+        catalog = RunCatalog.new("gfs")
+
+    lifecycle = _lifecycle_for_data_dir(data_dir)
+
+    if catalog.get_entry(run_id) is not None:
+        logger.warning(
+            "Run %s already exists in catalog; falling back to current-pointer update",
+            run_id,
+        )
+        catalog.rollback_to(run_id)
+        store.write_bytes(catalog_path, catalog.to_json().encode("utf-8"))
+        return
 
     try:
-        data = store.read_bytes(catalog_path)
-        catalog = RunCatalog.from_json(data.decode("utf-8"))
-        if catalog.get_entry(run_id) is not None:
-            logger.info("  Run %s already in catalog, making current", run_id)
-            catalog.rollback_to(run_id)
-        else:
-            catalog.publish_run(run_id, layout=layout)
-    except (FileNotFoundError, OSError):
-        catalog = RunCatalog.new("gfs")
-        catalog.publish_run(run_id, layout=layout)
+        lifecycle.register("gfs", run_id, PROCESSING_VERSION)
+    except DuplicateRun:
+        logger.info(
+            "Lifecycle already exists for %s/%s; reusing existing row",
+            layout.model, run_id,
+        )
+    for state in (RunState.INGESTING, RunState.STAGED, RunState.VALIDATED):
+        try:
+            lifecycle.transition(
+                "gfs",
+                run_id,
+                PROCESSING_VERSION,
+                state,
+                context="local dev pipeline",
+            )
+        except Exception as exc:
+            logger.debug("Skipping lifecycle transition to %s: %s", state.value, exc)
 
-    store.write_bytes(catalog_path, catalog.to_json().encode("utf-8"))
+    publish_run(
+        store=store,
+        layout=layout,
+        catalog=catalog,
+        lifecycle=lifecycle,
+        run_id=run_id,
+        processing_version=PROCESSING_VERSION,
+        on_published=_emit_run_published_if_available,
+    )
     logger.info("  Current run: %s", catalog.current_run_id)
 
 
@@ -288,7 +341,7 @@ def main() -> None:
         )
 
     step_write_manifest(run_id, forecast_hours, store, layout, generated_layers)
-    step_update_catalog(run_id, store, layout)
+    step_publish_run(run_id, store, layout, data_dir)
 
     logger.info("")
     logger.info("=" * 60)

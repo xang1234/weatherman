@@ -317,6 +317,29 @@ class TestEDRService:
                 datetime_filter=None,
             )
 
+    def test_repeated_point_queries_reuse_cached_interpolation_plan(self, edr_setup):
+        svc, model, run_id = edr_setup
+
+        first = svc.query_position(
+            model=model,
+            run_id=run_id,
+            lon=12.0,
+            lat=33.0,
+            parameter_names=["tmp_2m"],
+            datetime_filter="0/6",
+        )
+        second = svc.query_position(
+            model=model,
+            run_id=run_id,
+            lon=12.0,
+            lat=33.0,
+            parameter_names=["tmp_2m"],
+            datetime_filter="0/6",
+        )
+
+        assert first == second
+        assert len(svc._point_cache) == 1
+
 
 # ---------------------------------------------------------------------------
 # FastAPI route integration test

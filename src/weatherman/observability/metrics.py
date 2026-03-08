@@ -91,6 +91,41 @@ PIPELINE_RUNS = Counter(
     labelnames=["model", "status"],
 )
 
+# ---------------------------------------------------------------------------
+# Weather / AIS product metrics
+# ---------------------------------------------------------------------------
+
+_EDR_QUERY_BUCKETS = (
+    0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5,
+)
+
+EDR_QUERY_DURATION = Histogram(
+    "edr_query_duration_seconds",
+    "EDR position query latency in seconds",
+    labelnames=["model", "cache_hit"],
+    buckets=_EDR_QUERY_BUCKETS,
+)
+
+AIS_TILE_BYTES = Histogram(
+    "ais_tile_payload_bytes",
+    "Encoded AIS vector tile payload size in bytes",
+    labelnames=["zoom", "thinned"],
+    buckets=(0, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072),
+)
+
+AIS_TILE_FEATURES = Histogram(
+    "ais_tile_features",
+    "Number of vessel features emitted per AIS vector tile",
+    labelnames=["zoom", "thinned"],
+    buckets=(0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+)
+
+AIS_INGEST_TO_VISIBLE_SECONDS = Gauge(
+    "ais_ingest_to_visible_seconds",
+    "Lag in seconds between an AIS snapshot date and refresh completion",
+    labelnames=["tenant_id"],
+)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline timing helper

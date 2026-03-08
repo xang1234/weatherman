@@ -20,6 +20,8 @@ export interface UseWeatherLayerOptions {
   tileSize?: number
   /** Whether the overlay is visible (default true) */
   visible?: boolean
+  /** Adjacent forecast hours to prefetch for smoother scrubbing/playback */
+  prefetchForecastHours?: number[]
 }
 
 const SOURCE_PREFIX = 'wx-raster'
@@ -61,6 +63,53 @@ function buildTileJsonUrl(
   return `${apiBase}/tiles/${model}/${runId}/tilejson.json?${params}`
 }
 
+function wrapLon(lng: number): number {
+  return ((lng + 180) % 360 + 360) % 360 - 180
+}
+
+function lngLatToTile(lng: number, lat: number, z: number): { x: number; y: number } {
+  const n = 2 ** z
+  const wrappedLng = wrapLon(lng)
+  const x = Math.floor(((wrappedLng + 180) / 360) * n)
+  const latRad = lat * Math.PI / 180
+  const merc = Math.log(Math.tan(Math.PI / 4 + latRad / 2))
+  const y = Math.floor((1 - merc / Math.PI) / 2 * n)
+  return {
+    x: Math.max(0, Math.min(n - 1, x)),
+    y: Math.max(0, Math.min(n - 1, y)),
+  }
+}
+
+function visibleTiles(map: maplibregl.Map, z: number): Array<{ x: number; y: number }> {
+  const bounds = map.getBounds()
+  const northWest = lngLatToTile(bounds.getWest(), bounds.getNorth(), z)
+  const southEast = lngLatToTile(bounds.getEast(), bounds.getSouth(), z)
+  const n = 2 ** z
+  const xs: number[] = []
+
+  if (northWest.x <= southEast.x) {
+    for (let x = northWest.x; x <= southEast.x; x += 1) xs.push(x)
+  } else {
+    for (let x = northWest.x; x < n; x += 1) xs.push(x)
+    for (let x = 0; x <= southEast.x; x += 1) xs.push(x)
+  }
+
+  const tiles: Array<{ x: number; y: number }> = []
+  const yStart = Math.min(northWest.y, southEast.y)
+  const yEnd = Math.max(northWest.y, southEast.y)
+  for (const x of xs) {
+    for (let y = yStart; y <= yEnd; y += 1) {
+      tiles.push({ x, y })
+    }
+  }
+  return tiles
+}
+
+function resolveUrl(template: string): string {
+  if (/^https?:\/\//.test(template)) return template
+  return new URL(template, window.location.origin).toString()
+}
+
 export function useWeatherLayer({
   map,
   isLoaded,
@@ -71,17 +120,12 @@ export function useWeatherLayer({
   opacity = 0.7,
   tileSize = 256,
   visible = true,
+  prefetchForecastHours = [],
 }: UseWeatherLayerOptions): void {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 
   // Track the currently active source/layer so we can remove it on swap
   const activeRef = useRef<{ srcId: string; lyrId: string } | null>(null)
-
-  // Refs for values used in the main effect's paint but that shouldn't trigger re-add
-  const opacityRef = useRef(opacity)
-  opacityRef.current = opacity
-  const visibleRef = useRef(visible)
-  visibleRef.current = visible
 
   // Remove a source+layer pair from the map if they exist
   const removePair = useCallback((m: maplibregl.Map, srcId: string, lyrId: string) => {
@@ -128,7 +172,7 @@ export function useWeatherLayer({
         type: 'raster',
         source: srcId,
         paint: {
-          'raster-opacity': visibleRef.current ? opacityRef.current : 0,
+          'raster-opacity': visible ? opacity : 0,
           'raster-fade-duration': 300,
         },
       },
@@ -143,7 +187,7 @@ export function useWeatherLayer({
     if (prev) {
       removePair(m, prev.srcId, prev.lyrId)
     }
-  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair])
+  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, opacity, visible])
 
   // Update opacity on existing layer when it changes
   useEffect(() => {
@@ -155,13 +199,56 @@ export function useWeatherLayer({
     }
   }, [map, isLoaded, opacity, visible])
 
+  // Prefetch adjacent hours for the current viewport to smooth playback.
+  useEffect(() => {
+    const m = map.current
+    if (!m || !isLoaded || !runId || !layer || prefetchForecastHours.length === 0) return
+    const activeMap = m
+    const activeRunId = runId
+    const activeLayer = layer
+
+    const controller = new AbortController()
+
+    async function prefetchAdjacentHours() {
+      const z = Math.max(0, Math.min(8, Math.floor(activeMap.getZoom())))
+      const tiles = visibleTiles(activeMap, z)
+      if (tiles.length === 0) return
+
+      await Promise.all(prefetchForecastHours.map(async (hour) => {
+        try {
+          const tileJsonRes = await fetch(
+            buildTileJsonUrl(apiBase, model, activeRunId, activeLayer, hour),
+            { signal: controller.signal },
+          )
+          if (!tileJsonRes.ok) return
+          const tileJson: { tiles?: string[] } = await tileJsonRes.json()
+          const template = tileJson.tiles?.[0]
+          if (!template) return
+          const absoluteTemplate = resolveUrl(template)
+          await Promise.all(tiles.map(async ({ x, y }) => {
+            const url = absoluteTemplate
+              .replace('{z}', String(z))
+              .replace('{x}', String(x))
+              .replace('{y}', String(y))
+            await fetch(url, { signal: controller.signal }).catch(() => undefined)
+          }))
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return
+        }
+      }))
+    }
+
+    prefetchAdjacentHours()
+    return () => controller.abort()
+  }, [map, isLoaded, runId, layer, model, apiBase, prefetchForecastHours])
+
   // Cleanup on unmount
   useEffect(() => {
+    const activeMap = map.current
     return () => {
-      const m = map.current
       const active = activeRef.current
-      if (m && active) {
-        removePair(m, active.srcId, active.lyrId)
+      if (activeMap && active) {
+        removePair(activeMap, active.srcId, active.lyrId)
         activeRef.current = null
       }
     }

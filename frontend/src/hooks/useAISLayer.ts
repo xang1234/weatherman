@@ -123,8 +123,6 @@ export function useAISLayer({
 }: UseAISLayerOptions): void {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const activeDateRef = useRef<string | null>(null)
-  const visibleRef = useRef(visible)
-  visibleRef.current = visible
 
   useEffect(() => {
     const m = map.current
@@ -182,7 +180,7 @@ export function useAISLayer({
       },
       paint: {
         'icon-color': shiptypeColorExpression(),
-        'icon-opacity': visibleRef.current ? 1 : 0,
+        'icon-opacity': visible ? 1 : 0,
       },
     })
 
@@ -208,11 +206,11 @@ export function useAISLayer({
       },
       paint: {
         'icon-color': shiptypeColorExpression(),
-        'icon-opacity': visibleRef.current ? 1 : 0,
+        'icon-opacity': visible ? 1 : 0,
       },
     })
 
-  }, [map, isLoaded, snapshotDate, apiBase])
+  }, [map, isLoaded, snapshotDate, apiBase, visible])
 
   // Update visibility on existing layers
   useEffect(() => {
@@ -229,9 +227,9 @@ export function useAISLayer({
 
   // Cleanup on unmount
   useEffect(() => {
+    const activeMap = map.current
     return () => {
-      const m = map.current
-      if (m) cleanup(m)
+      if (activeMap) cleanup(activeMap)
     }
   }, [map])
 }
