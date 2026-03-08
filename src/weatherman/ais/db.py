@@ -145,4 +145,7 @@ class AISDatabase:
         from weatherman.ais.snapshot import ensure_snapshot_schema
         ensure_snapshot_schema(self._con)
 
+        from weatherman.ais.tracks import ensure_tracks_schema
+        ensure_tracks_schema(self._con)
+
         logger.info("AIS schema ensured (version %d)", SCHEMA_VERSION)
