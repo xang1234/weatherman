@@ -147,12 +147,6 @@ class TestFormatSSE:
 
 def test_stream_endpoint_with_replay():
     """Integration test: verify /events/stream replays events via Last-Event-ID."""
-    import os
-    import tempfile
-
-    from weatherman.events.router import init_event_bus, get_event_bus, shutdown_event_bus
-    from weatherman.events.bus import EventBus
-
     async def _test():
         bus = EventBus(replay_limit=50)
 
@@ -298,6 +292,51 @@ class TestEmitRunPublished:
             assert len(calls) == 1
             assert calls[0][0] == "gfs"
             assert calls[0][1] == "20260308T00Z"
+
+    def test_emit_run_published_as_direct_callback(self):
+        """emit_run_published is directly usable as on_published callback."""
+        import sqlalchemy as sa
+        from weatherman.storage.catalog import RunCatalog
+        from weatherman.storage.lifecycle import RunLifecycle, RunState
+        from weatherman.storage.object_store import LocalObjectStore
+        from weatherman.storage.paths import RunID, StorageLayout
+        from weatherman.storage.publish import publish_run
+        import tempfile
+        from pathlib import Path
+
+        init_event_bus()
+        try:
+            bus = get_event_bus()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                store = LocalObjectStore(Path(tmpdir))
+                layout = StorageLayout("gfs")
+                catalog = RunCatalog.new("gfs")
+                engine = sa.create_engine("sqlite:///:memory:")
+                lifecycle = RunLifecycle(engine)
+                lifecycle.create_tables()
+                run_id = RunID("20260308T00Z")
+                version = "1.0.0"
+
+                prefix = layout.staging_prefix(run_id)
+                store.write_bytes(f"{prefix}/zarr/{run_id}.zarr/.zmetadata", b'{}')
+
+                lifecycle.register("gfs", run_id, version)
+                for s in [RunState.INGESTING, RunState.STAGED, RunState.VALIDATED]:
+                    lifecycle.transition("gfs", run_id, version, s)
+
+                # Pass emit_run_published directly as on_published
+                publish_run(
+                    store=store, layout=layout, catalog=catalog,
+                    lifecycle=lifecycle, run_id=run_id,
+                    processing_version=version,
+                    on_published=emit_run_published,
+                )
+
+                # Verify event was emitted to replay buffer
+                assert bus._replay_buffer[-1].event == "run.published"
+        finally:
+            shutdown_event_bus()
 
     def test_callback_failure_does_not_block_publish(self):
         """A failing on_published callback must not prevent publish from completing."""

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 def emit_run_published(
-    *,
     model: str,
     run_id: RunID,
     published_at: datetime,
