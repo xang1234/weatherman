@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from weatherman.ais.mvt import (
     DEFAULT_EXTENT,
     MAX_ZOOM,
     MIN_ZOOM,
+    _lat_to_my,
+    _lon_to_mx,
     generate_tile,
     tile_bounds,
 )
@@ -220,6 +223,126 @@ class TestGenerateTile:
             for key, val in feat["properties"].items():
                 # No None values should appear
                 assert val is not None, f"Property '{key}' is None"
+
+
+# -- Projection accuracy tests --
+
+
+class TestProjectionAccuracy:
+    """Verify Mercator projection produces correct tile-space coordinates.
+
+    At higher latitudes, the non-linear Mercator projection diverges
+    significantly from a naive WGS-84 linear mapping.  These tests
+    catch regressions where coordinates are encoded with the wrong
+    projection, which causes vessels to appear shifted on the map.
+    """
+
+    @staticmethod
+    def _tile_for_latlng(z: int, lat: float, lon: float) -> tuple[int, int]:
+        """Return the (x, y) tile indices containing (lat, lon) at zoom z."""
+        n = 2**z
+        x = int((lon + 180.0) / 360.0 * n)
+        lat_rad = math.radians(lat)
+        y = int(
+            (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi)
+            / 2.0
+            * n
+        )
+        return x, y
+
+    def test_high_latitude_vessel_position(self, snapshot_con):
+        """At lat=51.5° (London), Mercator vs WGS-84 linear differs enough
+        to visibly misplace a vessel.  Verify tile-space coordinates match
+        the correct Mercator projection.
+        """
+        vessel_lat, vessel_lon = 51.5, -0.1  # Grain Star in London
+
+        z = 4
+        x, y = self._tile_for_latlng(z, vessel_lat, vessel_lon)
+
+        tile_bytes = generate_tile(
+            con=snapshot_con,
+            snapshot_date=SNAPSHOT_DATE,
+            tenant_id=TENANT,
+            z=z, x=x, y=y,
+        )
+        assert tile_bytes, f"Expected vessel at z={z}, x={x}, y={y}"
+
+        decoded = mvt.decode(tile_bytes)
+        features = decoded["vessels"]["features"]
+        grain_star = next(
+            f for f in features if f["properties"]["mmsi"] == 311234567
+        )
+
+        coords = grain_star["geometry"]["coordinates"]
+        tile_x, tile_y = coords[0], coords[1]
+
+        # Compute expected tile-space position using Mercator projection.
+        # decode() default (y_coord_down=False) flips Y, so:
+        #   decoded_y = (my_vessel - my_south) / (my_north - my_south) * extent
+        west, south, east, north = tile_bounds(z, x, y)
+        mx_west, mx_east = _lon_to_mx(west), _lon_to_mx(east)
+        my_south, my_north = _lat_to_my(south), _lat_to_my(north)
+        mx_vessel = _lon_to_mx(vessel_lon)
+        my_vessel = _lat_to_my(vessel_lat)
+
+        expected_x = (mx_vessel - mx_west) / (mx_east - mx_west) * DEFAULT_EXTENT
+        expected_y = (my_vessel - my_south) / (my_north - my_south) * DEFAULT_EXTENT
+
+        # Allow small quantization error (MVT coords are integers).
+        assert abs(tile_x - expected_x) <= 1, (
+            f"X mismatch: got {tile_x}, expected {expected_x:.1f}"
+        )
+        assert abs(tile_y - expected_y) <= 1, (
+            f"Y mismatch: got {tile_y}, expected {expected_y:.1f}"
+        )
+
+        # Verify: a naive WGS-84 linear mapping would produce a noticeably
+        # different Y — this is the error the Mercator fix prevents.
+        wrong_y = (vessel_lat - south) / (north - south) * DEFAULT_EXTENT
+        assert abs(wrong_y - expected_y) > 50, (
+            "Mercator and WGS-84 linear should differ significantly at lat 51.5°"
+        )
+
+    def test_near_equator_vessel_position(self, snapshot_con):
+        """Near the equator (lat=1.35°), Mercator ≈ linear — but still verify."""
+        vessel_lat, vessel_lon = 1.35, 103.8  # Bulk carrier in Singapore
+
+        z = 4
+        x, y = self._tile_for_latlng(z, vessel_lat, vessel_lon)
+
+        tile_bytes = generate_tile(
+            con=snapshot_con,
+            snapshot_date=SNAPSHOT_DATE,
+            tenant_id=TENANT,
+            z=z, x=x, y=y,
+        )
+        assert tile_bytes, f"Expected vessel at z={z}, x={x}, y={y}"
+
+        decoded = mvt.decode(tile_bytes)
+        features = decoded["vessels"]["features"]
+        bulk = next(
+            f for f in features if f["properties"]["mmsi"] == 211234567
+        )
+
+        coords = bulk["geometry"]["coordinates"]
+        tile_x, tile_y = coords[0], coords[1]
+
+        west, south, east, north = tile_bounds(z, x, y)
+        mx_west, mx_east = _lon_to_mx(west), _lon_to_mx(east)
+        my_south, my_north = _lat_to_my(south), _lat_to_my(north)
+        mx_vessel = _lon_to_mx(vessel_lon)
+        my_vessel = _lat_to_my(vessel_lat)
+
+        expected_x = (mx_vessel - mx_west) / (mx_east - mx_west) * DEFAULT_EXTENT
+        expected_y = (my_vessel - my_south) / (my_north - my_south) * DEFAULT_EXTENT
+
+        assert abs(tile_x - expected_x) <= 1, (
+            f"X mismatch: got {tile_x}, expected {expected_x:.1f}"
+        )
+        assert abs(tile_y - expected_y) <= 1, (
+            f"Y mismatch: got {tile_y}, expected {expected_y:.1f}"
+        )
 
 
 # -- Router / endpoint tests --
