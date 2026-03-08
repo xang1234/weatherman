@@ -80,20 +80,18 @@ async def _sse_generator(
     Handles keepalive, client disconnect detection, and reconnection replay.
     """
     bus = get_event_bus()
-    async with bus.subscribe(tenant_id, last_event_id) as events:
+    async with bus.subscribe(tenant_id, last_event_id) as queue:
         while True:
             if await request.is_disconnected():
                 break
             try:
                 event = await asyncio.wait_for(
-                    events.__anext__(), timeout=_KEEPALIVE_INTERVAL
+                    queue.get(), timeout=_KEEPALIVE_INTERVAL
                 )
                 yield _format_sse(event)
             except TimeoutError:
                 # Send SSE comment as keepalive
                 yield ": keepalive\n\n"
-            except StopAsyncIteration:
-                break
 
 
 @router.get(

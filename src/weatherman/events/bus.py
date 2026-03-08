@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import AsyncIterator
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -166,14 +164,9 @@ class _SubscriptionContext:
         self._sub = sub
         self._last_event_id = last_event_id
 
-    async def __aenter__(self) -> AsyncIterator[ServerEvent]:
+    async def __aenter__(self) -> asyncio.Queue[ServerEvent]:
         self._bus._register(self._sub, self._last_event_id)
-        return self._iter_events()
+        return self._sub.queue
 
     async def __aexit__(self, *exc: object) -> None:
         self._bus._unregister(self._sub.id)
-
-    async def _iter_events(self) -> AsyncIterator[ServerEvent]:
-        while True:
-            event = await self._sub.queue.get()
-            yield event
