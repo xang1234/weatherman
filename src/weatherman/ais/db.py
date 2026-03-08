@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Schema version — bump when altering the table DDL so that downstream
 # migrations (manual for now) know what to expect.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 AIS_POSITIONS_DDL = """\
 CREATE TABLE IF NOT EXISTS ais_positions (

@@ -34,7 +34,7 @@ import mapbox_vector_tile as mvt
 
 # Column list for the SELECT — must match the property dict construction below.
 _TILE_COLUMNS = (
-    "mmsi, vessel_name, sog, heading, shiptype, vessel_class, "
+    "imommsi, mmsi, vessel_name, sog, heading, shiptype, vessel_class, "
     "dwt, destination, destinationtidied, eta, lat, lon"
 )
 
@@ -79,18 +79,36 @@ def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     return west, south, east, north
 
 
+# Web Mercator (EPSG:3857) half-circumference in meters.
+_HALF_CIRCUMFERENCE = 20037508.342789244
+
+
+def _lon_to_mx(lon: float) -> float:
+    """Convert WGS-84 longitude to Web Mercator X (meters)."""
+    return lon * _HALF_CIRCUMFERENCE / 180.0
+
+
+def _lat_to_my(lat: float) -> float:
+    """Convert WGS-84 latitude to Web Mercator Y (meters)."""
+    lat_rad = math.radians(lat)
+    return math.log(math.tan(math.pi / 4 + lat_rad / 2)) * _HALF_CIRCUMFERENCE / math.pi
+
+
 def _row_to_feature(
     row: tuple,
 ) -> dict:
     """Convert a DuckDB result row into a GeoJSON-like feature dict.
 
-    Coordinates are in WGS-84 (lon, lat) — the MVT encoder's
-    ``quantize_bounds`` option handles the projection into tile space.
+    Coordinates are projected from WGS-84 to Web Mercator (EPSG:3857) so that
+    ``quantize_bounds`` (also in Mercator) correctly maps them into tile space.
     """
-    mmsi, vessel_name, sog, heading, shiptype, vessel_class, \
+    imommsi, mmsi, vessel_name, sog, heading, shiptype, vessel_class, \
         dwt, destination, destinationtidied, eta, lat, lon = row
 
-    properties: dict = {"mmsi": mmsi}
+    mx = _lon_to_mx(lon)
+    my = _lat_to_my(lat)
+
+    properties: dict = {"imommsi": imommsi, "mmsi": mmsi}
 
     # Only include non-null string properties to keep tile size small.
     if vessel_name:
@@ -115,7 +133,7 @@ def _row_to_feature(
         properties["dwt"] = dwt
 
     return {
-        "geometry": f"POINT({lon} {lat})",
+        "geometry": f"POINT({mx} {my})",
         "properties": properties,
     }
 
@@ -172,13 +190,22 @@ def generate_tile(
 
     features = [_row_to_feature(row) for row in rows]
 
+    # quantize_bounds must be in the same CRS as the feature geometries
+    # (Web Mercator meters) for correct non-linear latitude mapping.
+    merc_bounds = (
+        _lon_to_mx(west),
+        _lat_to_my(south),
+        _lon_to_mx(east),
+        _lat_to_my(north),
+    )
+
     return mvt.encode(
         [{
             "name": "vessels",
             "features": features,
         }],
         default_options={
-            "quantize_bounds": (west, south, east, north),
+            "quantize_bounds": merc_bounds,
             "extents": extent,
         },
     )

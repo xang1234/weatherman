@@ -1,0 +1,144 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: weatherman-critical
+    folder: Weatherman
+    interval: 1m
+    rules:
+      - uid: wx-tile-latency-p99
+        title: Tile p99 latency exceeds 1s
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: >-
+                histogram_quantile(0.99,
+                  sum(rate(http_request_duration_seconds_bucket{endpoint=~"/tiles/.*"}[5m]))
+                  by (le)
+                )
+              intervalMs: 60000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [1.0]
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tile p99 latency is above 1 second
+          description: >-
+            Tile serving p99 latency has exceeded 1s for 5 minutes.
+            Current value: {{ $value }}s.
+
+      - uid: wx-pipeline-failure
+        title: Pipeline run failure
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: increase(pipeline_runs_total{status="failure"}[10m])
+              intervalMs: 60000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pipeline failure detected for {{ $labels.model }}"
+          description: >-
+            A pipeline run failed for model {{ $labels.model }}.
+            Check pipeline logs for details.
+
+      - uid: wx-data-freshness
+        title: Data freshness exceeds 4 hours
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: time() - data_last_publish_timestamp_seconds
+              intervalMs: 60000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [14400]
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Stale data for model {{ $labels.model }}"
+          description: >-
+            Model {{ $labels.model }} has not been published in over 4 hours.
+            Last publish was {{ $value | humanizeDuration }} ago.
+
+      - uid: wx-data-freshness-absent
+        title: Data freshness metric missing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: absent(data_last_publish_timestamp_seconds)
+              intervalMs: 60000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: No data freshness metric — no model has published yet
+          description: >-
+            The data_last_publish_timestamp_seconds metric is absent.
+            This means no pipeline has successfully published data.
+            Check pipeline configuration and connectivity.

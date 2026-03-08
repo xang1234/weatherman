@@ -6,6 +6,8 @@ from weatherman.observability.logging import (
     bind_context, unbind_context, clear_context,
 )
 from weatherman.observability.metrics import (
+    DATA_LAST_PUBLISH,
+    PIPELINE_RUNS,
     PrometheusMiddleware,
     metrics_endpoint,
     time_pipeline_step,
@@ -15,5 +17,6 @@ __all__ = [
     "get_tracer", "setup_tracing", "shutdown_tracing",
     "setup_logging", "reset_logging",
     "bind_context", "unbind_context", "clear_context",
+    "DATA_LAST_PUBLISH", "PIPELINE_RUNS",
     "PrometheusMiddleware", "metrics_endpoint", "time_pipeline_step",
 ]

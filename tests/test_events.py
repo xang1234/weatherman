@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from weatherman.events.bus import EventBus, ServerEvent
-from weatherman.events.emissions import emit_run_published
+from weatherman.events.emissions import emit_ais_refreshed, emit_run_published
 from weatherman.events.router import _format_sse, init_event_bus, get_event_bus, shutdown_event_bus
 
 
@@ -338,6 +338,77 @@ class TestEmitRunPublished:
         finally:
             shutdown_event_bus()
 
+
+# ---------------------------------------------------------------------------
+# emit_ais_refreshed tests
+# ---------------------------------------------------------------------------
+
+
+class TestEmitAisRefreshed:
+    def test_emits_event_to_bus(self):
+        """emit_ais_refreshed puts an ais.refreshed event on the global bus."""
+        from datetime import date
+
+        init_event_bus()
+        try:
+            bus = get_event_bus()
+
+            async def _test():
+                async with bus.subscribe("any-tenant") as queue:
+                    emit_ais_refreshed(
+                        ais_date=date(2026, 3, 8),
+                        tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+                    )
+                    event = await asyncio.wait_for(queue.get(), timeout=1)
+                    assert event.event == "ais.refreshed"
+                    assert event.tenant_id == "*"
+
+                    import json
+                    payload = json.loads(event.data)
+                    assert payload["ais_date"] == "2026-03-08"
+                    assert payload["tile_url_template"] == "/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt"
+
+            run(_test())
+        finally:
+            shutdown_event_bus()
+
+    def test_broadcast_to_all_tenants(self):
+        """ais.refreshed events are broadcast (tenant_id='*')."""
+        from datetime import date
+
+        init_event_bus()
+        try:
+            bus = get_event_bus()
+
+            async def _test():
+                async with bus.subscribe("tenant-a") as q1:
+                    async with bus.subscribe("tenant-b") as q2:
+                        emit_ais_refreshed(
+                            ais_date=date(2026, 3, 8),
+                            tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+                        )
+                        ev1 = await asyncio.wait_for(q1.get(), timeout=1)
+                        ev2 = await asyncio.wait_for(q2.get(), timeout=1)
+                        assert ev1.event == "ais.refreshed"
+                        assert ev2.event == "ais.refreshed"
+
+            run(_test())
+        finally:
+            shutdown_event_bus()
+
+    def test_raises_if_bus_not_initialised(self):
+        """Calling emit_ais_refreshed without init_event_bus raises RuntimeError."""
+        from datetime import date
+
+        shutdown_event_bus()  # ensure clean state
+        with pytest.raises(RuntimeError, match="EventBus not initialised"):
+            emit_ais_refreshed(
+                ais_date=date(2026, 3, 8),
+                tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+            )
+
+
+class TestCallbackFailureDoesNotBlockPublish:
     def test_callback_failure_does_not_block_publish(self):
         """A failing on_published callback must not prevent publish from completing."""
         import sqlalchemy as sa

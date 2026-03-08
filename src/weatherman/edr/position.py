@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+
+from weatherman.caching import etag_matches as _etag_matches
 from typing import Annotated, Any, Callable
 
 import numpy as np
@@ -134,22 +136,8 @@ def compute_etag(
     return f'"{digest}"'
 
 
-def _etag_matches(if_none_match: str, etag: str) -> bool:
-    """Check if any ETag in an If-None-Match header matches.
 
-    Handles multi-value headers (``"a", "b"``) and weak ETags (``W/"a"``),
-    per RFC 9110 §8.8.3 (weak comparison for GET).
-    """
-    for token in if_none_match.split(","):
-        token = token.strip()
-        if token == "*":
-            return True
-        # Strip weak indicator prefix for weak comparison
-        if token.startswith("W/"):
-            token = token[2:]
-        if token == etag:
-            return True
-    return False
+# _etag_matches is imported from weatherman.caching
 
 
 # One year; published runs are immutable so this is safe.
@@ -462,11 +450,15 @@ async def edr_position(
         datetime_filter=datetime_filter,
     )
 
+    cache_control = (
+        _LATEST_CACHE_CONTROL if run_id == "latest" else _IMMUTABLE_CACHE_CONTROL
+    )
+
     # 304 Not Modified if the client already has this exact response
     if if_none_match and _etag_matches(if_none_match, etag):
         return Response(
             status_code=304,
-            headers={"ETag": etag},
+            headers={"ETag": etag, "Cache-Control": cache_control},
         )
 
     result = svc.query_position(
@@ -476,10 +468,6 @@ async def edr_position(
         lat=lat,
         parameter_names=param_list,
         datetime_filter=datetime_filter,
-    )
-
-    cache_control = (
-        _LATEST_CACHE_CONTROL if run_id == "latest" else _IMMUTABLE_CACHE_CONTROL
     )
 
     return JSONResponse(

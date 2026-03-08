@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from weatherman.events.bus import ServerEvent
 from weatherman.events.router import get_event_bus
 from weatherman.storage.paths import RunID
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["emit_run_published", "emit_ais_refreshed"]
 
 
 def emit_run_published(
@@ -53,6 +55,42 @@ def emit_run_published(
         extra={
             "model": model,
             "run_id": str(run_id),
+            "event_id": event.id,
+            "delivered_to": delivered,
+        },
+    )
+
+
+def emit_ais_refreshed(
+    ais_date: date,
+    tile_url_template: str,
+) -> None:
+    """Emit an ``ais.refreshed`` SSE event.
+
+    Called after a new AIS day is loaded into DuckDB and MVT tiles are
+    generated. The event is broadcast to all tenants (``tenant_id="*"``)
+    because AIS data is shared.
+
+    Payload:
+        ais_date: ISO 8601 date of the refreshed AIS data (e.g. "2026-03-08").
+        tile_url_template: URL template for accessing the generated MVT tiles.
+    """
+    bus = get_event_bus()
+    data = json.dumps({
+        "ais_date": ais_date.isoformat(),
+        "tile_url_template": tile_url_template,
+    })
+    event = ServerEvent(
+        id=bus.next_event_id(),
+        event="ais.refreshed",
+        data=data,
+        tenant_id="*",  # AIS data is shared across tenants
+    )
+    delivered = bus.publish_sync(event)
+    logger.info(
+        "Emitted ais.refreshed event",
+        extra={
+            "ais_date": ais_date.isoformat(),
             "event_id": event.id,
             "delivered_to": delivered,
         },

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   DataAgeState,
   DataAgeThresholds,
@@ -36,12 +36,19 @@ export interface UseDataAgeOptions {
   pollIntervalMs?: number
   /** Color threshold overrides */
   thresholds?: DataAgeThresholds
+  /**
+   * Monotonically increasing version counter from SSE.
+   * When this changes, the hook immediately re-fetches the catalog
+   * instead of waiting for the next poll interval.
+   */
+  version?: number
 }
 
 export function useDataAge({
   model,
   pollIntervalMs = 300_000,
   thresholds = DEFAULT_THRESHOLDS,
+  version = 0,
 }: UseDataAgeOptions): DataAgeState | null {
   const [state, setState] = useState<DataAgeState | null>(null)
   const publishedAtRef = useRef<Date | null>(null)
@@ -58,68 +65,77 @@ export function useDataAge({
     runIdRef.current = null
   }, [model])
 
-  // Fetch on mount + poll interval
+  // Stable fetch function — uses its own AbortController per call so
+  // concurrent fetches (poll + SSE nudge) don't cancel each other.
+  const fetchCatalog = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await fetch(`${apiBase}/api/catalog/${model}`, { signal })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+      const data: CatalogResponse = await res.json()
+      const currentRun = data.runs.find(
+        (r) => r.run_id === data.current_run_id && r.status === 'published',
+      )
+      if (!currentRun) throw new Error('No published run found')
+
+      const publishedAt = new Date(currentRun.published_at)
+      if (isNaN(publishedAt.getTime())) {
+        throw new Error('Invalid published_at timestamp')
+      }
+
+      publishedAtRef.current = publishedAt
+      runIdRef.current = currentRun.run_id
+
+      const t = thresholdsRef.current
+      const ageMinutes = minutesSince(publishedAt)
+      setState({
+        model,
+        runId: currentRun.run_id,
+        publishedAt,
+        ageMinutes,
+        status: getFreshnessStatus(ageMinutes, t),
+        isOffline: false,
+      })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+
+      const t = thresholdsRef.current
+      setState((prev) => {
+        if (prev) {
+          const ageMinutes = minutesSince(prev.publishedAt)
+          return {
+            ...prev,
+            ageMinutes,
+            status: getFreshnessStatus(ageMinutes, t),
+            isOffline: true,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          }
+        }
+        return null
+      })
+    }
+  }, [apiBase, model])
+
+  // Fetch on mount + poll interval (stable — not affected by version bumps)
   useEffect(() => {
     const controller = new AbortController()
-
-    async function fetchCatalog() {
-      try {
-        const res = await fetch(`${apiBase}/api/catalog/${model}`, {
-          signal: controller.signal,
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
-        const data: CatalogResponse = await res.json()
-        const currentRun = data.runs.find(
-          (r) => r.run_id === data.current_run_id && r.status === 'published',
-        )
-        if (!currentRun) throw new Error('No published run found')
-
-        const publishedAt = new Date(currentRun.published_at)
-        if (isNaN(publishedAt.getTime())) {
-          throw new Error('Invalid published_at timestamp')
-        }
-
-        publishedAtRef.current = publishedAt
-        runIdRef.current = currentRun.run_id
-
-        const t = thresholdsRef.current
-        const ageMinutes = minutesSince(publishedAt)
-        setState({
-          model,
-          runId: currentRun.run_id,
-          publishedAt,
-          ageMinutes,
-          status: getFreshnessStatus(ageMinutes, t),
-          isOffline: false,
-        })
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return
-
-        const t = thresholdsRef.current
-        setState((prev) => {
-          if (prev) {
-            const ageMinutes = minutesSince(prev.publishedAt)
-            return {
-              ...prev,
-              ageMinutes,
-              status: getFreshnessStatus(ageMinutes, t),
-              isOffline: true,
-              error: err instanceof Error ? err.message : 'Unknown error',
-            }
-          }
-          return null
-        })
-      }
-    }
-
-    fetchCatalog()
-    const id = setInterval(fetchCatalog, pollIntervalMs)
+    fetchCatalog(controller.signal)
+    const id = setInterval(() => fetchCatalog(controller.signal), pollIntervalMs)
     return () => {
       controller.abort()
       clearInterval(id)
     }
-  }, [apiBase, model, pollIntervalMs])
+  }, [fetchCatalog, pollIntervalMs])
+
+  // SSE-triggered immediate refetch — does not disturb the poll timer
+  const prevVersionRef = useRef(version)
+  useEffect(() => {
+    if (version === prevVersionRef.current) return
+    prevVersionRef.current = version
+    const controller = new AbortController()
+    fetchCatalog(controller.signal)
+    return () => controller.abort()
+  }, [version, fetchCatalog])
 
   // Update relative time every 60s without re-fetching
   useEffect(() => {

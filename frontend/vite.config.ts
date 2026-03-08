@@ -22,6 +22,20 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/cog': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+      '/ais': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/events': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        // Prevent http-proxy from buffering SSE stream due to content-encoding
+        headers: { 'Accept-Encoding': 'identity' },
+      },
       '/health': {
         target: 'http://localhost:8000',
         changeOrigin: true,

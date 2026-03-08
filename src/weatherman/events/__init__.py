@@ -6,7 +6,7 @@ Components:
 """
 
 from weatherman.events.bus import EventBus, ServerEvent
-from weatherman.events.emissions import emit_run_published
+from weatherman.events.emissions import emit_ais_refreshed, emit_run_published
 from weatherman.events.router import router
 
-__all__ = ["EventBus", "ServerEvent", "emit_run_published", "router"]
+__all__ = ["EventBus", "ServerEvent", "emit_ais_refreshed", "emit_run_published", "router"]
