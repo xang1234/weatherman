@@ -339,4 +339,4 @@ class TestAISTileService:
         init_ais_tile_service(snapshot_db_path)
         with pytest.raises(RuntimeError, match="already initialized"):
             init_ais_tile_service(snapshot_db_path)
-        mod._service = None
+        shutdown_ais_tile_service()

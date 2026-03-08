@@ -137,7 +137,7 @@ def get_ais_tile_service() -> AISTileService:
     summary="Get an AIS vector tile",
     response_class=Response,
 )
-async def get_ais_tile(
+def get_ais_tile(
     snapshot_date: date,
     z: Annotated[int, Path(ge=MIN_ZOOM, le=MAX_ZOOM)],
     x: Annotated[int, Path(ge=0)],

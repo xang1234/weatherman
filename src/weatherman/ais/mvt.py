@@ -47,6 +47,17 @@ WHERE "date" = $snapshot_date
   AND lat >= $south AND lat < $north
 """
 
+# Antimeridian-crossing variant: when west > east (e.g., west=170, east=-170),
+# split into two ranges covering both sides of the ±180° boundary.
+_TILE_QUERY_ANTIMERIDIAN = f"""\
+SELECT {_TILE_COLUMNS}
+FROM ais_snapshot
+WHERE "date" = $snapshot_date
+  AND tenant_id = $tenant_id
+  AND (lon >= $west OR lon < $east)
+  AND lat >= $south AND lat < $north
+"""
+
 # MVT spec default extent (4096 = standard for Mapbox/MapLibre).
 DEFAULT_EXTENT = 4096
 
@@ -141,8 +152,11 @@ def generate_tile(
     """
     west, south, east, north = tile_bounds(z, x, y)
 
+    # At the antimeridian, west > east (e.g., tile spanning 170° to -170°).
+    query = _TILE_QUERY_ANTIMERIDIAN if west > east else _TILE_QUERY
+
     rows = con.execute(
-        _TILE_QUERY,
+        query,
         {
             "snapshot_date": snapshot_date,
             "tenant_id": tenant_id,
