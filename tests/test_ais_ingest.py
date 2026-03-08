@@ -8,7 +8,6 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from weatherman.ais.db import AISDatabase
 from weatherman.ais.ingest import load_day
 from tests.conftest_ais import (
     _write_test_parquet,
