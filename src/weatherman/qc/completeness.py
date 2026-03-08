@@ -94,8 +94,9 @@ def check_completeness(
     root = zarr.open_group(str(store_path), mode="r")
     expected_shape = schema.shape
 
-    # Track which hours are complete across ALL variables
+    # Track which hours are complete across all checked variables
     hour_complete_counts: dict[int, int] = {h: 0 for h in schema.forecast_hours}
+    checked_vars = 0
 
     for var_name, var_def in schema.variables.items():
         # Check variable exists
@@ -132,11 +133,14 @@ def check_completeness(
             )
             continue
 
+        checked_vars += 1
+        is_float = np.issubdtype(arr.dtype, np.floating)
+
         # Check each forecast hour for all-NaN slices
         missing_hours: list[int] = []
         for time_idx, fhour in enumerate(schema.forecast_hours):
             time_slice = arr[time_idx, :, :]
-            if np.all(np.isnan(time_slice)):
+            if is_float and np.all(np.isnan(time_slice)):
                 missing_hours.append(fhour)
             else:
                 hour_complete_counts[fhour] += 1
@@ -159,10 +163,10 @@ def check_completeness(
                 missing_hours,
             )
 
-    # A forecast hour is "complete" only when ALL variables have data for it
-    n_vars = len(schema.variables)
+    # A forecast hour is "complete" when all shape-checked variables have data
     result.complete_hours = sum(
-        1 for count in hour_complete_counts.values() if count == n_vars
+        1 for count in hour_complete_counts.values()
+        if checked_vars > 0 and count == checked_vars
     )
 
     if result.passed:

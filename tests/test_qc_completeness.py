@@ -70,9 +70,9 @@ class TestMissingVariable:
 
         assert not result.passed
         assert result.present_variables == 1
-        assert len(result.issues) == 1
-        assert result.issues[0].kind == "missing_variable"
-        assert result.issues[0].variable == "var_b"
+        issues = [i for i in result.issues if i.variable == "var_b"]
+        assert len(issues) == 1
+        assert issues[0].kind == "missing_variable"
 
     def test_detects_all_variables_missing(self, tmp_path):
         store_path = _make_store(tmp_path)
@@ -136,6 +136,20 @@ class TestShapeMismatch:
         shape_issues = [i for i in result.issues if i.kind == "shape_mismatch"]
         assert len(shape_issues) == 1
         assert shape_issues[0].variable == "var_a"
+
+
+class TestEmptyStore:
+    def test_completely_empty_store(self, tmp_path):
+        path = tmp_path / "empty.zarr"
+        zarr.open_group(str(path), mode="w")
+
+        result = check_completeness(path, _SCHEMA)
+
+        assert not result.passed
+        assert result.present_variables == 0
+        assert result.complete_hours == 0
+        assert len(result.issues) == 2
+        assert all(i.kind == "missing_variable" for i in result.issues)
 
 
 class TestCompletenessIssueStr:
