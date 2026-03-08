@@ -70,11 +70,12 @@ def normalize_query(
     *,
     tenant_id: str,
     con: duckdb.DuckDBPyConnection,
-) -> duckdb.DuckDBPyRelation:
-    """Return a DuckDB relation with normalized AIS data from Parquet files.
+) -> duckdb.DuckDBPyConnection:
+    """Execute the normalization query and return the connection with results.
 
-    The relation is lazy — no data is materialized until the caller
-    consumes it (e.g., via ``INSERT INTO ... SELECT``).
+    Call ``.fetchall()`` or ``.fetchone()`` on the returned connection
+    to retrieve rows.  For bulk loading, prefer using :data:`NORMALIZE_SQL`
+    directly inside an ``INSERT INTO … SELECT`` statement.
 
     Parameters
     ----------
@@ -88,8 +89,8 @@ def normalize_query(
 
     Returns
     -------
-    duckdb.DuckDBPyRelation
-        A lazy relation with columns matching the ``ais_positions`` schema.
+    duckdb.DuckDBPyConnection
+        The connection with results ready to fetch via ``.fetchall()``.
     """
     path_str = str(parquet_path)
     logger.info(
