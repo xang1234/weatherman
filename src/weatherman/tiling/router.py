@@ -10,9 +10,10 @@ URL patterns:
 """
 
 from typing import Annotated, Callable, Optional
+from urllib.parse import quote, urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
 from weatherman.storage.catalog import RunCatalog
@@ -138,21 +139,40 @@ class TileService:
     def build_tilejson(
         self,
         layer: str,
-        tile_url_template: str,
+        cog_uri: str,
     ) -> dict:
-        """Build a TileJSON response for MapLibre integration."""
+        """Build a TileJSON response with TiTiler-native tile URLs.
+
+        Returns tile URL templates that point directly to TiTiler's
+        ``/cog/tiles`` endpoint with colormap and rescale baked into
+        the query string.  The browser fetches tiles from TiTiler
+        without proxying through Weatherman.
+        """
         try:
-            get_colormap(layer)
+            colormap = get_colormap(layer)
         except KeyError:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
             )
 
+        # urlencode for simple params; quote the colormap JSON separately
+        # to avoid double-encoding (the URL goes into TileJSON as-is and
+        # MapLibre sends it verbatim — no extra decode step).
+        qs = urlencode({
+            "url": cog_uri,
+            "rescale": colormap.rescale_range(),
+        })
+        cmap_encoded = quote(colormap.to_json(), safe="")
+        tile_url = (
+            f"/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+            f"?{qs}&colormap={cmap_encoded}"
+        )
+
         return {
             "tilejson": "3.0.0",
             "name": layer,
-            "tiles": [tile_url_template],
+            "tiles": [tile_url],
             "minzoom": 0,
             "maxzoom": 8,
             "bounds": [-180, -90, 180, 90],
@@ -226,26 +246,23 @@ async def get_tile(
     summary="TileJSON metadata for MapLibre",
 )
 async def get_tilejson(
-    request: Request,
     model: str,
     run_id: str,
     layer: Annotated[str, Query(description="Weather layer name")] = "temperature",
     forecast_hour: Annotated[int, Query(description="Forecast hour", ge=0)] = 0,
     svc: TileService = Depends(get_tile_service),
 ) -> dict:
-    """Return a TileJSON document for the specified model run and layer.
+    """Return a TileJSON document with direct TiTiler tile URLs.
+
+    Tile URL templates point to TiTiler's ``/cog/tiles`` endpoint so
+    the browser fetches tiles directly — no Weatherman proxy hop.
 
     Supports 'latest' as run_id.
     """
     is_latest = run_id == "latest"
     resolved_run_id = svc.resolve_run_id(model, run_id)
+    cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
 
-    base = str(request.base_url).rstrip("/")
-    tile_url = (
-        f"{base}/tiles/{model}/{resolved_run_id}/{layer}/{forecast_hour}"
-        "/{z}/{x}/{y}.png"
-    )
-
-    data = svc.build_tilejson(layer, tile_url)
+    data = svc.build_tilejson(layer, cog_uri)
     cache_control = svc.CACHE_LATEST if is_latest else svc.CACHE_IMMUTABLE
     return JSONResponse(content=data, headers={"Cache-Control": cache_control})

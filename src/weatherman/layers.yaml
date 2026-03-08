@@ -76,9 +76,9 @@ layers:
   temperature:
     display_name: "Temperature at 2m"
     variable: tmp_2m
-    units: "K"
+    units: "°C"
     palette: temperature
-    value_range: [220.0, 330.0]
+    value_range: [-55.0, 55.0]
 
   wind_speed:
     display_name: "Wind Speed at 10m"

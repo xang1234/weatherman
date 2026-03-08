@@ -5,9 +5,9 @@ We define colormaps for our core weather layers and provide utilities to
 serialize them for TiTiler's colormap query parameter.
 
 Reference ranges:
-  - Temperature (2m): 220K to 330K (-53C to +57C)
+  - Temperature (2m): -55°C to +55°C (GRIB2/GDAL delivers Celsius)
   - Wind speed (10m): 0 to 50 m/s
-  - Precipitation rate: 0 to 50 mm/hr
+  - Precipitation (accumulated): 0 to 250 kg/m² (≡ mm)
 """
 
 from __future__ import annotations
@@ -83,22 +83,22 @@ def _interpolate_colors(
 
 # -- Colormap definitions --
 
-# Temperature: blue-white-red diverging (220K cold blue -> 275K white -> 330K hot red)
+# Temperature: blue-white-red diverging (-55°C cold blue -> 0°C white -> +55°C hot red)
 TEMPERATURE_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.0, (5, 48, 97)),       # deep blue (220K / -53C)
+    (0.0, (5, 48, 97)),       # deep blue (-55°C)
     (0.2, (33, 102, 172)),    # medium blue
     (0.4, (146, 197, 222)),   # light blue
-    (0.5, (247, 247, 247)),   # near-white (275K / 2C)
+    (0.5, (247, 247, 247)),   # near-white (0°C)
     (0.6, (244, 165, 130)),   # light red
     (0.8, (214, 96, 77)),     # medium red
-    (1.0, (178, 24, 43)),     # deep red (330K / 57C)
+    (1.0, (178, 24, 43)),     # deep red (+55°C)
 ]
 
 TEMPERATURE = WeatherColormap(
     name="temperature",
-    unit="K",
-    value_min=220.0,
-    value_max=330.0,
+    unit="°C",
+    value_min=-55.0,
+    value_max=55.0,
     colormap=_interpolate_colors(TEMPERATURE_STOPS),
 )
 
@@ -120,7 +120,7 @@ WIND_SPEED = WeatherColormap(
     colormap=_interpolate_colors(WIND_SPEED_STOPS),
 )
 
-# Precipitation rate: white-to-blue sequential
+# Precipitation: white-to-green sequential (total accumulated, kg/m² ≡ mm)
 PRECIPITATION_STOPS: list[tuple[float, tuple[int, int, int]]] = [
     (0.0, (255, 255, 255)),   # white (no precip)
     (0.15, (199, 233, 192)),  # very light green
@@ -128,14 +128,14 @@ PRECIPITATION_STOPS: list[tuple[float, tuple[int, int, int]]] = [
     (0.5, (65, 171, 93)),     # medium green
     (0.7, (35, 132, 67)),     # dark green
     (0.85, (0, 90, 50)),      # very dark green
-    (1.0, (0, 50, 30)),       # near-black green (50 mm/hr)
+    (1.0, (0, 50, 30)),       # near-black green (250 kg/m²)
 ]
 
 PRECIPITATION = WeatherColormap(
     name="precipitation",
-    unit="mm/hr",
+    unit="kg/m²",
     value_min=0.0,
-    value_max=50.0,
+    value_max=250.0,
     colormap=_interpolate_colors(PRECIPITATION_STOPS),
 )
 

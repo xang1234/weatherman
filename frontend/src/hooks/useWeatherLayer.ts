@@ -43,17 +43,22 @@ function firstSymbolLayerId(map: maplibregl.Map): string | undefined {
   return undefined
 }
 
-function buildTileUrl(
+/**
+ * Build the TileJSON URL for a given model/run/layer/forecastHour.
+ *
+ * Weatherman returns a TileJSON document whose tile URL templates point
+ * directly to TiTiler — so MapLibre fetches tiles from TiTiler without
+ * an extra Weatherman proxy hop.
+ */
+function buildTileJsonUrl(
   apiBase: string,
   model: string,
   runId: string,
   layer: string,
   forecastHour: number,
 ): string {
-  return (
-    `${apiBase}/tiles/${model}/${runId}/${layer}/${forecastHour}` +
-    '/{z}/{x}/{y}.png'
-  )
+  const params = new URLSearchParams({ layer, forecast_hour: String(forecastHour) })
+  return `${apiBase}/tiles/${model}/${runId}/tilejson.json?${params}`
 }
 
 export function useWeatherLayer({
@@ -100,15 +105,19 @@ export function useWeatherLayer({
     if (activeRef.current?.srcId === srcId) return
 
     const prev = activeRef.current
-    const tileUrl = buildTileUrl(apiBase, model, runId, layer, forecastHour)
 
-    // Add new source
+    // Remove stale source/layer with the same ID that might exist from a
+    // canceled delayed cleanup (e.g. rapid A->B->A toggling)
+    removePair(m, srcId, lyrId)
+
+    // Use TileJSON: one small fetch to Weatherman, then all tile requests
+    // go directly to TiTiler (bypassing the Weatherman proxy).
+    const tileJsonUrl = buildTileJsonUrl(apiBase, model, runId, layer, forecastHour)
+
     m.addSource(srcId, {
       type: 'raster',
-      tiles: [tileUrl],
+      url: tileJsonUrl,
       tileSize,
-      minzoom: 0,
-      maxzoom: 8,
     })
 
     // Insert raster layer below first symbol layer so labels stay on top
@@ -129,13 +138,10 @@ export function useWeatherLayer({
     // Record the new active pair
     activeRef.current = { srcId, lyrId }
 
-    // Remove previous source/layer after a short delay to allow new tiles to render,
-    // preventing a flash of missing data during run switches.
+    // Remove previous source/layer immediately — the raster-fade-duration
+    // on the new layer handles visual transitions.
     if (prev) {
-      const timer = setTimeout(() => {
-        removePair(m, prev.srcId, prev.lyrId)
-      }, 500)
-      return () => clearTimeout(timer)
+      removePair(m, prev.srcId, prev.lyrId)
     }
   }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair])
 

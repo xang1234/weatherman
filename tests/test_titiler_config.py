@@ -133,7 +133,7 @@ class TestColormaps:
         assert parsed["0"] == list(TEMPERATURE.colormap[0])
 
     def test_rescale_range(self):
-        assert TEMPERATURE.rescale_range() == "220.0,330.0"
+        assert TEMPERATURE.rescale_range() == "-55.0,55.0"
         assert WIND_SPEED.rescale_range() == "0.0,50.0"
 
     def test_get_colormap_existing(self):
