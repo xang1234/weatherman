@@ -45,6 +45,11 @@ from weatherman.events.router import (
 )
 from weatherman.events import router as events_router
 from weatherman.tenancy import TenantMiddleware
+from weatherman.ais.router import (
+    init_ais_tile_service,
+    shutdown_ais_tile_service,
+)
+from weatherman.ais.router import router as ais_tile_router
 from weatherman.tiling.router import (
     CatalogLoader,
     init_tile_service,
@@ -209,6 +214,8 @@ def create_app(
     catalog_loader = _make_catalog_loader(store)
     zarr_opener = _make_zarr_opener(store)
 
+    ais_db_path = os.environ.get("AIS_DB_PATH", "ais.duckdb")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Startup
@@ -216,12 +223,14 @@ def create_app(
         setup_tracing(service_name="weatherman")
         init_tile_service(storage_config, titiler_url, catalog_loader)
         init_edr_service(catalog_loader, zarr_opener)
+        init_ais_tile_service(ais_db_path)
         init_event_bus()
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
         # Shutdown
         shutdown_event_bus()
+        shutdown_ais_tile_service()
         shutdown_edr_service()
         await shutdown_tile_service()
         shutdown_tracing()
@@ -249,6 +258,7 @@ def create_app(
     app.include_router(_make_api_router(store))
     app.include_router(health_router)
     app.include_router(tile_router)
+    app.include_router(ais_tile_router)
     app.include_router(edr_router)
     app.include_router(events_router)
 
