@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from weatherman.health import DependencyChecker, clear_checks, register_check
 from weatherman.health import router as health_router
@@ -28,6 +29,12 @@ from weatherman.observability import (
     setup_logging,
     setup_tracing,
     shutdown_tracing,
+)
+from weatherman.caching import (
+    CACHE_IMMUTABLE,
+    CACHE_REVALIDATE,
+    compute_content_etag,
+    etag_matches,
 )
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
@@ -94,7 +101,10 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
     api_router = APIRouter(prefix="/api", tags=["api"])
 
     @api_router.get("/catalog/{model}", summary="Run catalog for a model")
-    async def get_catalog(model: str) -> dict:
+    async def get_catalog(
+        model: str,
+        if_none_match: str | None = Header(None),
+    ) -> Response:
         try:
             layout = StorageLayout(model)
         except ValueError as exc:
@@ -108,14 +118,32 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
                 detail=f"No catalog found for model '{model}'",
             )
 
+        etag = compute_content_etag(data)
+
+        if if_none_match and etag_matches(if_none_match, etag):
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Cache-Control": CACHE_REVALIDATE},
+            )
+
         catalog = RunCatalog.from_json(data.decode("utf-8"))
-        return catalog.to_dict()
+        return JSONResponse(
+            content=catalog.to_dict(),
+            headers={
+                "ETag": etag,
+                "Cache-Control": CACHE_REVALIDATE,
+            },
+        )
 
     @api_router.get(
         "/manifest/{model}/{run_id}",
         summary="UI manifest for a model run",
     )
-    async def get_manifest(model: str, run_id: str) -> dict:
+    async def get_manifest(
+        model: str,
+        run_id: str,
+        if_none_match: str | None = Header(None),
+    ) -> Response:
         try:
             layout = StorageLayout(model)
         except ValueError as exc:
@@ -135,8 +163,22 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
                 detail=f"No manifest found for {model}/{run_id}",
             )
 
+        etag = compute_content_etag(data)
+
+        if if_none_match and etag_matches(if_none_match, etag):
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Cache-Control": CACHE_IMMUTABLE},
+            )
+
         manifest = UIManifest.from_json(data.decode("utf-8"))
-        return manifest.to_dict()
+        return JSONResponse(
+            content=manifest.to_dict(),
+            headers={
+                "ETag": etag,
+                "Cache-Control": CACHE_IMMUTABLE,
+            },
+        )
 
     return api_router
 
@@ -221,7 +263,10 @@ def create_app(
         # Startup
         setup_logging(service_name="weatherman")
         setup_tracing(service_name="weatherman")
-        init_tile_service(storage_config, titiler_url, catalog_loader)
+        cog_root = os.environ.get("TITILER_COG_ROOT")
+        init_tile_service(
+            storage_config, titiler_url, catalog_loader, cog_root=cog_root,
+        )
         init_edr_service(catalog_loader, zarr_opener)
         init_ais_tile_service(ais_db_path)
         init_event_bus()
