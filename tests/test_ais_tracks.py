@@ -257,3 +257,35 @@ class TestEmptyResults:
             con=ais_con,
         )
         assert track == []
+
+    def test_null_heading_and_sog(
+        self, tmp_path: Path, ais_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Vessels with NULL heading/sog produce TrackPoints with None."""
+        row_null_fields = ROW_BULK_CARRIER.replace(
+            "245.0                   AS heading",
+            "NULL                    AS heading",
+        ).replace(
+            "12.5                    AS speed",
+            "NULL                    AS speed",
+        )
+        _write_test_parquet(
+            tmp_path, "movement_date=2025-12-25", row_null_fields
+        )
+        load_day(
+            f"{tmp_path}/movement_date=2025-12-25/*",
+            load_date=date(2025, 12, 25),
+            tenant_id="default",
+            con=ais_con,
+        )
+        track = query_track(
+            mmsi=211234567,
+            start_date=date(2025, 12, 25),
+            end_date=date(2025, 12, 25),
+            tenant_id="default",
+            con=ais_con,
+        )
+        assert len(track) == 1
+        assert track[0].heading is None
+        assert track[0].sog is None
+        assert track[0].lat == 1.35  # other fields still populated

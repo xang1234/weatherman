@@ -53,8 +53,8 @@ class TrackPoint:
 
     lat: float
     lon: float
-    sog: float
-    heading: float
+    sog: float | None
+    heading: float | None
     timestamp: datetime
 
 
