@@ -28,6 +28,7 @@ class WeatherColormap:
     value_min: float
     value_max: float
     colormap: ColormapDict
+    stops: tuple[tuple[float, tuple[int, int, int]], ...] = ()
 
     def to_json(self) -> str:
         """Serialize the colormap for TiTiler's colormap query parameter."""
@@ -83,15 +84,21 @@ def _interpolate_colors(
 
 # -- Colormap definitions --
 
-# Temperature: blue-white-red diverging (-55°C cold blue -> 0°C white -> +55°C hot red)
+# Temperature: Windy-style multi-hue spectral (-55°C violet -> 0°C green -> +55°C magenta)
 TEMPERATURE_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.0, (5, 48, 97)),       # deep blue (-55°C)
-    (0.2, (33, 102, 172)),    # medium blue
-    (0.4, (146, 197, 222)),   # light blue
-    (0.5, (247, 247, 247)),   # near-white (0°C)
-    (0.6, (244, 165, 130)),   # light red
-    (0.8, (214, 96, 77)),     # medium red
-    (1.0, (178, 24, 43)),     # deep red (+55°C)
+    (0.00, (45, 0, 75)),       # deep violet (-55°C)
+    (0.10, (60, 10, 150)),     # purple (-44°C)
+    (0.18, (30, 50, 200)),     # blue (-35°C)
+    (0.27, (0, 90, 230)),      # bright blue (-25°C)
+    (0.36, (0, 180, 210)),     # vivid cyan (-15°C)
+    (0.45, (0, 200, 80)),      # bright green (-5°C)
+    (0.50, (80, 220, 20)),     # yellow-green (0°C)
+    (0.55, (220, 220, 0)),     # pure yellow (5°C)
+    (0.64, (255, 180, 0)),     # vivid orange (15°C)
+    (0.73, (255, 100, 0)),     # bright orange (25°C)
+    (0.82, (230, 30, 15)),     # vivid red (35°C)
+    (0.91, (180, 0, 0)),       # deep red (45°C)
+    (1.00, (130, 0, 50)),      # magenta (55°C)
 ]
 
 TEMPERATURE = WeatherColormap(
@@ -100,24 +107,33 @@ TEMPERATURE = WeatherColormap(
     value_min=-55.0,
     value_max=55.0,
     colormap=_interpolate_colors(TEMPERATURE_STOPS),
+    stops=tuple(TEMPERATURE_STOPS),
 )
 
-# Wind speed: sequential blue-to-purple (calm -> hurricane force)
+# Wind speed: spectral blue→red by 35 kt (18 m/s), then purple (hurricane)
 WIND_SPEED_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.0, (240, 249, 232)),   # very light green (0 m/s, calm)
-    (0.2, (186, 228, 188)),   # light green
-    (0.4, (123, 204, 196)),   # teal
-    (0.6, (67, 162, 202)),    # blue
-    (0.8, (8, 104, 172)),     # dark blue
-    (1.0, (80, 2, 113)),      # deep purple (50 m/s, hurricane)
+    (0.00, (30, 50, 200)),    # blue (0 m/s, calm)
+    (0.07, (0, 90, 230)),     # bright blue (~3.5 m/s)
+    (0.12, (0, 180, 210)),    # vivid cyan (~6 m/s)
+    (0.18, (0, 200, 80)),     # bright green (~9 m/s)
+    (0.23, (80, 220, 20)),    # yellow-green (~11.5 m/s)
+    (0.27, (220, 220, 0)),    # pure yellow (~13.5 m/s)
+    (0.31, (255, 180, 0)),    # vivid orange (~15.5 m/s)
+    (0.34, (255, 100, 0)),    # bright orange (~17 m/s)
+    (0.36, (230, 30, 15)),    # vivid red (~18 m/s / 35 kt)
+    (0.50, (180, 0, 0)),      # deep red (~25 m/s)
+    (0.70, (130, 0, 80)),     # red-purple (~35 m/s)
+    (0.85, (90, 0, 140)),     # purple (~42.5 m/s)
+    (1.00, (60, 0, 160)),     # deep purple (50 m/s, hurricane)
 ]
 
 WIND_SPEED = WeatherColormap(
     name="wind_speed",
-    unit="m/s",
+    unit="kt",
     value_min=0.0,
-    value_max=50.0,
+    value_max=50.0,  # TiTiler rescale stays in m/s (raw GFS units)
     colormap=_interpolate_colors(WIND_SPEED_STOPS),
+    stops=tuple(WIND_SPEED_STOPS),
 )
 
 # Precipitation: white-to-green sequential (total accumulated, kg/m² ≡ mm)
@@ -137,6 +153,7 @@ PRECIPITATION = WeatherColormap(
     value_min=0.0,
     value_max=250.0,
     colormap=_interpolate_colors(PRECIPITATION_STOPS),
+    stops=tuple(PRECIPITATION_STOPS),
 )
 
 

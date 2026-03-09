@@ -19,10 +19,10 @@ const PMTILES_SOURCE = RAW_BASEMAP_URL.startsWith('pmtiles://')
 const USE_PMTILES = !!import.meta.env.VITE_BASEMAP_URL
 
 /**
- * Dark basemap style optimized for weather overlay readability.
+ * Light basemap style optimized for weather overlay readability.
  *
  * Uses Protomaps vector tiles via PMTiles protocol when available,
- * falling back to CartoDB dark_all raster tiles for local development.
+ * falling back to CartoDB light raster tiles for local development.
  */
 export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
   ? {
@@ -41,21 +41,31 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
         {
           id: 'background',
           type: 'background',
-          paint: { 'background-color': '#0d1117' },
+          paint: { 'background-color': '#f0f0f0' },
         },
         {
           id: 'water',
           type: 'fill',
           source: 'protomaps',
           'source-layer': 'water',
-          paint: { 'fill-color': '#081a30' },
+          paint: { 'fill-color': '#d4e6f1' },
         },
         {
           id: 'earth',
           type: 'fill',
           source: 'protomaps',
           'source-layer': 'earth',
-          paint: { 'fill-color': '#1c2333' },
+          paint: { 'fill-color': '#f0f0f0' },
+        },
+        {
+          id: 'earth_outline',
+          type: 'line',
+          source: 'protomaps',
+          'source-layer': 'earth',
+          paint: {
+            'line-color': '#000000',
+            'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 4, 1.5, 8, 2, 14, 3],
+          },
         },
         {
           id: 'boundaries',
@@ -63,8 +73,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           source: 'protomaps',
           'source-layer': 'boundaries',
           paint: {
-            'line-color': '#4a5568',
-            'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 6, 1.5],
+            'line-color': '#1a1a1a',
+            'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.8, 6, 2, 10, 2.5],
             'line-dasharray': [3, 2],
           },
         },
@@ -83,8 +93,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
             'text-letter-spacing': 0.1,
           },
           paint: {
-            'text-color': '#7a8494',
-            'text-halo-color': '#0d1117',
+            'text-color': '#4b5563',
+            'text-halo-color': '#ffffff',
             'text-halo-width': 2,
           },
           minzoom: 1,
@@ -102,8 +112,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
             'text-max-width': 8,
           },
           paint: {
-            'text-color': '#9ca3b0',
-            'text-halo-color': '#0d1117',
+            'text-color': '#374151',
+            'text-halo-color': '#ffffff',
             'text-halo-width': 2,
           },
           minzoom: 3,
@@ -117,9 +127,9 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
         carto: {
           type: 'raster',
           tiles: [
-            'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-            'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-            'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+            'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+            'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+            'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
           ],
           tileSize: 256,
           attribution:
@@ -128,7 +138,7 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
       },
       layers: [
         {
-          id: 'carto-dark',
+          id: 'carto-light',
           type: 'raster',
           source: 'carto',
           minzoom: 0,

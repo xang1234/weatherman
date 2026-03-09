@@ -108,6 +108,7 @@ class TileService:
             "url": cog_uri,
             "rescale": colormap.rescale_range(),
             "colormap": colormap.to_json(),
+            "resampling": "bilinear",
         }
 
         titiler_path = f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png"
@@ -162,6 +163,7 @@ class TileService:
         qs = urlencode({
             "url": cog_uri,
             "rescale": colormap.rescale_range(),
+            "resampling": "bilinear",
         })
         cmap_encoded = quote(colormap.to_json(), safe="")
         tile_url = (

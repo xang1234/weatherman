@@ -48,6 +48,14 @@ class ValueRange:
 
 
 @dataclass(frozen=True)
+class ColorStop:
+    """A single color stop for the legend gradient."""
+
+    position: float  # 0.0-1.0
+    color: tuple[int, int, int]  # RGB
+
+
+@dataclass(frozen=True)
 class LayerConfig:
     """Frontend configuration for a single weather layer."""
 
@@ -56,6 +64,7 @@ class LayerConfig:
     unit: str
     palette_name: str
     value_range: ValueRange
+    color_stops: list[ColorStop] | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,10 @@ class UIManifest:
                 unit=l["unit"],
                 palette_name=l["palette_name"],
                 value_range=ValueRange(**l["value_range"]),
+                color_stops=[
+                    ColorStop(position=cs["position"], color=tuple(cs["color"]))
+                    for cs in l["color_stops"]
+                ] if l.get("color_stops") else None,
             )
             for l in data["layers"]
         ]

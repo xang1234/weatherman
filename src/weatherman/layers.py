@@ -33,7 +33,8 @@ from typing import Any
 
 import yaml
 
-from weatherman.storage.manifest import LayerConfig, ValueRange
+from weatherman.storage.manifest import ColorStop, LayerConfig, ValueRange
+from weatherman.tiling.colormaps import COLORMAPS
 from weatherman.storage.zarr_schema import VariableDef
 
 logger = logging.getLogger(__name__)
@@ -138,16 +139,24 @@ class LayerRegistry:
 
     def layer_configs(self) -> list[LayerConfig]:
         """Build ``LayerConfig`` objects for the UI manifest."""
-        return [
-            LayerConfig(
+        configs = []
+        for entry in self._layers.values():
+            cmap = COLORMAPS.get(entry.palette)
+            color_stops = None
+            if cmap and cmap.stops:
+                color_stops = [
+                    ColorStop(position=pos, color=rgb)
+                    for pos, rgb in cmap.stops
+                ]
+            configs.append(LayerConfig(
                 id=entry.id,
                 display_name=entry.display_name,
                 unit=entry.units,
                 palette_name=entry.palette,
                 value_range=ValueRange(min=entry.value_min, max=entry.value_max),
-            )
-            for entry in self._layers.values()
-        ]
+                color_stops=color_stops,
+            ))
+        return configs
 
     def download_sources(self) -> dict[HerbieSource, dict[str, str]]:
         """Group variables by their Herbie download source.

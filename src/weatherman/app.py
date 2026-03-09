@@ -38,7 +38,8 @@ from weatherman.caching import (
 )
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
-from weatherman.storage.manifest import UIManifest
+from weatherman.storage.manifest import ColorStop, UIManifest
+from weatherman.tiling.colormaps import COLORMAPS
 from weatherman.storage.object_store import LocalObjectStore, ObjectStore
 from weatherman.storage.paths import RunID, StorageLayout
 from weatherman.edr.position import (
@@ -172,8 +173,21 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
             )
 
         manifest = UIManifest.from_json(data.decode("utf-8"))
+        content = manifest.to_dict()
+
+        # Enrich layers with color_stops from the live colormap registry
+        # so that manifests built before color_stops existed still get them.
+        for layer in content.get("layers", []):
+            if not layer.get("color_stops"):
+                cmap = COLORMAPS.get(layer.get("palette_name", ""))
+                if cmap and cmap.stops:
+                    layer["color_stops"] = [
+                        {"position": pos, "color": list(rgb)}
+                        for pos, rgb in cmap.stops
+                    ]
+
         return JSONResponse(
-            content=manifest.to_dict(),
+            content=content,
             headers={
                 "ETag": etag,
                 "Cache-Control": CACHE_REVALIDATE,

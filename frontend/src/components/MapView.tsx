@@ -11,8 +11,7 @@ import { useVesselPopup } from '@/hooks/useVesselPopup'
 import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
-import { OpacitySlider } from '@/components/OpacitySlider'
-import { LayerSelector } from '@/components/LayerSelector'
+import { LayerPanel } from '@/components/LayerPanel'
 import { WeatherInspector } from '@/components/WeatherInspector'
 import type { LayerConfig } from '@/types/manifest'
 
@@ -33,7 +32,7 @@ export function MapView() {
   const sse = useSSE()
   const latestAISDate = useLatestAISDate()
   const dataAge = useDataAge({ model: 'gfs', version: sse.weatherVersion })
-  const [opacity, setOpacity] = useState(0.7)
+  const opacity = 0.35
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
   const [selectedForecastHour, setSelectedForecastHour] = useState<number | null>(() =>
     forecastHourFromUrl([]),
@@ -127,20 +126,20 @@ export function MapView() {
       {dataAge && <DataAgeIndicator state={dataAge} />}
       <WeatherInspector inspector={inspector} forecastHour={forecastHour} />
       {layers.length > 0 && (
-        <LayerSelector
+        <LayerPanel
           layers={layers}
           activeLayerId={resolvedLayerId}
           onSelect={setActiveLayerId}
         />
       )}
       <ForecastControls
+        cycleTime={manifest?.cycle_time ?? null}
         forecastHours={forecastHours}
         forecastHour={forecastHour}
         isPlaying={isPlaying}
         onChange={setSelectedForecastHour}
         onTogglePlay={() => setIsPlaying((playing) => !playing)}
       />
-      <OpacitySlider value={opacity} onChange={setOpacity} />
       {!isLoaded && (
         <div
           style={{
@@ -149,8 +148,8 @@ export function MapView() {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: '#1a1a2e',
-            color: '#fff',
+            background: '#f0f0f0',
+            color: '#374151',
           }}
         >
           Loading map...

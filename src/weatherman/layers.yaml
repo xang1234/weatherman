@@ -82,9 +82,9 @@ layers:
 
   wind_speed:
     display_name: "Wind Speed at 10m"
-    units: "m/s"
+    units: "kt"
     palette: wind_speed
-    value_range: [0.0, 50.0]
+    value_range: [0.0, 97.0]
     derived:
       method: magnitude
       sources: [ugrd_10m, vgrd_10m]

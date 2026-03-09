@@ -3,12 +3,18 @@ export interface ValueRange {
   max: number
 }
 
+export interface ColorStop {
+  position: number          // 0.0-1.0
+  color: [number, number, number]  // RGB
+}
+
 export interface LayerConfig {
   id: string
   display_name: string
   unit: string
   palette_name: string
   value_range: ValueRange
+  color_stops?: ColorStop[]
 }
 
 export interface UIManifest {

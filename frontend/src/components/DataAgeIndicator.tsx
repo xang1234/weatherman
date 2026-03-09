@@ -33,8 +33,8 @@ export function DataAgeIndicator({ state }: DataAgeIndicatorProps) {
     <div
       style={{
         position: 'absolute',
-        top: 10,
-        right: 50,
+        bottom: 20,
+        left: 10,
         zIndex: 10,
         background: 'rgba(13, 17, 23, 0.85)',
         backdropFilter: 'blur(8px)',

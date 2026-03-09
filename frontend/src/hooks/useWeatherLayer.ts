@@ -26,6 +26,14 @@ export interface UseWeatherLayerOptions {
 
 const SOURCE_PREFIX = 'wx-raster'
 const LAYER_PREFIX = 'wx-raster-layer'
+const TILE_LOAD_TIMEOUT_MS = 4000
+
+interface BufferEntry { srcId: string; lyrId: string }
+interface BufferState {
+  front: BufferEntry | null
+  back: BufferEntry | null
+  generation: number
+}
 
 function sourceId(model: string, runId: string, layer: string, forecastHour: number): string {
   return `${SOURCE_PREFIX}-${model}-${runId}-${layer}-${forecastHour}`
@@ -124,8 +132,15 @@ export function useWeatherLayer({
 }: UseWeatherLayerOptions): void {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 
-  // Track the currently active source/layer so we can remove it on swap
-  const activeRef = useRef<{ srcId: string; lyrId: string } | null>(null)
+  // Double-buffer state: front = visible layer, back = loading invisibly
+  const bufferRef = useRef<BufferState>({ front: null, back: null, generation: 0 })
+
+  // Keep current opacity/visible in a ref so swap callbacks always read latest
+  // values without needing them in the main effect's dependency array.
+  const opacityRef = useRef(opacity)
+  const visibleRef = useRef(visible)
+  opacityRef.current = opacity
+  visibleRef.current = visible
 
   // Remove a source+layer pair from the map if they exist
   const removePair = useCallback((m: maplibregl.Map, srcId: string, lyrId: string) => {
@@ -137,65 +152,123 @@ export function useWeatherLayer({
     }
   }, [])
 
+  // Atomically swap back buffer to front
+  const performSwap = useCallback((
+    m: maplibregl.Map,
+    state: BufferState,
+    targetOpacity: number,
+    isVisible: boolean,
+  ) => {
+    const oldFront = state.front
+    if (state.back) {
+      // Reveal the back buffer at the target opacity
+      try {
+        if (m.getLayer(state.back.lyrId)) {
+          m.setPaintProperty(state.back.lyrId, 'raster-opacity', isVisible ? targetOpacity : 0)
+        }
+      } catch { /* map destroyed */ }
+      state.front = state.back
+      state.back = null
+    }
+    // Remove old front
+    if (oldFront) {
+      removePair(m, oldFront.srcId, oldFront.lyrId)
+    }
+  }, [removePair])
+
   // Add or swap the raster overlay when runId/layer/forecastHour changes
   useEffect(() => {
     const m = map.current
     if (!m || !isLoaded || !runId || !layer) return
 
-    const srcId = sourceId(model, runId, layer, forecastHour)
-    const lyrId = layerId(model, runId, layer, forecastHour)
+    const newSrcId = sourceId(model, runId, layer, forecastHour)
+    const newLyrId = layerId(model, runId, layer, forecastHour)
+    const state = bufferRef.current
 
-    // Already showing this exact combination — nothing to do
-    if (activeRef.current?.srcId === srcId) return
+    // Already showing this exact combination as front — clean up any
+    // orphaned back buffer (e.g. A→B→A where B never finished loading)
+    if (state.front?.srcId === newSrcId) {
+      if (state.back) {
+        removePair(m, state.back.srcId, state.back.lyrId)
+        state.back = null
+      }
+      return
+    }
 
-    const prev = activeRef.current
+    // Increment generation to cancel any pending back-buffer load
+    const gen = ++state.generation
 
-    // Remove stale source/layer with the same ID that might exist from a
-    // canceled delayed cleanup (e.g. rapid A->B->A toggling)
-    removePair(m, srcId, lyrId)
+    // Cancel existing back buffer if any
+    if (state.back) {
+      removePair(m, state.back.srcId, state.back.lyrId)
+      state.back = null
+    }
+
+    // Remove stale source/layer with the same ID (e.g. rapid A->B->A toggling)
+    removePair(m, newSrcId, newLyrId)
 
     // Use TileJSON: one small fetch to Weatherman, then all tile requests
     // go directly to TiTiler (bypassing the Weatherman proxy).
     const tileJsonUrl = buildTileJsonUrl(apiBase, model, runId, layer, forecastHour)
 
-    m.addSource(srcId, {
+    m.addSource(newSrcId, {
       type: 'raster',
       url: tileJsonUrl,
       tileSize,
     })
 
-    // Insert raster layer below first symbol layer so labels stay on top
+    // Insert raster layer below first symbol layer — invisible (back buffer)
     const beforeLayer = firstSymbolLayerId(m)
     m.addLayer(
       {
-        id: lyrId,
+        id: newLyrId,
         type: 'raster',
-        source: srcId,
+        source: newSrcId,
         paint: {
-          'raster-opacity': visible ? opacity : 0,
-          'raster-fade-duration': 300,
+          'raster-opacity': 0,
+          'raster-fade-duration': 0,
+          'raster-resampling': 'nearest',
         },
       },
       beforeLayer,
     )
 
-    // Record the new active pair
-    activeRef.current = { srcId, lyrId }
+    state.back = { srcId: newSrcId, lyrId: newLyrId }
 
-    // Remove previous source/layer immediately — the raster-fade-duration
-    // on the new layer handles visual transitions.
-    if (prev) {
-      removePair(m, prev.srcId, prev.lyrId)
+    // Wait for all visible tiles to load via sourcedata events.
+    // Unlike 'idle', this won't fire prematurely before tile fetches begin.
+    const onSourceData = (e: maplibregl.MapSourceDataEvent) => {
+      if (e.sourceId !== newSrcId) return
+      if (!m.isSourceLoaded(newSrcId)) return
+      // All visible tiles for this source are loaded — safe to swap
+      m.off('sourcedata', onSourceData)
+      clearTimeout(timeout)
+      if (gen !== bufferRef.current.generation) return
+      performSwap(m, bufferRef.current, opacityRef.current, visibleRef.current)
     }
-  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, opacity, visible])
 
-  // Update opacity on existing layer when it changes
+    // Fallback: force swap after timeout (e.g. tile server errors)
+    const timeout = setTimeout(() => {
+      m.off('sourcedata', onSourceData)
+      if (gen !== bufferRef.current.generation) return
+      performSwap(m, bufferRef.current, opacityRef.current, visibleRef.current)
+    }, TILE_LOAD_TIMEOUT_MS)
+
+    m.on('sourcedata', onSourceData)
+
+    return () => {
+      m.off('sourcedata', onSourceData)
+      clearTimeout(timeout)
+    }
+  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, performSwap])
+
+  // Update opacity on the visible (front) layer when it changes
   useEffect(() => {
     const m = map.current
-    const active = activeRef.current
-    if (!m || !isLoaded || !active) return
-    if (m.getLayer(active.lyrId)) {
-      m.setPaintProperty(active.lyrId, 'raster-opacity', visible ? opacity : 0)
+    const front = bufferRef.current.front
+    if (!m || !isLoaded || !front) return
+    if (m.getLayer(front.lyrId)) {
+      m.setPaintProperty(front.lyrId, 'raster-opacity', visible ? opacity : 0)
     }
   }, [map, isLoaded, opacity, visible])
 
@@ -242,15 +315,17 @@ export function useWeatherLayer({
     return () => controller.abort()
   }, [map, isLoaded, runId, layer, model, apiBase, prefetchForecastHours])
 
-  // Cleanup on unmount
+  // Cleanup on unmount — remove both front and back buffers
   useEffect(() => {
     const activeMap = map.current
     return () => {
-      const active = activeRef.current
-      if (activeMap && active) {
-        removePair(activeMap, active.srcId, active.lyrId)
-        activeRef.current = null
+      const state = bufferRef.current
+      if (activeMap) {
+        if (state.front) removePair(activeMap, state.front.srcId, state.front.lyrId)
+        if (state.back) removePair(activeMap, state.back.srcId, state.back.lyrId)
       }
+      state.front = null
+      state.back = null
     }
   }, [map, removePair])
 }

@@ -152,5 +152,6 @@ class TestManifestEndpoint:
         layer = resp.json()["layers"][0]
         assert set(layer.keys()) == {
             "id", "display_name", "unit", "palette_name", "value_range",
+            "color_stops",
         }
         assert set(layer["value_range"].keys()) == {"min", "max"}
