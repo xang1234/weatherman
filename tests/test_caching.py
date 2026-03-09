@@ -150,9 +150,9 @@ class TestManifestETag:
         assert resp.status_code == 200
         assert "etag" in resp.headers
 
-    def test_returns_cache_control_immutable(self, client):
+    def test_returns_cache_control_revalidate(self, client):
         resp = client.get(f"/api/manifest/{MODEL}/{RUN_ID}")
-        assert resp.headers["cache-control"] == CACHE_IMMUTABLE
+        assert resp.headers["cache-control"] == CACHE_REVALIDATE
 
     def test_304_on_matching_etag(self, client):
         resp1 = client.get(f"/api/manifest/{MODEL}/{RUN_ID}")
@@ -164,7 +164,7 @@ class TestManifestETag:
         )
         assert resp2.status_code == 304
         assert resp2.headers["etag"] == etag
-        assert resp2.headers["cache-control"] == CACHE_IMMUTABLE
+        assert resp2.headers["cache-control"] == CACHE_REVALIDATE
 
     def test_200_on_mismatched_etag(self, client):
         resp = client.get(

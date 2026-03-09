@@ -168,7 +168,7 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
         if if_none_match and etag_matches(if_none_match, etag):
             return Response(
                 status_code=304,
-                headers={"ETag": etag, "Cache-Control": CACHE_IMMUTABLE},
+                headers={"ETag": etag, "Cache-Control": CACHE_REVALIDATE},
             )
 
         manifest = UIManifest.from_json(data.decode("utf-8"))
@@ -176,7 +176,7 @@ def _make_api_router(store: ObjectStore) -> APIRouter:
             content=manifest.to_dict(),
             headers={
                 "ETag": etag,
-                "Cache-Control": CACHE_IMMUTABLE,
+                "Cache-Control": CACHE_REVALIDATE,
             },
         )
 
