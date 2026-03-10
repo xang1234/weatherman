@@ -12,6 +12,18 @@ export default defineConfig({
       '@': path.resolve(__dirname, 'src'),
     },
   },
+  build: {
+    // maplibre-gl is ~1 MB minified and cannot be split further
+    chunkSizeWarningLimit: 1100,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'maplibre': ['maplibre-gl'],
+          'react-vendor': ['react', 'react-dom'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {
