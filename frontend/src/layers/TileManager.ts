@@ -21,8 +21,6 @@ interface TileEntry {
   state: TileState
   /** Monotonically increasing access counter for LRU ordering. */
   lastAccess: number
-  /** Image element used for loading (kept to allow abort via src = ''). */
-  image: HTMLImageElement | null
 }
 
 /** Tile coordinate triplet. */
@@ -66,8 +64,8 @@ export class TileManager {
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
 
-  /** Set of tile keys currently being fetched. */
-  private _pending = new Set<string>()
+  /** In-flight fetches keyed by tile key, with Image + texture refs for cleanup. */
+  private _pending = new Map<string, { image: HTMLImageElement; texture: WebGLTexture }>()
 
   /** Callback invoked when a tile finishes loading (for triggering repaint). */
   onTileLoaded: (() => void) | null = null
@@ -107,6 +105,9 @@ export class TileManager {
       const key = tileKey(z, x, y)
       const existing = this._tiles.get(key)
       if (existing) {
+        // Don't bump access counter for errored tiles — let them be
+        // evicted so they can be retried on the next updateVisibleTiles call.
+        if (existing.state === 'error') continue
         existing.lastAccess = ++this._accessCounter
         continue
       }
@@ -131,8 +132,7 @@ export class TileManager {
   getTileState(z: number, x: number, y: number): TileState | null {
     const key = tileKey(z, x, y)
     if (this._pending.has(key)) return 'pending'
-    const entry = this._tiles.get(key)
-    return entry?.state ?? null
+    return this._tiles.get(key)?.state ?? null
   }
 
   /** Returns true if any tiles are currently loading. */
@@ -147,18 +147,20 @@ export class TileManager {
 
   /** Clear all cached textures and abort pending fetches. */
   clear(): void {
-    // Abort pending loads
+    // Abort in-flight Image loads and delete their placeholder textures
+    for (const { image, texture } of this._pending.values()) {
+      image.onload = null
+      image.onerror = null
+      image.src = ''
+      this._gl.deleteTexture(texture)
+    }
+    this._pending.clear()
+
+    // Delete all cached textures
     for (const entry of this._tiles.values()) {
-      if (entry.image) {
-        entry.image.onload = null
-        entry.image.onerror = null
-        entry.image.src = ''
-        entry.image = null
-      }
       this._gl.deleteTexture(entry.texture)
     }
     this._tiles.clear()
-    this._pending.clear()
     this._accessCounter = 0
   }
 
@@ -176,15 +178,11 @@ export class TileManager {
 
   private _fetchTile(z: number, x: number, y: number): void {
     const key = tileKey(z, x, y)
-    this._pending.add(key)
-
     const gl = this._gl
     const url = this._buildUrl(z, x, y)
 
-    // Create a placeholder texture (1x1 transparent) so we can upload later
     const texture = gl.createTexture()
     if (!texture) {
-      this._pending.delete(key)
       return
     }
 
@@ -206,6 +204,9 @@ export class TileManager {
     const img = new Image()
     img.crossOrigin = 'anonymous'
 
+    // Store in pending map so clear() can abort and delete the texture
+    this._pending.set(key, { image: img, texture })
+
     img.onload = () => {
       // Check we haven't been cleared/destroyed while loading
       if (!this._pending.has(key)) {
@@ -223,14 +224,12 @@ export class TileManager {
       )
       gl.bindTexture(gl.TEXTURE_2D, null)
 
-      const entry: TileEntry = {
+      this._tiles.set(key, {
         key,
         texture,
         state: 'loaded',
         lastAccess: ++this._accessCounter,
-        image: null,
-      }
-      this._tiles.set(key, entry)
+      })
       this.onTileLoaded?.()
     }
 
@@ -241,14 +240,12 @@ export class TileManager {
       }
       this._pending.delete(key)
 
-      const entry: TileEntry = {
+      this._tiles.set(key, {
         key,
         texture,
         state: 'error',
         lastAccess: ++this._accessCounter,
-        image: null,
-      }
-      this._tiles.set(key, entry)
+      })
     }
 
     img.src = url
@@ -265,11 +262,6 @@ export class TileManager {
     const toRemove = this._tiles.size - this._maxTextures
     for (let i = 0; i < toRemove; i++) {
       const entry = entries[i]
-      if (entry.image) {
-        entry.image.onload = null
-        entry.image.onerror = null
-        entry.image.src = ''
-      }
       this._gl.deleteTexture(entry.texture)
       this._tiles.delete(entry.key)
     }
