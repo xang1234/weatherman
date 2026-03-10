@@ -11,6 +11,11 @@ uniform sampler2D u_dataTile;
 // When u_temporalMix == 0.0, this texture is unused.
 uniform sampler2D u_dataTileT1;
 
+// V-component tiles for vector (wind) mode.
+// When u_isVector == 0, these are unused.
+uniform sampler2D u_dataTileV;
+uniform sampler2D u_dataTileVT1;
+
 // Color ramp: 256x1 RGBA texture for value-to-color mapping.
 uniform sampler2D u_colorRamp;
 
@@ -19,6 +24,11 @@ uniform float u_opacity;
 
 // Temporal blend factor: 0.0 = T0 only, 1.0 = T1 only.
 uniform float u_temporalMix;
+
+// Vector mode flag: 0 = scalar, 1 = vector (U/V components).
+// In vector mode, u_dataTile holds U and u_dataTileV holds V.
+// The shader reconstructs speed = sqrt(U² + V²) for color ramp lookup.
+uniform int u_isVector;
 
 out vec4 fragColor;
 
@@ -75,19 +85,68 @@ float sampleBilinear(sampler2D tex, vec2 uv) {
     return result / totalWeight;
 }
 
-void main() {
-    float v0 = sampleBilinear(u_dataTile, v_uv);
+// Interpolate a scalar value between T0 and T1 with nodata handling.
+// Returns -1.0 if both are nodata.
+float temporalBlend(float v0, float v1) {
+    if (v0 < 0.0 && v1 < 0.0) return -1.0;
+    if (v0 < 0.0) return v1;
+    if (v1 < 0.0) return v0;
+    return mix(v0, v1, u_temporalMix);
+}
 
+void main() {
     float normalized;
-    if (u_temporalMix > 0.0) {
-        float v1 = sampleBilinear(u_dataTileT1, v_uv);
-        if (v0 < 0.0 && v1 < 0.0) discard;      // both nodata
-        if (v0 < 0.0) { normalized = v1; }        // T0 nodata, use T1
-        else if (v1 < 0.0) { normalized = v0; }   // T1 nodata, use T0
-        else { normalized = mix(v0, v1, u_temporalMix); }
+
+    if (u_isVector == 1) {
+        // Vector mode: sample U and V components separately,
+        // interpolate in Cartesian space, reconstruct speed.
+        float u0 = sampleBilinear(u_dataTile, v_uv);
+        float v0 = sampleBilinear(u_dataTileV, v_uv);
+
+        // Both components must be valid for a valid wind vector
+        if (u0 < 0.0 || v0 < 0.0) {
+            if (u_temporalMix <= 0.0) discard;
+            // Try T1 before discarding
+            float u1 = sampleBilinear(u_dataTileT1, v_uv);
+            float v1 = sampleBilinear(u_dataTileVT1, v_uv);
+            if (u1 < 0.0 || v1 < 0.0) discard;
+            // Use T1 only — T0 had nodata
+            // Denormalize: [0,1] -> [-50, 50] m/s (range = 100, offset = -50)
+            float uWind = u1 * 100.0 - 50.0;
+            float vWind = v1 * 100.0 - 50.0;
+            float speed = sqrt(uWind * uWind + vWind * vWind);
+            // Normalize speed to [0,1] for color ramp (max 50 m/s)
+            normalized = clamp(speed / 50.0, 0.0, 1.0);
+        } else if (u_temporalMix > 0.0) {
+            float u1 = sampleBilinear(u_dataTileT1, v_uv);
+            float v1 = sampleBilinear(u_dataTileVT1, v_uv);
+            float uBlend = temporalBlend(u0, u1);
+            float vBlend = temporalBlend(v0, v1);
+            float uWind = uBlend * 100.0 - 50.0;
+            float vWind = vBlend * 100.0 - 50.0;
+            float speed = sqrt(uWind * uWind + vWind * vWind);
+            normalized = clamp(speed / 50.0, 0.0, 1.0);
+        } else {
+            // Denormalize: [0,1] -> [-50, 50] m/s
+            float uWind = u0 * 100.0 - 50.0;
+            float vWind = v0 * 100.0 - 50.0;
+            float speed = sqrt(uWind * uWind + vWind * vWind);
+            normalized = clamp(speed / 50.0, 0.0, 1.0);
+        }
     } else {
-        if (v0 < 0.0) discard;
-        normalized = v0;
+        // Scalar mode: single data tile per timestep
+        float v0 = sampleBilinear(u_dataTile, v_uv);
+
+        if (u_temporalMix > 0.0) {
+            float v1 = sampleBilinear(u_dataTileT1, v_uv);
+            if (v0 < 0.0 && v1 < 0.0) discard;
+            if (v0 < 0.0) { normalized = v1; }
+            else if (v1 < 0.0) { normalized = v0; }
+            else { normalized = mix(v0, v1, u_temporalMix); }
+        } else {
+            if (v0 < 0.0) discard;
+            normalized = v0;
+        }
     }
 
     // Color ramp lookup — sample the 1D texture at the normalized position.

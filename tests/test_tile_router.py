@@ -132,7 +132,7 @@ class TestTileServiceTileJson:
         assert result["name"] == "temperature"
         assert len(result["tiles"]) == 1
         tile_url = result["tiles"][0]
-        assert tile_url.startswith("/cog/tiles/WebMercatorQuad/")
+        assert tile_url.startswith(f"{TITILER_URL}/cog/tiles/WebMercatorQuad/")
         assert "{z}" in tile_url
         assert "temperature" in tile_url
         assert "rescale=" in tile_url
@@ -272,7 +272,7 @@ class TestTileJsonEndpoint:
         assert data["name"] == "temperature"
         tile_url = data["tiles"][0]
         # Tile URL points directly to TiTiler with COG path baked in
-        assert tile_url.startswith("/cog/tiles/WebMercatorQuad/")
+        assert tile_url.startswith(f"{TITILER_URL}/cog/tiles/WebMercatorQuad/")
         assert "temperature" in tile_url
         assert "rescale=" in tile_url
 
@@ -295,8 +295,8 @@ class TestTileJsonEndpoint:
     def test_tilejson_has_titiler_url(self, client):
         resp = client.get("/tiles/gfs/20260306T12Z/tilejson.json")
         data = resp.json()
-        # Tile URLs are relative /cog/tiles paths (not absolute http)
-        assert data["tiles"][0].startswith("/cog/tiles/")
+        # Tile URLs are absolute, pointing directly to TiTiler
+        assert data["tiles"][0].startswith(f"{TITILER_URL}/cog/tiles/")
 
     def test_tilejson_published_run_has_immutable_cache(self, client):
         resp = client.get("/tiles/gfs/20260306T12Z/tilejson.json")
@@ -441,6 +441,88 @@ class TestDataTileEndpoint:
         assert mask[0, 0] is np.True_
         # Valid pixels should not be flagged
         assert not mask[1, 1]
+
+
+class TestWindComponentDataTiles:
+    """Wind U/V component data tiles for vector interpolation."""
+
+    def test_wind_u_data_tile_returns_encoded_png(self, client):
+        """Wind U data tile should encode with symmetric [-50, 50] range."""
+        values = np.full((256, 256), -15.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/wind_u/0/data/1/2/3.png")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.headers["x-value-range"] == "-50.0,50.0"
+
+    def test_wind_v_data_tile_returns_encoded_png(self, client):
+        """Wind V data tile should encode with symmetric [-50, 50] range."""
+        values = np.full((256, 256), 20.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/wind_v/0/data/1/2/3.png")
+
+        assert resp.status_code == 200
+        assert resp.headers["x-value-range"] == "-50.0,50.0"
+
+    def test_wind_uv_round_trip_accuracy(self, client):
+        """U/V components should round-trip with < 0.1% error."""
+        rng = np.random.default_rng(42)
+        u_values = rng.uniform(-50.0, 50.0, size=(64, 64)).astype(np.float32)
+        v_values = rng.uniform(-50.0, 50.0, size=(64, 64)).astype(np.float32)
+
+        for component, values in [("wind_u", u_values), ("wind_v", v_values)]:
+            tiff_bytes = _make_fake_tiff(values)
+            mock_response = httpx.Response(200, content=tiff_bytes)
+
+            with patch.object(
+                httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+            ):
+                resp = client.get(f"/tiles/gfs/20260306T12Z/{component}/0/data/1/2/3.png")
+
+            img = Image.open(io.BytesIO(resp.content))
+            rgba = np.array(img)
+            decoded, mask = decode_rgba_to_float(rgba, -50.0, 50.0)
+
+            assert not np.any(mask), f"{component} should have no nodata"
+            max_error = np.max(np.abs(decoded - values))
+            value_range = 100.0  # -50 to +50
+            assert max_error < value_range * 0.001, (
+                f"{component} max error {max_error:.4f} exceeds 0.1% of range"
+            )
+
+    def test_wind_speed_reconstructed_from_uv(self, client):
+        """Speed reconstructed from decoded U/V should match sqrt(U²+V²)."""
+        u_values = np.full((32, 32), 3.0, dtype=np.float32)
+        v_values = np.full((32, 32), 4.0, dtype=np.float32)
+        expected_speed = np.sqrt(u_values**2 + v_values**2)  # 5.0
+
+        decoded = {}
+        for component, values in [("wind_u", u_values), ("wind_v", v_values)]:
+            tiff_bytes = _make_fake_tiff(values)
+            mock_response = httpx.Response(200, content=tiff_bytes)
+            with patch.object(
+                httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+            ):
+                resp = client.get(f"/tiles/gfs/20260306T12Z/{component}/0/data/1/2/3.png")
+            img = Image.open(io.BytesIO(resp.content))
+            rgba = np.array(img)
+            vals, _ = decode_rgba_to_float(rgba, -50.0, 50.0)
+            decoded[component] = vals
+
+        reconstructed_speed = np.sqrt(decoded["wind_u"]**2 + decoded["wind_v"]**2)
+        max_error = np.max(np.abs(reconstructed_speed - expected_speed))
+        assert max_error < 0.1, f"Reconstructed speed error {max_error:.4f} exceeds 0.1 m/s"
 
 
 class TestColormapsEndpoint:

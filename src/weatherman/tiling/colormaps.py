@@ -157,10 +157,34 @@ PRECIPITATION = WeatherColormap(
 )
 
 
+# Wind U/V components (Cartesian): for data-encoded tiles only.
+# These use the same value range but have no visible colormap —
+# the shader reconstructs speed from U,V for color ramp lookup.
+WIND_U = WeatherColormap(
+    name="wind_u",
+    unit="m/s",
+    value_min=-50.0,
+    value_max=50.0,
+    colormap=_interpolate_colors(WIND_SPEED_STOPS),
+    stops=tuple(WIND_SPEED_STOPS),
+)
+
+WIND_V = WeatherColormap(
+    name="wind_v",
+    unit="m/s",
+    value_min=-50.0,
+    value_max=50.0,
+    colormap=_interpolate_colors(WIND_SPEED_STOPS),
+    stops=tuple(WIND_SPEED_STOPS),
+)
+
+
 # Registry for lookup by layer name
 COLORMAPS: dict[str, WeatherColormap] = {
     "temperature": TEMPERATURE,
     "wind_speed": WIND_SPEED,
+    "wind_u": WIND_U,
+    "wind_v": WIND_V,
     "precipitation": PRECIPITATION,
 }
 
