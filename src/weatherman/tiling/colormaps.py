@@ -172,3 +172,15 @@ def get_colormap(layer_name: str) -> WeatherColormap:
         KeyError: If no colormap is registered for the given layer.
     """
     return COLORMAPS[layer_name]
+
+
+def get_value_range(layer_name: str) -> tuple[float, float]:
+    """Return (value_min, value_max) for a layer.
+
+    Used by the data tile encoder to normalize float values into [0, 1].
+
+    Raises:
+        KeyError: If no colormap is registered for the given layer.
+    """
+    cmap = COLORMAPS[layer_name]
+    return (cmap.value_min, cmap.value_max)

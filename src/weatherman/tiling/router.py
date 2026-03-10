@@ -19,7 +19,8 @@ from fastapi.responses import JSONResponse
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
-from weatherman.tiling.colormaps import COLORMAPS, get_colormap
+from weatherman.tiling.colormaps import COLORMAPS, get_colormap, get_value_range
+from weatherman.tiling.data_encoder import encode_float_to_rgba, rgba_to_png_bytes
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
 
@@ -137,6 +138,91 @@ class TileService:
             headers={"Cache-Control": cache_control},
         )
 
+    async def fetch_data_tile(
+        self,
+        cog_uri: str,
+        layer: str,
+        z: int,
+        x: int,
+        y: int,
+        *,
+        is_latest: bool = False,
+    ) -> Response:
+        """Fetch raw float data from TiTiler and return as encoded RGBA PNG.
+
+        Instead of a colorized tile, this returns float values packed into
+        R (low byte) and G (high byte) channels for GPU-side decoding.
+        The B channel flags nodata pixels (0xFF = nodata).
+        """
+        try:
+            vmin, vmax = get_value_range(layer)
+        except KeyError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
+            )
+
+        # Request raw float32 data from TiTiler as numpy-compatible format
+        params: dict[str, str] = {
+            "url": cog_uri,
+            "resampling": "bilinear",
+        }
+
+        titiler_path = (
+            f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}"
+            f"@1x.tif"
+        )
+
+        try:
+            resp = await self._client.get(titiler_path, params=params)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="TiTiler request timed out")
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"TiTiler unreachable: {exc}"
+            ) from exc
+
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Tile not found")
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"TiTiler returned {resp.status_code}",
+            )
+
+        # Parse the GeoTIFF response into a numpy array
+        import io
+        import numpy as np
+        from PIL import Image
+
+        tif_bytes = io.BytesIO(resp.content)
+        try:
+            img = Image.open(tif_bytes)
+            data = np.array(img, dtype=np.float32)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to decode TiTiler response: {exc}",
+            ) from exc
+
+        # Handle multi-band: use first band only
+        if data.ndim == 3:
+            data = data[:, :, 0]
+
+        # Encode to RGBA PNG
+        rgba = encode_float_to_rgba(data, vmin, vmax)
+        png_bytes = rgba_to_png_bytes(rgba)
+
+        cache_control = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
+        return Response(
+            content=png_bytes,
+            media_type="image/png",
+            headers={
+                "Cache-Control": cache_control,
+                "X-Value-Range": f"{vmin},{vmax}",
+            },
+        )
+
     def build_tilejson(
         self,
         layer: str,
@@ -241,6 +327,35 @@ async def get_tile(
     resolved_run_id = svc.resolve_run_id(model, run_id)
     cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
     return await svc.fetch_tile(cog_uri, layer, z, x, y, is_latest=is_latest)
+
+
+@router.get(
+    "/{model}/{run_id}/{layer}/{forecast_hour}/data/{z}/{x}/{y}.png",
+    summary="Get a data-encoded tile for GPU rendering",
+    response_class=Response,
+)
+async def get_data_tile(
+    model: str,
+    run_id: str,
+    layer: str,
+    forecast_hour: Annotated[int, Path(ge=0)],
+    z: int,
+    x: int,
+    y: int,
+    svc: TileService = Depends(get_tile_service),
+) -> Response:
+    """Serve a data-encoded RGBA PNG for GPU-side decoding.
+
+    Float values are packed into R (low byte) + G (high byte) as a 16-bit
+    unsigned integer. B channel flags nodata (0xFF). A is always 0xFF.
+
+    The X-Value-Range response header contains 'min,max' for client decode.
+    Supports 'latest' as run_id.
+    """
+    is_latest = run_id == "latest"
+    resolved_run_id = svc.resolve_run_id(model, run_id)
+    cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
+    return await svc.fetch_data_tile(cog_uri, layer, z, x, y, is_latest=is_latest)
 
 
 @router.get(

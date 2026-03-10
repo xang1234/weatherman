@@ -1,16 +1,20 @@
 """Tests for the XYZ / OGC Tiles API endpoint."""
 
+import io
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
+from weatherman.tiling.data_encoder import decode_rgba_to_float
 from weatherman.tiling.router import (
     TileService,
     init_tile_service,
@@ -304,3 +308,97 @@ class TestTileJsonEndpoint:
     def test_tilejson_unknown_layer(self, client):
         resp = client.get("/tiles/gfs/20260306T12Z/tilejson.json?layer=nonexistent")
         assert resp.status_code == 400
+
+
+def _make_fake_tiff(values: np.ndarray) -> bytes:
+    """Create a single-band TIFF from a float32 array for mocking TiTiler."""
+    img = Image.fromarray(values.astype(np.float32), mode="F")
+    buf = io.BytesIO()
+    img.save(buf, format="TIFF")
+    return buf.getvalue()
+
+
+class TestDataTileEndpoint:
+    def test_data_tile_returns_encoded_png(self, client):
+        """Data tile should return an RGBA PNG with encoded float values."""
+        values = np.full((256, 256), 25.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert "x-value-range" in resp.headers
+        assert resp.headers["x-value-range"] == "-55.0,55.0"
+
+    def test_data_tile_round_trip_accuracy(self, client):
+        """Encoded data tile should decode back within 0.1% error."""
+        rng = np.random.default_rng(99)
+        values = rng.uniform(-55.0, 55.0, size=(256, 256)).astype(np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+
+        # Decode the returned PNG
+        img = Image.open(io.BytesIO(resp.content))
+        rgba = np.array(img)
+        decoded, mask = decode_rgba_to_float(rgba, -55.0, 55.0)
+
+        assert not np.any(mask)
+        max_error = np.max(np.abs(decoded - values))
+        value_range = 55.0 - (-55.0)
+        assert max_error < value_range * 0.001
+
+    def test_data_tile_latest_alias(self, client):
+        values = np.full((256, 256), 10.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/latest/temperature/0/data/1/2/3.png")
+
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "public, max-age=60"
+
+    def test_data_tile_published_run_immutable_cache(self, client):
+        values = np.full((256, 256), 10.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+
+        assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    def test_data_tile_unknown_layer(self, client):
+        resp = client.get("/tiles/gfs/20260306T12Z/nonexistent/0/data/1/2/3.png")
+        assert resp.status_code == 400
+        assert "Unknown layer" in resp.json()["detail"]
+
+    def test_data_tile_titiler_404(self, client):
+        mock_response = httpx.Response(404)
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+        assert resp.status_code == 404
+
+    def test_data_tile_titiler_timeout(self, client):
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+            side_effect=httpx.TimeoutException("timed out"),
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+        assert resp.status_code == 504
