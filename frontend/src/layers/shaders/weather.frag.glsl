@@ -35,6 +35,10 @@ float decodeValue(vec4 texel) {
 float sampleBilinear(sampler2D tex, vec2 uv) {
     vec2 size = vec2(textureSize(tex, 0));
     vec2 texelCoord = uv * size - 0.5;
+    // Clamp so the "right/bottom" neighbor never exceeds the last texel center.
+    // Without this, base + step overshoots at uv=1.0 and CLAMP_TO_EDGE
+    // collapses all 4 samples to the corner texel.
+    texelCoord = clamp(texelCoord, vec2(0.0), size - 1.001);
     vec2 f = fract(texelCoord);
     vec2 base = (floor(texelCoord) + 0.5) / size;
     vec2 step = 1.0 / size;
@@ -74,17 +78,15 @@ float sampleBilinear(sampler2D tex, vec2 uv) {
 void main() {
     float v0 = sampleBilinear(u_dataTile, v_uv);
 
-    // T0 is nodata — discard regardless of T1
-    if (v0 < 0.0) {
-        discard;
-    }
-
     float normalized;
     if (u_temporalMix > 0.0) {
         float v1 = sampleBilinear(u_dataTileT1, v_uv);
-        // If T1 is nodata, fall back to T0 value (no interpolation at data edges)
-        normalized = (v1 < 0.0) ? v0 : mix(v0, v1, u_temporalMix);
+        if (v0 < 0.0 && v1 < 0.0) discard;      // both nodata
+        if (v0 < 0.0) { normalized = v1; }        // T0 nodata, use T1
+        else if (v1 < 0.0) { normalized = v0; }   // T1 nodata, use T0
+        else { normalized = mix(v0, v1, u_temporalMix); }
     } else {
+        if (v0 < 0.0) discard;
         normalized = v0;
     }
 
