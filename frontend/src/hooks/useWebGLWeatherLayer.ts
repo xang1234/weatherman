@@ -39,7 +39,9 @@ export function useWebGLWeatherLayer({
   forecastHour = 0,
   opacity = 0.7,
   visible = true,
-}: UseWeatherLayerOptions): void {
+  forecastHourNext,
+  temporalMix = 0,
+}: UseWeatherLayerOptions): React.RefObject<WeatherGLLayer | null> {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WeatherGLLayer | null>(null)
 
@@ -79,6 +81,13 @@ export function useWebGLWeatherLayer({
     glLayer.setConfig(model, runId, layer, forecastHour)
   }, [model, runId, layer, forecastHour])
 
+  // Update temporal blend when forecastHourNext/temporalMix change.
+  useEffect(() => {
+    const glLayer = layerRef.current
+    if (!glLayer) return
+    glLayer.setTemporalBlend(forecastHourNext ?? -1, temporalMix)
+  }, [forecastHourNext, temporalMix])
+
   // Update opacity and basemap transparency when visibility/opacity change.
   useEffect(() => {
     const m = map.current
@@ -88,4 +97,6 @@ export function useWebGLWeatherLayer({
     glLayer.setOpacity(visible ? opacity : 0)
     setWeatherOverlayOpacity(m, visible)
   }, [map, isLoaded, opacity, visible])
+
+  return layerRef
 }

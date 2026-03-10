@@ -16,22 +16,19 @@
 ## Node.js (Frontend)
 
 - **Directory**: `frontend/`
-- **Node version**: v22 via nvm (system default is v14 which is too old)
-- **Always prefix Node commands**:
+- **Node version**: v22 via nvm (system node is v14, too old)
+- **Running commands**: System node is v14 (too old). `export PATH` does not persist across shell calls and `npx` fails. Prefix every command with an inline `PATH=` override from `frontend/`:
   ```bash
-  export PATH="$HOME/.nvm/versions/node/v22.18.0/bin:$PATH"
+  cd frontend
+  PATH="/Users/admin/.nvm/versions/node/v22.18.0/bin:/usr/bin:/bin" ./node_modules/.bin/tsc -b --noEmit    # type-check
+  PATH="/Users/admin/.nvm/versions/node/v22.18.0/bin:/usr/bin:/bin" ./node_modules/.bin/vite build         # production build
+  PATH="/Users/admin/.nvm/versions/node/v22.18.0/bin:/usr/bin:/bin" ./node_modules/.bin/playwright test    # e2e tests
   ```
 - **Package manager**: npm
-- **Common commands**:
-  ```bash
-  npx tsc -b --noEmit   # type-check
-  npx vite build         # production build
-  npx vite dev           # dev server
-  ```
 - **Path aliases**: `@/` maps to `frontend/src/` (configured in tsconfig + vite)
 
 ## Testing
 
 - Backend: `uv run pytest` (pytest with coverage plugin available)
-- Frontend: TypeScript compilation (`npx tsc -b --noEmit`) + Vite build
+- Frontend: TypeScript compilation (`tsc -b --noEmit`) + Vite build (see Node.js section for invocation)
 - Always run relevant tests before closing a bead

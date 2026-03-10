@@ -100,6 +100,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _uOpacity: WebGLUniformLocation | null = null
   private _uTemporalMix: WebGLUniformLocation | null = null
   private _uIsVector: WebGLUniformLocation | null = null
+  private _uValueMin: WebGLUniformLocation | null = null
+  private _uValueMax: WebGLUniformLocation | null = null
 
   constructor(options: WeatherGLLayerOptions = {}) {
     this.id = options.id ?? 'weather-gl'
@@ -142,6 +144,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uOpacity = gl.getUniformLocation(prog, 'u_opacity')
       this._uTemporalMix = gl.getUniformLocation(prog, 'u_temporalMix')
       this._uIsVector = gl.getUniformLocation(prog, 'u_isVector')
+      this._uValueMin = gl.getUniformLocation(prog, 'u_valueMin')
+      this._uValueMax = gl.getUniformLocation(prog, 'u_valueMax')
 
       this._createColorRamp(gl)
 
@@ -240,8 +244,13 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     if (tilesToDraw.length === 0) return
 
-    // Save MapLibre's GL state (program, active texture unit, and per-unit bindings)
+    // Save MapLibre's GL state (blend, program, active texture unit, and per-unit bindings)
     // We use up to 5 texture units: 0=U/scalar, 1=colorRamp, 2=T1, 3=V, 4=VT1
+    const prevBlend = gl.isEnabled(gl.BLEND)
+    const prevBlendSrc = gl.getParameter(gl.BLEND_SRC_RGB) as number
+    const prevBlendDst = gl.getParameter(gl.BLEND_DST_RGB) as number
+    const prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA) as number
+    const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number
     const prevTexBindings: (WebGLTexture | null)[] = []
@@ -250,12 +259,29 @@ export class WeatherGLLayer implements CustomLayerInterface {
       prevTexBindings.push(gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null)
     }
 
+    // Enable premultiplied-alpha blending for correct compositing over the basemap
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+
     gl.useProgram(this._program.program)
 
     // Set shared uniforms (same for all tiles)
     gl.uniformMatrix4fv(this._uMatrix, false, options.modelViewProjectionMatrix)
     gl.uniform1f(this._uOpacity, this._opacity)
     gl.uniform1i(this._uIsVector, isVector ? 1 : 0)
+
+    // Pass value range for vector mode denormalization.
+    // Wind U/V components are encoded with symmetric range [-max, +max]
+    // where max = wind_speed color ramp ceiling.
+    if (isVector) {
+      const ramp = COLOR_RAMPS[this._layerName]
+      const max = ramp?.valueMax ?? 50
+      gl.uniform1f(this._uValueMin, -max)
+      gl.uniform1f(this._uValueMax, max)
+    } else {
+      gl.uniform1f(this._uValueMin, 0)
+      gl.uniform1f(this._uValueMax, 1)
+    }
 
     // Bind color ramp to texture unit 1 (shared across all tiles)
     gl.activeTexture(gl.TEXTURE1)
@@ -322,7 +348,12 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     gl.bindVertexArray(null)
 
-    // Restore MapLibre's GL state (texture bindings + active unit + program)
+    // Restore MapLibre's GL state (blend + texture bindings + active unit + program)
+    if (prevBlend) {
+      gl.blendFuncSeparate(prevBlendSrc, prevBlendDst, prevBlendSrcA, prevBlendDstA)
+    } else {
+      gl.disable(gl.BLEND)
+    }
     for (let i = 0; i < 5; i++) {
       gl.activeTexture(gl.TEXTURE0 + i)
       gl.bindTexture(gl.TEXTURE_2D, prevTexBindings[i])
@@ -481,6 +512,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._uOpacity = null
     this._uTemporalMix = null
     this._uIsVector = null
+    this._uValueMin = null
+    this._uValueMax = null
     this._gl = null
     this._map = null
   }

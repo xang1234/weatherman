@@ -6,6 +6,11 @@ import { useWebGLWeatherLayer } from './useWebGLWeatherLayer'
 /** Feature flag: use WebGL data-tile pipeline instead of raster TileJSON. */
 const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER === 'true'
 
+/** Imperative handle for driving temporal interpolation from the playback loop. */
+export interface WeatherLayerHandle {
+  setTemporalBlend?(forecastHourT1: number, mix: number): void
+}
+
 export interface UseWeatherLayerOptions {
   /** Ref to the MapLibre map instance */
   map: React.RefObject<maplibregl.Map | null>
@@ -27,17 +32,24 @@ export interface UseWeatherLayerOptions {
   visible?: boolean
   /** Adjacent forecast hours to prefetch for smoother scrubbing/playback */
   prefetchForecastHours?: number[]
+  /** Next forecast hour for temporal interpolation (WebGL pipeline only). */
+  forecastHourNext?: number
+  /** Temporal blend factor 0.0 (= T0) to 1.0 (= T1). Default 0. WebGL pipeline only. */
+  temporalMix?: number
 }
 
 const SOURCE_PREFIX = 'wx-raster'
 const LAYER_PREFIX = 'wx-raster-layer'
 const TILE_LOAD_TIMEOUT_MS = 4000
+const CROSSFADE_DURATION_MS = 300
 
 interface BufferEntry { srcId: string; lyrId: string }
 interface BufferState {
   front: BufferEntry | null
   back: BufferEntry | null
   generation: number
+  /** ID of in-flight cross-fade animation, or null if idle */
+  crossfadeRaf: number | null
 }
 
 function sourceId(model: string, runId: string, layer: string, forecastHour: number): string {
@@ -134,17 +146,22 @@ function resolveUrl(template: string): string {
   return new URL(template, window.location.origin).toString()
 }
 
-export function useWeatherLayer(options: UseWeatherLayerOptions): void {
+export function useWeatherLayer(options: UseWeatherLayerOptions): WeatherLayerHandle {
   // Feature flag: WebGL data-tile pipeline vs raster TileJSON pipeline.
   // USE_WEBGL is a build-time constant (Vite replaces import.meta.env at compile time),
   // so the conditional hook call is safe — call order is stable across renders.
   if (USE_WEBGL) {
     // eslint-disable-next-line react-hooks/rules-of-hooks
-    useWebGLWeatherLayer(options)
-    return
+    const layerRef = useWebGLWeatherLayer(options)
+    return {
+      setTemporalBlend(forecastHourT1: number, mix: number) {
+        layerRef.current?.setTemporalBlend(forecastHourT1, mix)
+      },
+    }
   }
   // eslint-disable-next-line react-hooks/rules-of-hooks
   useRasterWeatherLayer(options)
+  return {}
 }
 
 /** Original raster TileJSON pipeline. */
@@ -163,7 +180,7 @@ function useRasterWeatherLayer({
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 
   // Double-buffer state: front = visible layer, back = loading invisibly
-  const bufferRef = useRef<BufferState>({ front: null, back: null, generation: 0 })
+  const bufferRef = useRef<BufferState>({ front: null, back: null, generation: 0, crossfadeRaf: null })
 
   // Keep current opacity/visible in a ref so swap callbacks always read latest
   // values without needing them in the main effect's dependency array.
@@ -182,33 +199,93 @@ function useRasterWeatherLayer({
     }
   }, [])
 
-  // Atomically swap back buffer to front
+  // Cancel any in-flight cross-fade animation, snapping to final state.
+  // Without finalization, interrupted animations leave ghost layers at
+  // partial opacity and broken front/back references.
+  const cancelCrossfade = useCallback((m: maplibregl.Map | null, state: BufferState) => {
+    if (state.crossfadeRaf === null) return
+    cancelAnimationFrame(state.crossfadeRaf)
+    state.crossfadeRaf = null
+    // Snap: promote incoming (back) to front, remove outgoing (old front)
+    if (state.back && m) {
+      const oldFront = state.front
+      try {
+        if (m.getLayer(state.back.lyrId)) {
+          m.setPaintProperty(state.back.lyrId, 'raster-opacity', visibleRef.current ? opacityRef.current : 0)
+        }
+      } catch { /* map destroyed */ }
+      state.front = state.back
+      state.back = null
+      if (oldFront) removePair(m, oldFront.srcId, oldFront.lyrId)
+    }
+  }, [removePair])
+
+  // Cross-fade back buffer to front over CROSSFADE_DURATION_MS
   const performSwap = useCallback((
     m: maplibregl.Map,
     state: BufferState,
     targetOpacity: number,
     isVisible: boolean,
   ) => {
-    const oldFront = state.front
-    if (state.back) {
-      // Reveal the back buffer at the target opacity
+    cancelCrossfade(m, state)
+
+    const incoming = state.back
+    const outgoing = state.front
+
+    if (!incoming) return
+
+    // No visible layer yet — skip animation, just show immediately
+    if (!outgoing || !isVisible) {
       try {
-        if (m.getLayer(state.back.lyrId)) {
-          m.setPaintProperty(state.back.lyrId, 'raster-opacity', isVisible ? targetOpacity : 0)
+        if (m.getLayer(incoming.lyrId)) {
+          m.setPaintProperty(incoming.lyrId, 'raster-opacity', isVisible ? targetOpacity : 0)
         }
       } catch { /* map destroyed */ }
-      state.front = state.back
+      state.front = incoming
       state.back = null
+      if (outgoing) removePair(m, outgoing.srcId, outgoing.lyrId)
+      if (state.front && isVisible) setWeatherOverlayOpacity(m, true)
+      return
     }
-    // Remove old front
-    if (oldFront) {
-      removePair(m, oldFront.srcId, oldFront.lyrId)
+
+    // Animated cross-fade: incoming 0→target, outgoing target→0
+    // Cubic ease-out: t => 1 - (1 - t)^3
+    const startTime = performance.now()
+    const startOpacity = targetOpacity // outgoing starts at current opacity
+
+    function animate() {
+      const elapsed = performance.now() - startTime
+      const raw = Math.min(1, elapsed / CROSSFADE_DURATION_MS)
+      const t = 1 - (1 - raw) ** 3 // cubic ease-out
+
+      try {
+        if (m.getLayer(incoming!.lyrId)) {
+          m.setPaintProperty(incoming!.lyrId, 'raster-opacity', t * targetOpacity)
+        }
+        if (m.getLayer(outgoing!.lyrId)) {
+          m.setPaintProperty(outgoing!.lyrId, 'raster-opacity', (1 - t) * startOpacity)
+        }
+      } catch {
+        // Map destroyed during animation — bail out
+        state.crossfadeRaf = null
+        return
+      }
+
+      if (raw < 1) {
+        state.crossfadeRaf = requestAnimationFrame(animate)
+      } else {
+        // Animation complete — promote incoming, remove outgoing
+        state.crossfadeRaf = null
+        state.front = incoming
+        state.back = null
+        removePair(m, outgoing!.srcId, outgoing!.lyrId)
+      }
     }
-    // Activate basemap transparency now that weather is visible
-    if (state.front && isVisible) {
-      setWeatherOverlayOpacity(m, true)
-    }
-  }, [removePair])
+
+    // Ensure basemap transparency is active during cross-fade
+    setWeatherOverlayOpacity(m, true)
+    state.crossfadeRaf = requestAnimationFrame(animate)
+  }, [removePair, cancelCrossfade])
 
   // Add or swap the raster overlay when runId/layer/forecastHour changes
   useEffect(() => {
@@ -231,6 +308,9 @@ function useRasterWeatherLayer({
 
     // Increment generation to cancel any pending back-buffer load
     const gen = ++state.generation
+
+    // Cancel any in-flight cross-fade from a previous swap
+    cancelCrossfade(m, state)
 
     // Cancel existing back buffer if any
     if (state.back) {
@@ -294,7 +374,7 @@ function useRasterWeatherLayer({
       m.off('sourcedata', onSourceData)
       clearTimeout(timeout)
     }
-  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, performSwap])
+  }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, performSwap, cancelCrossfade])
 
   // Update opacity on the visible (front) layer when it changes.
   // Also toggle basemap fill transparency so fills are semi-transparent
@@ -355,11 +435,12 @@ function useRasterWeatherLayer({
     return () => controller.abort()
   }, [map, isLoaded, runId, layer, model, apiBase, prefetchForecastHours])
 
-  // Cleanup on unmount — remove both front and back buffers
+  // Cleanup on unmount — cancel animation, remove both front and back buffers
   useEffect(() => {
     const activeMap = map.current
     return () => {
       const state = bufferRef.current
+      cancelCrossfade(activeMap ?? null, state)
       if (activeMap) {
         if (state.front) removePair(activeMap, state.front.srcId, state.front.lyrId)
         if (state.back) removePair(activeMap, state.back.srcId, state.back.lyrId)
@@ -367,5 +448,5 @@ function useRasterWeatherLayer({
       state.front = null
       state.back = null
     }
-  }, [map, removePair])
+  }, [map, removePair, cancelCrossfade])
 }

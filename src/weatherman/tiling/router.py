@@ -248,7 +248,7 @@ class TileService:
         })
         cmap_encoded = quote(colormap.to_json(), safe="")
         tile_url = (
-            f"/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+            f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
             f"?{qs}&colormap={cmap_encoded}"
         )
 

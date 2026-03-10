@@ -70,6 +70,60 @@ const PRECIPITATION_STOPS: ColorStop[] = [
   { position: 1.00, color: [0, 50, 30] },
 ]
 
+const PRESSURE_STOPS: ColorStop[] = [
+  { position: 0.00, color: [60, 0, 160] },     // deep purple (920 hPa, deep low)
+  { position: 0.15, color: [30, 50, 200] },     // blue (940 hPa)
+  { position: 0.30, color: [0, 150, 200] },     // cyan (960 hPa)
+  { position: 0.45, color: [0, 200, 80] },      // green (980 hPa)
+  { position: 0.57, color: [180, 220, 40] },    // yellow-green (1000 hPa)
+  { position: 0.64, color: [220, 220, 0] },     // yellow (1010 hPa, standard)
+  { position: 0.75, color: [255, 180, 0] },     // orange (1025 hPa)
+  { position: 0.85, color: [255, 100, 0] },     // red-orange (1040 hPa)
+  { position: 1.00, color: [180, 0, 0] },       // red (1060 hPa, strong high)
+]
+
+const CLOUD_COVER_STOPS: ColorStop[] = [
+  { position: 0.00, color: [240, 248, 255] },   // near-white (clear sky)
+  { position: 0.25, color: [200, 210, 220] },   // light gray
+  { position: 0.50, color: [160, 170, 180] },   // mid gray
+  { position: 0.75, color: [110, 120, 130] },   // dark gray
+  { position: 1.00, color: [60, 65, 75] },      // very dark gray (overcast)
+]
+
+const WAVE_HEIGHT_STOPS: ColorStop[] = [
+  { position: 0.00, color: [30, 50, 200] },     // blue (calm, 0 m)
+  { position: 0.10, color: [0, 130, 220] },     // bright blue (~1.5 m)
+  { position: 0.20, color: [0, 190, 180] },     // cyan (~3 m)
+  { position: 0.33, color: [0, 200, 80] },      // green (~5 m)
+  { position: 0.47, color: [220, 220, 0] },     // yellow (~7 m)
+  { position: 0.60, color: [255, 160, 0] },     // orange (~9 m)
+  { position: 0.73, color: [230, 30, 15] },     // red (~11 m)
+  { position: 0.87, color: [180, 0, 0] },       // deep red (~13 m)
+  { position: 1.00, color: [130, 0, 80] },      // purple (15 m, extreme)
+]
+
+const WAVE_PERIOD_STOPS: ColorStop[] = [
+  { position: 0.00, color: [30, 50, 200] },     // blue (short period, 0 s)
+  { position: 0.15, color: [0, 160, 210] },     // cyan (~3.75 s)
+  { position: 0.30, color: [0, 200, 80] },      // green (~7.5 s)
+  { position: 0.50, color: [220, 220, 0] },     // yellow (~12.5 s)
+  { position: 0.70, color: [255, 140, 0] },     // orange (~17.5 s)
+  { position: 0.85, color: [230, 30, 15] },     // red (~21.25 s)
+  { position: 1.00, color: [130, 0, 80] },      // purple (25 s, long swell)
+]
+
+const WAVE_DIRECTION_STOPS: ColorStop[] = [
+  { position: 0.00, color: [230, 30, 15] },     // red (N, 0°)
+  { position: 0.125, color: [255, 160, 0] },    // orange (NE, 45°)
+  { position: 0.25, color: [220, 220, 0] },     // yellow (E, 90°)
+  { position: 0.375, color: [0, 200, 80] },     // green (SE, 135°)
+  { position: 0.50, color: [0, 160, 210] },     // cyan (S, 180°)
+  { position: 0.625, color: [30, 50, 200] },    // blue (SW, 225°)
+  { position: 0.75, color: [100, 0, 180] },     // purple (W, 270°)
+  { position: 0.875, color: [180, 0, 100] },    // magenta (NW, 315°)
+  { position: 1.00, color: [230, 30, 15] },     // red (N, 360° = 0°)
+]
+
 /** Registry of all color ramp definitions by layer name. */
 export const COLOR_RAMPS: Record<string, ColorRampDef> = {
   temperature: {
@@ -92,6 +146,41 @@ export const COLOR_RAMPS: Record<string, ColorRampDef> = {
     valueMin: 0,
     valueMax: 250,
     stops: PRECIPITATION_STOPS,
+  },
+  pressure: {
+    name: 'pressure',
+    unit: 'Pa',
+    valueMin: 92000,
+    valueMax: 106000,
+    stops: PRESSURE_STOPS,
+  },
+  cloud_cover: {
+    name: 'cloud_cover',
+    unit: '%',
+    valueMin: 0,
+    valueMax: 100,
+    stops: CLOUD_COVER_STOPS,
+  },
+  wave_height: {
+    name: 'wave_height',
+    unit: 'm',
+    valueMin: 0,
+    valueMax: 15,
+    stops: WAVE_HEIGHT_STOPS,
+  },
+  wave_period: {
+    name: 'wave_period',
+    unit: 's',
+    valueMin: 0,
+    valueMax: 25,
+    stops: WAVE_PERIOD_STOPS,
+  },
+  wave_direction: {
+    name: 'wave_direction',
+    unit: 'degree',
+    valueMin: 0,
+    valueMax: 360,
+    stops: WAVE_DIRECTION_STOPS,
   },
 }
 

@@ -157,6 +157,111 @@ PRECIPITATION = WeatherColormap(
 )
 
 
+# Pressure: purple-blue-green-yellow-orange-red (low→high)
+PRESSURE_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (60, 0, 160)),     # deep purple (920 hPa, deep low)
+    (0.15, (30, 50, 200)),    # blue (940 hPa)
+    (0.30, (0, 150, 200)),    # cyan (960 hPa)
+    (0.45, (0, 200, 80)),     # green (980 hPa)
+    (0.57, (180, 220, 40)),   # yellow-green (1000 hPa)
+    (0.64, (220, 220, 0)),    # yellow (1010 hPa, standard)
+    (0.75, (255, 180, 0)),    # orange (1025 hPa)
+    (0.85, (255, 100, 0)),    # red-orange (1040 hPa)
+    (1.00, (180, 0, 0)),      # red (1060 hPa, strong high)
+]
+
+PRESSURE = WeatherColormap(
+    name="pressure",
+    unit="Pa",
+    value_min=92000.0,
+    value_max=106000.0,
+    colormap=_interpolate_colors(PRESSURE_STOPS),
+    stops=tuple(PRESSURE_STOPS),
+)
+
+# Cloud cover: white-to-dark-gray sequential
+CLOUD_COVER_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (240, 248, 255)),  # near-white (clear sky)
+    (0.25, (200, 210, 220)),  # light gray
+    (0.50, (160, 170, 180)),  # mid gray
+    (0.75, (110, 120, 130)),  # dark gray
+    (1.00, (60, 65, 75)),     # very dark gray (overcast)
+]
+
+CLOUD_COVER = WeatherColormap(
+    name="cloud_cover",
+    unit="%",
+    value_min=0.0,
+    value_max=100.0,
+    colormap=_interpolate_colors(CLOUD_COVER_STOPS),
+    stops=tuple(CLOUD_COVER_STOPS),
+)
+
+# Wave height: blue-cyan-green-yellow-orange-red-purple
+WAVE_HEIGHT_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (30, 50, 200)),    # blue (calm, 0 m)
+    (0.10, (0, 130, 220)),    # bright blue (~1.5 m)
+    (0.20, (0, 190, 180)),    # cyan (~3 m)
+    (0.33, (0, 200, 80)),     # green (~5 m)
+    (0.47, (220, 220, 0)),    # yellow (~7 m)
+    (0.60, (255, 160, 0)),    # orange (~9 m)
+    (0.73, (230, 30, 15)),    # red (~11 m)
+    (0.87, (180, 0, 0)),      # deep red (~13 m)
+    (1.00, (130, 0, 80)),     # purple (15 m, extreme)
+]
+
+WAVE_HEIGHT = WeatherColormap(
+    name="wave_height",
+    unit="m",
+    value_min=0.0,
+    value_max=15.0,
+    colormap=_interpolate_colors(WAVE_HEIGHT_STOPS),
+    stops=tuple(WAVE_HEIGHT_STOPS),
+)
+
+# Wave period: blue-to-purple sequential (short→long swell)
+WAVE_PERIOD_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (30, 50, 200)),    # blue (short period, 0 s)
+    (0.15, (0, 160, 210)),    # cyan (~3.75 s)
+    (0.30, (0, 200, 80)),     # green (~7.5 s)
+    (0.50, (220, 220, 0)),    # yellow (~12.5 s)
+    (0.70, (255, 140, 0)),    # orange (~17.5 s)
+    (0.85, (230, 30, 15)),    # red (~21.25 s)
+    (1.00, (130, 0, 80)),     # purple (25 s, long swell)
+]
+
+WAVE_PERIOD = WeatherColormap(
+    name="wave_period",
+    unit="s",
+    value_min=0.0,
+    value_max=25.0,
+    colormap=_interpolate_colors(WAVE_PERIOD_STOPS),
+    stops=tuple(WAVE_PERIOD_STOPS),
+)
+
+# Wave direction: cyclic HSL-inspired hue wheel (wraps 0°→360°→0°)
+WAVE_DIRECTION_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.000, (230, 30, 15)),   # red (N, 0°)
+    (0.125, (255, 160, 0)),   # orange (NE, 45°)
+    (0.250, (220, 220, 0)),   # yellow (E, 90°)
+    (0.375, (0, 200, 80)),    # green (SE, 135°)
+    (0.500, (0, 160, 210)),   # cyan (S, 180°)
+    (0.625, (30, 50, 200)),   # blue (SW, 225°)
+    (0.750, (100, 0, 180)),   # purple (W, 270°)
+    (0.875, (180, 0, 100)),   # magenta (NW, 315°)
+    (1.000, (230, 30, 15)),   # red (N, 360° = 0°, wraps)
+]
+
+WAVE_DIRECTION = WeatherColormap(
+    name="wave_direction",
+    unit="degree",
+    value_min=0.0,
+    value_max=360.0,
+    colormap=_interpolate_colors(WAVE_DIRECTION_STOPS),
+    stops=tuple(WAVE_DIRECTION_STOPS),
+)
+
+
 # Wind U/V components (Cartesian): for data-encoded tiles only.
 # These use the same value range but have no visible colormap —
 # the shader reconstructs speed from U,V for color ramp lookup.
@@ -186,6 +291,11 @@ COLORMAPS: dict[str, WeatherColormap] = {
     "wind_u": WIND_U,
     "wind_v": WIND_V,
     "precipitation": PRECIPITATION,
+    "pressure": PRESSURE,
+    "cloud_cover": CLOUD_COVER,
+    "wave_height": WAVE_HEIGHT,
+    "wave_period": WAVE_PERIOD,
+    "wave_direction": WAVE_DIRECTION,
 }
 
 

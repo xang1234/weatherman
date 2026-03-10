@@ -21,13 +21,6 @@ const USE_PMTILES = !!import.meta.env.VITE_BASEMAP_URL
 /** Fill-layer opacity when weather overlay is active (Windy.com style). */
 const WEATHER_FILL_OPACITY = 0.3
 
-/**
- * Raster basemap opacity — higher than WEATHER_FILL_OPACITY because raster
- * tiles include labels/roads that need to stay readable (can't control
- * individual layers in a pre-rendered raster tile).
- */
-const WEATHER_RASTER_OPACITY = 0.55
-
 /** Layer IDs whose fill-opacity should be reduced for weather transparency. */
 const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
 
@@ -173,6 +166,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
  *
  * Call this when toggling weather overlay on/off — restores full opacity
  * when weather is hidden so the basemap looks normal without weather.
+ * Raster basemaps (CartoDB fallback) stay at full opacity since weather
+ * renders on top — dimming pre-rendered tiles would reduce label readability.
  */
 export function setWeatherOverlayOpacity(
   map: maplibregl.Map,
@@ -183,9 +178,6 @@ export function setWeatherOverlayOpacity(
   for (const layer of style.layers) {
     if (layer.type === 'fill' && TRANSPARENT_FILL_LAYERS.has(layer.id)) {
       map.setPaintProperty(layer.id, 'fill-opacity', active ? WEATHER_FILL_OPACITY : 1)
-    }
-    if (layer.type === 'raster' && layer.id === 'carto-light') {
-      map.setPaintProperty(layer.id, 'raster-opacity', active ? WEATHER_RASTER_OPACITY : 1)
     }
   }
 }

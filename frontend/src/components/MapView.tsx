@@ -5,7 +5,7 @@ import { useDataAge } from '@/hooks/useDataAge'
 import { useLatestAISDate } from '@/hooks/useLatestAISDate'
 import { useManifest } from '@/hooks/useManifest'
 import { useWeatherInspector } from '@/hooks/useWeatherInspector'
-import { useWeatherLayer } from '@/hooks/useWeatherLayer'
+import { useWeatherLayer, type WeatherLayerHandle } from '@/hooks/useWeatherLayer'
 import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
 import { useSSE } from '@/hooks/useSSE'
@@ -71,20 +71,10 @@ export function MapView() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [forecastHours])
 
-  useEffect(() => {
-    if (!isPlaying || forecastHours.length < 2 || forecastHour == null) return
-    const id = setInterval(() => {
-      setSelectedForecastHour((prev) => {
-        if (prev == null) return forecastHours[0]
-        const index = forecastHours.indexOf(prev)
-        if (index < 0) return forecastHours[0]
-        return forecastHours[(index + 1) % forecastHours.length]
-      })
-    }, 1200)
-    return () => clearInterval(id)
-  }, [isPlaying, forecastHour, forecastHours])
-
   const forecastIndex = forecastHour == null ? -1 : forecastHours.indexOf(forecastHour)
+  const forecastHourNext = forecastIndex >= 0
+    ? forecastHours[(forecastIndex + 1) % forecastHours.length]
+    : undefined
   const prefetchForecastHours = forecastIndex >= 0
     ? [
         forecastHours[forecastIndex - 1],
@@ -92,7 +82,11 @@ export function MapView() {
       ].filter((hour): hour is number => hour != null)
     : []
 
-  useWeatherLayer({
+  // During playback the RAF loop drives temporal blending imperatively —
+  // suppress prop-driven forecastHourNext/temporalMix to avoid conflicting
+  // setTemporalBlend calls (the prop-driven useEffect would snap to mix=0
+  // on every React re-render, causing a one-frame visual glitch).
+  const weatherHandle = useWeatherLayer({
     map,
     isLoaded,
     layer: resolvedLayerId ?? '',
@@ -102,7 +96,61 @@ export function MapView() {
     opacity,
     visible: resolvedLayerId !== null,
     prefetchForecastHours,
+    forecastHourNext: isPlaying ? undefined : forecastHourNext,
+    temporalMix: isPlaying ? undefined : 0,
   })
+
+  // Keep handle and forecastHours in refs so the RAF callback always reads the
+  // latest values without being listed as dependencies (avoids tearing down the
+  // animation loop on every render or manifest re-fetch).
+  const handleRef = useRef<WeatherLayerHandle>(weatherHandle)
+  handleRef.current = weatherHandle
+  const forecastHoursRef = useRef(forecastHours)
+  forecastHoursRef.current = forecastHours
+  const playbackIdxRef = useRef(0)
+
+  const PLAYBACK_STEP_MS = 1200
+
+  useEffect(() => {
+    if (!isPlaying || forecastHours.length < 2) return
+
+    // Seed the playback index from React state, but only on effect start —
+    // subsequent steps are tracked via the ref to survive effect restarts.
+    playbackIdxRef.current = forecastIndex >= 0 ? forecastIndex : 0
+
+    let rafId: number
+    let startTime = performance.now()
+
+    function tick() {
+      const hours = forecastHoursRef.current
+      if (hours.length < 2) return
+
+      const elapsed = performance.now() - startTime
+      const mix = Math.min(1, elapsed / PLAYBACK_STEP_MS)
+      const idx = playbackIdxRef.current
+      const nextIdx = (idx + 1) % hours.length
+
+      handleRef.current.setTemporalBlend?.(hours[nextIdx], mix)
+
+      if (mix >= 1) {
+        // Step complete — advance the hour via React state
+        playbackIdxRef.current = nextIdx
+        setSelectedForecastHour(hours[nextIdx])
+        startTime = performance.now()
+        handleRef.current.setTemporalBlend?.(
+          hours[(nextIdx + 1) % hours.length], 0,
+        )
+      }
+
+      rafId = requestAnimationFrame(tick)
+    }
+
+    rafId = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(rafId)
+      handleRef.current.setTemporalBlend?.(-1, 0) // snap clean on pause
+    }
+  }, [isPlaying, forecastIndex])
 
   const aisDate = sse.aisDate ?? latestAISDate
 

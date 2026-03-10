@@ -30,6 +30,12 @@ uniform float u_temporalMix;
 // The shader reconstructs speed = sqrt(U² + V²) for color ramp lookup.
 uniform int u_isVector;
 
+// Value range for denormalization in vector mode.
+// Decoded [0,1] values are mapped back to [u_valueMin, u_valueMax].
+// Also used to normalize reconstructed speed to [0,1] for the color ramp.
+uniform float u_valueMin;
+uniform float u_valueMax;
+
 out vec4 fragColor;
 
 // Decode 16-bit value and return normalized [0,1], or -1.0 for nodata.
@@ -100,6 +106,7 @@ void main() {
     if (u_isVector == 1) {
         // Vector mode: sample U and V components separately,
         // interpolate in Cartesian space, reconstruct speed.
+        float valueRange = u_valueMax - u_valueMin;
         float u0 = sampleBilinear(u_dataTile, v_uv);
         float v0 = sampleBilinear(u_dataTileV, v_uv);
 
@@ -111,29 +118,28 @@ void main() {
             float v1 = sampleBilinear(u_dataTileVT1, v_uv);
             if (u1 < 0.0 || v1 < 0.0) discard;
             // Use T1 only — T0 had nodata
-            // Denormalize: [0,1] -> [-50, 50] m/s (range = 100, offset = -50)
-            float uWind = u1 * 100.0 - 50.0;
-            float vWind = v1 * 100.0 - 50.0;
+            // Denormalize: [0,1] -> [valueMin, valueMax]
+            float uWind = u1 * valueRange + u_valueMin;
+            float vWind = v1 * valueRange + u_valueMin;
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            // Normalize speed to [0,1] for color ramp. Max displayable = 50 m/s
-            // (matches WIND_SPEED ramp ceiling). Oblique vectors can exceed this
-            // (up to 70.7 m/s) — they clamp to ramp top, same as scalar wind_speed.
-            normalized = clamp(speed / 50.0, 0.0, 1.0);
+            // Normalize speed to [0,1] for color ramp. Max displayable = u_valueMax.
+            // Oblique vectors can exceed this — they clamp to ramp top.
+            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         } else if (u_temporalMix > 0.0) {
             float u1 = sampleBilinear(u_dataTileT1, v_uv);
             float v1 = sampleBilinear(u_dataTileVT1, v_uv);
             float uBlend = temporalBlend(u0, u1);
             float vBlend = temporalBlend(v0, v1);
-            float uWind = uBlend * 100.0 - 50.0;
-            float vWind = vBlend * 100.0 - 50.0;
+            float uWind = uBlend * valueRange + u_valueMin;
+            float vWind = vBlend * valueRange + u_valueMin;
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            normalized = clamp(speed / 50.0, 0.0, 1.0);
+            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         } else {
-            // Denormalize: [0,1] -> [-50, 50] m/s
-            float uWind = u0 * 100.0 - 50.0;
-            float vWind = v0 * 100.0 - 50.0;
+            // Denormalize: [0,1] -> [valueMin, valueMax]
+            float uWind = u0 * valueRange + u_valueMin;
+            float vWind = v0 * valueRange + u_valueMin;
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            normalized = clamp(speed / 50.0, 0.0, 1.0);
+            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         }
     } else {
         // Scalar mode: single data tile per timestep
