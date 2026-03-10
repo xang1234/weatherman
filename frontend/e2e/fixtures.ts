@@ -1,5 +1,7 @@
 /** Shared mock data and route helpers for e2e tests. */
 
+import type { Page } from '@playwright/test'
+
 export const RUN_ID = '20260310_00z'
 export const CYCLE_TIME = '2026-03-10T00:00:00Z'
 export const FORECAST_HOURS = [0, 3, 6, 9, 12]
@@ -77,8 +79,6 @@ export function makeCoverageJSON(lon: number, lat: number) {
     },
   }
 }
-
-import type { Page } from '@playwright/test'
 
 /**
  * Install route mocks for all API endpoints the app calls.
