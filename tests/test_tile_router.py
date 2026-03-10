@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import numpy as np
 import pytest
+import rasterio
+import rasterio.io
+import rasterio.transform
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -310,12 +313,27 @@ class TestTileJsonEndpoint:
         assert resp.status_code == 400
 
 
-def _make_fake_tiff(values: np.ndarray) -> bytes:
-    """Create a single-band TIFF from a float32 array for mocking TiTiler."""
-    img = Image.fromarray(values.astype(np.float32), mode="F")
-    buf = io.BytesIO()
-    img.save(buf, format="TIFF")
-    return buf.getvalue()
+def _make_fake_tiff(values: np.ndarray, nodata: float | None = None) -> bytes:
+    """Create a single-band GeoTIFF from a float32 array for mocking TiTiler.
+
+    Uses rasterio to produce a proper GDAL-compatible GeoTIFF, matching
+    what TiTiler actually returns.
+    """
+    h, w = values.shape
+    transform = rasterio.transform.from_bounds(-180, -90, 180, 90, w, h)
+    with rasterio.io.MemoryFile() as memfile:
+        with memfile.open(
+            driver="GTiff",
+            height=h,
+            width=w,
+            count=1,
+            dtype="float32",
+            crs="EPSG:3857",
+            transform=transform,
+            nodata=nodata,
+        ) as dataset:
+            dataset.write(values.astype(np.float32), 1)
+        return memfile.read()
 
 
 class TestDataTileEndpoint:
@@ -402,3 +420,24 @@ class TestDataTileEndpoint:
         ):
             resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
         assert resp.status_code == 504
+
+    def test_data_tile_nodata_sentinel_from_geotiff(self, client):
+        """Nodata value from GeoTIFF metadata should be flagged in output."""
+        values = np.full((16, 16), 20.0, dtype=np.float32)
+        values[0, 0] = -9999.0  # nodata sentinel
+        tiff_bytes = _make_fake_tiff(values, nodata=-9999.0)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ):
+            resp = client.get("/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.png")
+
+        assert resp.status_code == 200
+        img = Image.open(io.BytesIO(resp.content))
+        rgba = np.array(img)
+        _, mask = decode_rgba_to_float(rgba, -55.0, 55.0)
+        # The nodata pixel should be flagged
+        assert mask[0, 0] is np.True_
+        # Valid pixels should not be flagged
+        assert not mask[1, 1]

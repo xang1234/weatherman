@@ -16,6 +16,7 @@ import io
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image
 
 
 def encode_float_to_rgba(
@@ -83,8 +84,6 @@ def rgba_to_png_bytes(rgba: NDArray[np.uint8]) -> bytes:
     Returns:
         PNG file contents as bytes.
     """
-    from PIL import Image
-
     img = Image.fromarray(rgba, mode="RGBA")
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)  # fast compression

@@ -13,6 +13,8 @@ from typing import Annotated, Callable, Optional
 from urllib.parse import quote, urlencode
 
 import httpx
+import rasterio
+import rasterio.io
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import JSONResponse
 
@@ -190,27 +192,20 @@ class TileService:
                 detail=f"TiTiler returned {resp.status_code}",
             )
 
-        # Parse the GeoTIFF response into a numpy array
-        import io
-        import numpy as np
-        from PIL import Image
-
-        tif_bytes = io.BytesIO(resp.content)
+        # Parse the GeoTIFF response with rasterio (handles GDAL GeoTIFFs properly)
         try:
-            img = Image.open(tif_bytes)
-            data = np.array(img, dtype=np.float32)
+            with rasterio.io.MemoryFile(resp.content) as memfile:
+                with memfile.open() as dataset:
+                    data = dataset.read(1).astype("float32")
+                    nodata = dataset.nodata
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"Failed to decode TiTiler response: {exc}",
             ) from exc
 
-        # Handle multi-band: use first band only
-        if data.ndim == 3:
-            data = data[:, :, 0]
-
-        # Encode to RGBA PNG
-        rgba = encode_float_to_rgba(data, vmin, vmax)
+        # Encode to RGBA PNG, passing nodata sentinel from the GeoTIFF metadata
+        rgba = encode_float_to_rgba(data, vmin, vmax, nodata=nodata)
         png_bytes = rgba_to_png_bytes(rgba)
 
         cache_control = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
