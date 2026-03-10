@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
-from weatherman.tiling.colormaps import COLORMAPS, get_colormap, get_value_range
+from weatherman.tiling.colormaps import COLORMAPS, export_color_ramps, get_colormap, get_value_range
 from weatherman.tiling.data_encoder import encode_float_to_rgba, rgba_to_png_bytes
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
@@ -378,3 +378,20 @@ async def get_tilejson(
     data = svc.build_tilejson(layer, cog_uri)
     cache_control = svc.CACHE_LATEST if is_latest else svc.CACHE_IMMUTABLE
     return JSONResponse(content=data, headers={"Cache-Control": cache_control})
+
+
+@router.get(
+    "/colormaps.json",
+    summary="Color ramp definitions for all weather layers",
+)
+async def get_colormaps() -> dict:
+    """Return color ramp stop definitions for GPU-side colorization.
+
+    The frontend uses these to build 256x1 RGBA textures for the
+    fragment shader's color ramp lookup, keeping color definitions
+    in a single source of truth (Python colormaps).
+    """
+    return JSONResponse(
+        content=export_color_ramps(),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )

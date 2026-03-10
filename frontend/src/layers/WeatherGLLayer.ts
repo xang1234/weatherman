@@ -5,8 +5,8 @@
  * It compiles shaders, manages the GL context lifecycle, creates a
  * fullscreen quad, and integrates with MapLibre's render loop.
  *
- * Currently renders a placeholder solid color. Future beads (wx-170.3,
- * wx-170.4) will add tile management and data decode/colorize shaders.
+ * The fragment shader decodes 16-bit float data from data tile textures
+ * and colorizes them using a 1D color ramp lookup texture.
  */
 
 import type {
@@ -25,15 +25,18 @@ import {
   type GLProgram,
   type QuadGeometry,
 } from './gl-utils'
+import {
+  COLOR_RAMPS,
+  createColorRampTexture,
+} from './color-ramps'
 
 export interface WeatherGLLayerOptions {
   /** Unique layer ID for MapLibre. */
   id?: string
-  /**
-   * Placeholder color as [R, G, B, A] in 0-1 range.
-   * Default: semi-transparent blue.
-   */
-  color?: [number, number, number, number]
+  /** Weather layer name for color ramp selection (e.g. 'temperature'). */
+  layer?: string
+  /** Overlay opacity 0-1. Default: 0.7. */
+  opacity?: number
 }
 
 export class WeatherGLLayer implements CustomLayerInterface {
@@ -41,24 +44,35 @@ export class WeatherGLLayer implements CustomLayerInterface {
   readonly type = 'custom' as const
   readonly renderingMode = '2d' as const
 
-  private _color: [number, number, number, number]
+  private _layerName: string
+  private _opacity: number
   private _map: MaplibreMap | null = null
   private _gl: WebGL2RenderingContext | null = null
   private _program: GLProgram | null = null
   private _quad: QuadGeometry | null = null
-  private _colorLocation: WebGLUniformLocation | null = null
+
+  // Uniform locations
+  private _uDataTile: WebGLUniformLocation | null = null
+  private _uColorRamp: WebGLUniformLocation | null = null
+  private _uOpacity: WebGLUniformLocation | null = null
+
+  // Color ramp texture (256x1 RGBA)
+  private _colorRampTexture: WebGLTexture | null = null
+
+  // Data tile texture — set externally by the integration layer
+  private _dataTileTexture: WebGLTexture | null = null
 
   constructor(options: WeatherGLLayerOptions = {}) {
     this.id = options.id ?? 'weather-gl'
-    this._color = options.color ?? [0.0, 0.3, 0.8, 0.15]
+    this._layerName = options.layer ?? 'temperature'
+    this._opacity = options.opacity ?? 0.7
   }
 
   /**
    * Called by MapLibre when the layer is added to the map.
-   * Initializes shaders, buffers, and uniform locations.
+   * Initializes shaders, buffers, uniform locations, and color ramp texture.
    */
   onAdd(map: MaplibreMap, gl: WebGLRenderingContext | WebGL2RenderingContext): void {
-    // Require WebGL2
     if (!(gl instanceof WebGL2RenderingContext)) {
       console.error('[WeatherGLLayer] WebGL2 is required but not available')
       return
@@ -70,10 +84,13 @@ export class WeatherGLLayer implements CustomLayerInterface {
     try {
       this._program = createProgram(gl, vertexSource, fragmentSource)
       this._quad = createFullscreenQuad(gl)
-      this._colorLocation = gl.getUniformLocation(
-        this._program.program,
-        'u_color',
-      )
+
+      const prog = this._program.program
+      this._uDataTile = gl.getUniformLocation(prog, 'u_dataTile')
+      this._uColorRamp = gl.getUniformLocation(prog, 'u_colorRamp')
+      this._uOpacity = gl.getUniformLocation(prog, 'u_opacity')
+
+      this._createColorRamp(gl)
     } catch (e) {
       console.error('[WeatherGLLayer] Initialization failed:', e)
       this._cleanup()
@@ -81,15 +98,15 @@ export class WeatherGLLayer implements CustomLayerInterface {
   }
 
   /**
-   * Called each frame by MapLibre. Draws the fullscreen quad with the
-   * current shader program.
-   *
-   * @param gl - The WebGL context.
-   * @param _options - Render options including the projection matrix (unused
-   *   for fullscreen quad, will be needed for geo-positioned tile data).
+   * Called each frame by MapLibre. Decodes the data tile texture and
+   * applies color ramp colorization via the fragment shader.
    */
   render(gl: WebGLRenderingContext | WebGL2RenderingContext, _options: CustomRenderMethodInput): void {
-    if (!this._program || !this._quad || !(gl instanceof WebGL2RenderingContext)) {
+    if (
+      !this._program || !this._quad ||
+      !this._colorRampTexture || !this._dataTileTexture ||
+      !(gl instanceof WebGL2RenderingContext)
+    ) {
       return
     }
 
@@ -98,10 +115,18 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     gl.useProgram(this._program.program)
 
-    // Set placeholder color uniform
-    if (this._colorLocation) {
-      gl.uniform4fv(this._colorLocation, this._color)
-    }
+    // Bind data tile texture to unit 0
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this._dataTileTexture)
+    gl.uniform1i(this._uDataTile, 0)
+
+    // Bind color ramp texture to unit 1
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this._colorRampTexture)
+    gl.uniform1i(this._uColorRamp, 1)
+
+    // Set opacity
+    gl.uniform1f(this._uOpacity, this._opacity)
 
     // Draw fullscreen quad
     gl.bindVertexArray(this._quad.vao)
@@ -123,10 +148,50 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._cleanup()
   }
 
-  /** Update the placeholder color at runtime. */
-  setColor(color: [number, number, number, number]): void {
-    this._color = color
+  /** Set the data tile texture to render. Called by the integration layer. */
+  setDataTileTexture(texture: WebGLTexture | null): void {
+    this._dataTileTexture = texture
     this._map?.triggerRepaint()
+  }
+
+  /** Update opacity at runtime. */
+  setOpacity(opacity: number): void {
+    this._opacity = opacity
+    this._map?.triggerRepaint()
+  }
+
+  /** Switch to a different weather layer's color ramp. */
+  setLayer(layerName: string): void {
+    if (layerName === this._layerName) return
+    this._layerName = layerName
+    if (this._gl) {
+      this._createColorRamp(this._gl)
+      this._map?.triggerRepaint()
+    }
+  }
+
+  /** Get the current layer name. */
+  get layerName(): string {
+    return this._layerName
+  }
+
+  // ── Private ──────────────────────────────────────────────────────
+
+  /** Create or replace the color ramp texture for the current layer. */
+  private _createColorRamp(gl: WebGL2RenderingContext): void {
+    // Delete previous ramp texture if switching layers
+    if (this._colorRampTexture) {
+      gl.deleteTexture(this._colorRampTexture)
+      this._colorRampTexture = null
+    }
+
+    const ramp = COLOR_RAMPS[this._layerName]
+    if (!ramp) {
+      console.warn(`[WeatherGLLayer] No color ramp for layer '${this._layerName}'`)
+      return
+    }
+
+    this._colorRampTexture = createColorRampTexture(gl, ramp)
   }
 
   /** Free all GL resources. */
@@ -141,8 +206,15 @@ export class WeatherGLLayer implements CustomLayerInterface {
         deleteProgram(gl, this._program)
         this._program = null
       }
+      if (this._colorRampTexture) {
+        gl.deleteTexture(this._colorRampTexture)
+        this._colorRampTexture = null
+      }
     }
-    this._colorLocation = null
+    this._uDataTile = null
+    this._uColorRamp = null
+    this._uOpacity = null
+    this._dataTileTexture = null
     this._gl = null
     this._map = null
   }

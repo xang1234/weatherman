@@ -184,3 +184,25 @@ def get_value_range(layer_name: str) -> tuple[float, float]:
     """
     cmap = COLORMAPS[layer_name]
     return (cmap.value_min, cmap.value_max)
+
+
+def export_color_ramps() -> dict[str, dict]:
+    """Export all color ramp definitions as JSON-serializable dicts.
+
+    Returns a mapping of layer name to ramp metadata including color stops,
+    value range, and unit. Used by the frontend to build GPU color ramp
+    textures without hardcoding color definitions.
+    """
+    result: dict[str, dict] = {}
+    for name, cmap in COLORMAPS.items():
+        result[name] = {
+            "name": cmap.name,
+            "unit": cmap.unit,
+            "valueMin": cmap.value_min,
+            "valueMax": cmap.value_max,
+            "stops": [
+                {"position": pos, "color": list(rgb)}
+                for pos, rgb in cmap.stops
+            ],
+        }
+    return result

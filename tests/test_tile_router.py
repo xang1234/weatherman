@@ -441,3 +441,36 @@ class TestDataTileEndpoint:
         assert mask[0, 0] is np.True_
         # Valid pixels should not be flagged
         assert not mask[1, 1]
+
+
+class TestColormapsEndpoint:
+    def test_returns_all_layers(self, client):
+        resp = client.get("/tiles/colormaps.json")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "temperature" in data
+        assert "wind_speed" in data
+        assert "precipitation" in data
+
+    def test_has_expected_fields(self, client):
+        resp = client.get("/tiles/colormaps.json")
+        data = resp.json()
+        temp = data["temperature"]
+        assert temp["name"] == "temperature"
+        assert temp["unit"] == "°C"
+        assert temp["valueMin"] == -55.0
+        assert temp["valueMax"] == 55.0
+        assert len(temp["stops"]) > 0
+
+    def test_stop_format(self, client):
+        resp = client.get("/tiles/colormaps.json")
+        data = resp.json()
+        stop = data["temperature"]["stops"][0]
+        assert "position" in stop
+        assert "color" in stop
+        assert len(stop["color"]) == 3
+        assert all(isinstance(c, int) for c in stop["color"])
+
+    def test_cache_header(self, client):
+        resp = client.get("/tiles/colormaps.json")
+        assert "max-age=86400" in resp.headers["cache-control"]
