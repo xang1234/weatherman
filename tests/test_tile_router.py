@@ -532,6 +532,8 @@ class TestColormapsEndpoint:
         data = resp.json()
         assert "temperature" in data
         assert "wind_speed" in data
+        assert "wind_u" in data
+        assert "wind_v" in data
         assert "precipitation" in data
 
     def test_has_expected_fields(self, client):

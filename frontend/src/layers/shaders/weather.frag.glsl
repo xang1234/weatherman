@@ -115,7 +115,9 @@ void main() {
             float uWind = u1 * 100.0 - 50.0;
             float vWind = v1 * 100.0 - 50.0;
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            // Normalize speed to [0,1] for color ramp (max 50 m/s)
+            // Normalize speed to [0,1] for color ramp. Max displayable = 50 m/s
+            // (matches WIND_SPEED ramp ceiling). Oblique vectors can exceed this
+            // (up to 70.7 m/s) — they clamp to ramp top, same as scalar wind_speed.
             normalized = clamp(speed / 50.0, 0.0, 1.0);
         } else if (u_temporalMix > 0.0) {
             float u1 = sampleBilinear(u_dataTileT1, v_uv);

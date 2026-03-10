@@ -291,12 +291,16 @@ export class WeatherGLLayer implements CustomLayerInterface {
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, texT0)
 
-      // Bind T1 data tile to unit 2 if available, otherwise set mix to 0
+      // Bind T1 data tile to unit 2 if available, otherwise null it and
+      // set mix to 0 so the shader won't sample a stale binding from a
+      // previous tile iteration.
       if (texT1) {
         gl.activeTexture(gl.TEXTURE2)
         gl.bindTexture(gl.TEXTURE_2D, texT1)
         gl.uniform1f(this._uTemporalMix, this._temporalMix)
       } else {
+        gl.activeTexture(gl.TEXTURE2)
+        gl.bindTexture(gl.TEXTURE_2D, null)
         gl.uniform1f(this._uTemporalMix, 0)
       }
 
@@ -307,6 +311,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
         if (texVT1) {
           gl.activeTexture(gl.TEXTURE4)
           gl.bindTexture(gl.TEXTURE_2D, texVT1)
+        } else {
+          gl.activeTexture(gl.TEXTURE4)
+          gl.bindTexture(gl.TEXTURE_2D, null)
         }
       }
 
@@ -404,6 +411,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._tileManager?.setLayer(this._model, this._runId, this._layerName, this._forecastHour)
       if (this._forecastHourT1 >= 0) {
         this._tileManagerT1?.setLayer(this._model, this._runId, this._layerName, this._forecastHourT1)
+      } else {
+        // Clear T1 so it doesn't hold stale tiles from previous vector mode
+        this._tileManagerT1?.clear()
       }
       // Clear V managers so they don't hold stale wind tiles
       this._tileManagerV?.clear()
