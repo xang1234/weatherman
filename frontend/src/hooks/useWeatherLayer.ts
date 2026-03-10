@@ -1,5 +1,10 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type maplibregl from 'maplibre-gl'
+import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
+import { useWebGLWeatherLayer } from './useWebGLWeatherLayer'
+
+/** Feature flag: use WebGL data-tile pipeline instead of raster TileJSON. */
+const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER === 'true'
 
 export interface UseWeatherLayerOptions {
   /** Ref to the MapLibre map instance */
@@ -43,14 +48,25 @@ function layerId(model: string, runId: string, layer: string, forecastHour: numb
   return `${LAYER_PREFIX}-${model}-${runId}-${layer}-${forecastHour}`
 }
 
-/** Find the first symbol layer in the style, so we can insert raster below labels. */
-function firstSymbolLayerId(map: maplibregl.Map): string | undefined {
+/**
+ * Find the layer ID to insert weather *before* in the MapLibre stack.
+ *
+ * Returns the first fill layer (e.g. 'water') so weather renders below
+ * the semi-transparent basemap fills — the Windy.com layering trick:
+ *   [background] → [WEATHER] → [water@0.3] → [earth@0.3] → [lines] → [labels]
+ *
+ * Falls back to the first symbol layer if no fill layer exists (e.g.
+ * raster-only basemaps), so weather still renders below labels.
+ */
+function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
   const layers = map.getStyle()?.layers
   if (!layers) return undefined
+  let firstSymbol: string | undefined
   for (const l of layers) {
-    if (l.type === 'symbol') return l.id
+    if (l.type === 'fill') return l.id
+    if (l.type === 'symbol' && !firstSymbol) firstSymbol = l.id
   }
-  return undefined
+  return firstSymbol
 }
 
 /**
@@ -118,7 +134,21 @@ function resolveUrl(template: string): string {
   return new URL(template, window.location.origin).toString()
 }
 
-export function useWeatherLayer({
+export function useWeatherLayer(options: UseWeatherLayerOptions): void {
+  // Feature flag: WebGL data-tile pipeline vs raster TileJSON pipeline.
+  // USE_WEBGL is a build-time constant (Vite replaces import.meta.env at compile time),
+  // so the conditional hook call is safe — call order is stable across renders.
+  if (USE_WEBGL) {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useWebGLWeatherLayer(options)
+    return
+  }
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  useRasterWeatherLayer(options)
+}
+
+/** Original raster TileJSON pipeline. */
+function useRasterWeatherLayer({
   map,
   isLoaded,
   layer,
@@ -174,6 +204,10 @@ export function useWeatherLayer({
     if (oldFront) {
       removePair(m, oldFront.srcId, oldFront.lyrId)
     }
+    // Activate basemap transparency now that weather is visible
+    if (state.front && isVisible) {
+      setWeatherOverlayOpacity(m, true)
+    }
   }, [removePair])
 
   // Add or swap the raster overlay when runId/layer/forecastHour changes
@@ -217,8 +251,8 @@ export function useWeatherLayer({
       tileSize,
     })
 
-    // Insert raster layer below first symbol layer — invisible (back buffer)
-    const beforeLayer = firstSymbolLayerId(m)
+    // Insert weather below basemap fills (Windy.com layering) — invisible (back buffer)
+    const beforeLayer = weatherInsertBeforeId(m)
     m.addLayer(
       {
         id: newLyrId,
@@ -262,12 +296,18 @@ export function useWeatherLayer({
     }
   }, [map, isLoaded, runId, layer, forecastHour, model, apiBase, tileSize, removePair, performSwap])
 
-  // Update opacity on the visible (front) layer when it changes
+  // Update opacity on the visible (front) layer when it changes.
+  // Also toggle basemap fill transparency so fills are semi-transparent
+  // when weather is showing (Windy.com look) and opaque when hidden.
+  // Only activates transparency when the front buffer exists — avoids
+  // a washed-out basemap while weather tiles are still loading.
   useEffect(() => {
     const m = map.current
+    if (!m || !isLoaded) return
     const front = bufferRef.current.front
-    if (!m || !isLoaded || !front) return
-    if (m.getLayer(front.lyrId)) {
+    const weatherShowing = visible && front != null
+    setWeatherOverlayOpacity(m, weatherShowing)
+    if (front && m.getLayer(front.lyrId)) {
       m.setPaintProperty(front.lyrId, 'raster-opacity', visible ? opacity : 0)
     }
   }, [map, isLoaded, opacity, visible])

@@ -18,11 +18,29 @@ const PMTILES_SOURCE = RAW_BASEMAP_URL.startsWith('pmtiles://')
  */
 const USE_PMTILES = !!import.meta.env.VITE_BASEMAP_URL
 
+/** Fill-layer opacity when weather overlay is active (Windy.com style). */
+const WEATHER_FILL_OPACITY = 0.3
+
+/**
+ * Raster basemap opacity — higher than WEATHER_FILL_OPACITY because raster
+ * tiles include labels/roads that need to stay readable (can't control
+ * individual layers in a pre-rendered raster tile).
+ */
+const WEATHER_RASTER_OPACITY = 0.55
+
+/** Layer IDs whose fill-opacity should be reduced for weather transparency. */
+const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
+
 /**
  * Light basemap style optimized for weather overlay readability.
  *
  * Uses Protomaps vector tiles via PMTiles protocol when available,
  * falling back to CartoDB light raster tiles for local development.
+ *
+ * Fill layers (earth, water) start opaque but are dynamically reduced to
+ * ~30% opacity via setWeatherOverlayOpacity() when weather data is visible —
+ * the Windy.com "semi-transparent basemap" look. Labels use stronger halos
+ * for readability over weather colors.
  */
 export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
   ? {
@@ -48,14 +66,14 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           type: 'fill',
           source: 'protomaps',
           'source-layer': 'water',
-          paint: { 'fill-color': '#d4e6f1' },
+          paint: { 'fill-color': '#b8d4e8' },
         },
         {
           id: 'earth',
           type: 'fill',
           source: 'protomaps',
           'source-layer': 'earth',
-          paint: { 'fill-color': '#f0f0f0' },
+          paint: { 'fill-color': '#e8e8e8' },
         },
         {
           id: 'earth_outline',
@@ -93,9 +111,10 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
             'text-letter-spacing': 0.1,
           },
           paint: {
-            'text-color': '#4b5563',
-            'text-halo-color': '#ffffff',
-            'text-halo-width': 2,
+            'text-color': '#1f2937',
+            'text-halo-color': 'rgba(255, 255, 255, 0.85)',
+            'text-halo-width': 2.5,
+            'text-halo-blur': 1,
           },
           minzoom: 1,
         },
@@ -112,9 +131,10 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
             'text-max-width': 8,
           },
           paint: {
-            'text-color': '#374151',
-            'text-halo-color': '#ffffff',
-            'text-halo-width': 2,
+            'text-color': '#1f2937',
+            'text-halo-color': 'rgba(255, 255, 255, 0.85)',
+            'text-halo-width': 2.5,
+            'text-halo-blur': 1,
           },
           minzoom: 3,
         },
@@ -143,6 +163,29 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           source: 'carto',
           minzoom: 0,
           maxzoom: 19,
+          paint: {},
         },
       ],
     }
+
+/**
+ * Set the fill-layer opacity for weather-transparent layers at runtime.
+ *
+ * Call this when toggling weather overlay on/off — restores full opacity
+ * when weather is hidden so the basemap looks normal without weather.
+ */
+export function setWeatherOverlayOpacity(
+  map: maplibregl.Map,
+  active: boolean,
+): void {
+  const style = map.getStyle()
+  if (!style?.layers) return
+  for (const layer of style.layers) {
+    if (layer.type === 'fill' && TRANSPARENT_FILL_LAYERS.has(layer.id)) {
+      map.setPaintProperty(layer.id, 'fill-opacity', active ? WEATHER_FILL_OPACITY : 1)
+    }
+    if (layer.type === 'raster' && layer.id === 'carto-light') {
+      map.setPaintProperty(layer.id, 'raster-opacity', active ? WEATHER_RASTER_OPACITY : 1)
+    }
+  }
+}
