@@ -110,8 +110,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
       return
     }
 
-    // Save MapLibre's current program so we can restore it after drawing
+    // Save MapLibre's GL state so we can restore it after drawing
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
+    const prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number
 
     gl.useProgram(this._program.program)
 
@@ -133,7 +134,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
 
-    // Restore MapLibre's program to avoid corrupting its render state
+    // Restore MapLibre's GL state to avoid corrupting its render pipeline
+    gl.activeTexture(prevActiveTexture)
     gl.useProgram(prevProgram)
   }
 
