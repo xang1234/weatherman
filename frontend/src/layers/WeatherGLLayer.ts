@@ -93,6 +93,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
       return
     }
 
+    // Save MapLibre's current program so we can restore it after drawing
+    const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
+
     gl.useProgram(this._program.program)
 
     // Set placeholder color uniform
@@ -104,6 +107,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
+
+    // Restore MapLibre's program to avoid corrupting its render state
+    gl.useProgram(prevProgram)
   }
 
   /**

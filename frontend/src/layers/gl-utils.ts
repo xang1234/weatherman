@@ -98,9 +98,11 @@ export function deleteProgram(
   gl: WebGL2RenderingContext,
   glProgram: GLProgram,
 ): void {
-  gl.deleteProgram(glProgram.program)
+  gl.detachShader(glProgram.program, glProgram.vertexShader)
+  gl.detachShader(glProgram.program, glProgram.fragmentShader)
   gl.deleteShader(glProgram.vertexShader)
   gl.deleteShader(glProgram.fragmentShader)
+  gl.deleteProgram(glProgram.program)
 }
 
 /** Vertex data for a fullscreen quad: two triangles covering clip space [-1,1]. */
@@ -147,6 +149,9 @@ export function createFullscreenQuad(gl: WebGL2RenderingContext): QuadGeometry {
   const positionBuffer = gl.createBuffer()
   const uvBuffer = gl.createBuffer()
   if (!positionBuffer || !uvBuffer) {
+    gl.deleteBuffer(positionBuffer)
+    gl.deleteBuffer(uvBuffer)
+    gl.deleteVertexArray(vao)
     throw new Error('Failed to create vertex buffers')
   }
 
