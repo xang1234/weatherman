@@ -3,9 +3,13 @@ precision highp float;
 
 in vec2 v_uv;
 
-// Data tile: float values encoded as 16-bit uint in R (low) + G (high),
+// Data tile T0: float values encoded as 16-bit uint in R (low) + G (high),
 // B channel = nodata flag (1.0 = nodata), A = 1.0 always.
 uniform sampler2D u_dataTile;
+
+// Data tile T1: next timestep for temporal interpolation.
+// When u_temporalMix == 0.0, this texture is unused.
+uniform sampler2D u_dataTileT1;
 
 // Color ramp: 256x1 RGBA texture for value-to-color mapping.
 uniform sampler2D u_colorRamp;
@@ -13,20 +17,76 @@ uniform sampler2D u_colorRamp;
 // Layer opacity (0.0 - 1.0).
 uniform float u_opacity;
 
+// Temporal blend factor: 0.0 = T0 only, 1.0 = T1 only.
+uniform float u_temporalMix;
+
 out vec4 fragColor;
 
-void main() {
-    vec4 texel = texture(u_dataTile, v_uv);
+// Decode 16-bit value and return normalized [0,1], or -1.0 for nodata.
+float decodeValue(vec4 texel) {
+    if (texel.b > 0.5) return -1.0; // nodata
+    return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
+}
 
-    // Nodata check: B channel > 0.5 means nodata (0xFF in the PNG)
-    if (texel.b > 0.5) {
+// Manual bilinear interpolation: sample 4 texels with GL_NEAREST,
+// decode each to float, then interpolate the decoded values.
+// GPU hardware bilinear (GL_LINEAR) would blend raw encoded bytes,
+// producing incorrect values for our 16-bit encoding scheme.
+float sampleBilinear(sampler2D tex, vec2 uv) {
+    vec2 size = vec2(textureSize(tex, 0));
+    vec2 texelCoord = uv * size - 0.5;
+    vec2 f = fract(texelCoord);
+    vec2 base = (floor(texelCoord) + 0.5) / size;
+    vec2 step = 1.0 / size;
+
+    // Sample 4 neighboring texels
+    float tl = decodeValue(texture(tex, base));
+    float tr = decodeValue(texture(tex, base + vec2(step.x, 0.0)));
+    float bl = decodeValue(texture(tex, base + vec2(0.0, step.y)));
+    float br = decodeValue(texture(tex, base + step));
+
+    // Count valid (non-nodata) samples and accumulate weighted values.
+    // If any neighbor is nodata, exclude it and redistribute weight
+    // to avoid artifacts at data boundaries.
+    float weights[4] = float[4](
+        (1.0 - f.x) * (1.0 - f.y),  // tl
+        f.x * (1.0 - f.y),            // tr
+        (1.0 - f.x) * f.y,            // bl
+        f.x * f.y                      // br
+    );
+    float vals[4] = float[4](tl, tr, bl, br);
+
+    float totalWeight = 0.0;
+    float result = 0.0;
+    for (int i = 0; i < 4; i++) {
+        if (vals[i] >= 0.0) {
+            result += vals[i] * weights[i];
+            totalWeight += weights[i];
+        }
+    }
+
+    // All 4 neighbors are nodata — signal nodata upstream
+    if (totalWeight == 0.0) return -1.0;
+
+    return result / totalWeight;
+}
+
+void main() {
+    float v0 = sampleBilinear(u_dataTile, v_uv);
+
+    // T0 is nodata — discard regardless of T1
+    if (v0 < 0.0) {
         discard;
     }
 
-    // Decode 16-bit unsigned value from R (low byte) + G (high byte).
-    // In the PNG: R = encoded & 0xFF, G = (encoded >> 8) & 0xFF.
-    // After GL normalization to [0,1]: encoded = (R + G * 256) / 65535.
-    float normalized = (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
+    float normalized;
+    if (u_temporalMix > 0.0) {
+        float v1 = sampleBilinear(u_dataTileT1, v_uv);
+        // If T1 is nodata, fall back to T0 value (no interpolation at data edges)
+        normalized = (v1 < 0.0) ? v0 : mix(v0, v1, u_temporalMix);
+    } else {
+        normalized = v0;
+    }
 
     // Color ramp lookup — sample the 1D texture at the normalized position.
     vec4 color = texture(u_colorRamp, vec2(normalized, 0.5));
