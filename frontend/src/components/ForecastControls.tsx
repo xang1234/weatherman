@@ -62,12 +62,12 @@ export function ForecastControls({
         onChange={(e) => onChange(forecastHours[Number(e.target.value)])}
         style={{ flex: 1, minWidth: 80, accentColor: '#58a6ff' }}
       />
-      <span style={fHourStyle}>F{forecastHour.toString().padStart(3, '0')}</span>
     </div>
   )
 }
 
 const FORECAST_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short',
   month: 'short',
   day: '2-digit',
   hour: '2-digit',
@@ -134,11 +134,4 @@ const stepBtnStyle: CSSProperties = {
   cursor: 'pointer',
   fontSize: 11,
   lineHeight: 1,
-}
-
-const fHourStyle: CSSProperties = {
-  fontSize: 11,
-  color: '#8b949e',
-  fontVariantNumeric: 'tabular-nums',
-  whiteSpace: 'nowrap',
 }
