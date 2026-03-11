@@ -6,6 +6,7 @@ export interface ValueRange {
 export interface ColorStop {
   position: number          // 0.0-1.0
   color: [number, number, number]  // RGB
+  alpha?: number            // 0-255, defaults to 255
 }
 
 export interface LayerConfig {

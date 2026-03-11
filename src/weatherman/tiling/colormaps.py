@@ -28,7 +28,7 @@ class WeatherColormap:
     value_min: float
     value_max: float
     colormap: ColormapDict
-    stops: tuple[tuple[float, tuple[int, int, int]], ...] = ()
+    stops: tuple[tuple[float, tuple[int, int, int] | tuple[int, int, int, int]], ...] = ()
 
     def to_json(self) -> str:
         """Serialize the colormap for TiTiler's colormap query parameter."""
@@ -43,13 +43,14 @@ class WeatherColormap:
 
 
 def _interpolate_colors(
-    stops: list[tuple[float, tuple[int, int, int]]],
+    stops: list[tuple[float, tuple[int, int, int] | tuple[int, int, int, int]]],
     steps: int = 256,
 ) -> ColormapDict:
     """Linearly interpolate between color stops to build a 256-entry colormap.
 
     Args:
-        stops: List of (position, (R, G, B)) where position is 0.0-1.0.
+        stops: List of (position, (R, G, B[, A])) where position is 0.0-1.0.
+               Alpha defaults to 255 for 3-tuple RGB stops.
         steps: Number of entries in the output (default 256).
 
     Returns:
@@ -78,7 +79,10 @@ def _interpolate_colors(
         r = int(c0[0] + (c1[0] - c0[0]) * frac)
         g = int(c0[1] + (c1[1] - c0[1]) * frac)
         b = int(c0[2] + (c1[2] - c0[2]) * frac)
-        cmap[i] = (r, g, b, 255)
+        a0 = c0[3] if len(c0) == 4 else 255
+        a1 = c1[3] if len(c1) == 4 else 255
+        a = int(a0 + (a1 - a0) * frac)
+        cmap[i] = (r, g, b, a)
     return cmap
 
 
@@ -137,14 +141,16 @@ WIND_SPEED = WeatherColormap(
 )
 
 # Precipitation: white-to-green sequential (total accumulated, kg/m² ≡ mm)
-PRECIPITATION_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.0, (255, 255, 255)),   # white (no precip)
-    (0.15, (199, 233, 192)),  # very light green
-    (0.3, (120, 198, 168)),   # green
-    (0.5, (65, 171, 93)),     # medium green
-    (0.7, (35, 132, 67)),     # dark green
-    (0.85, (0, 90, 50)),      # very dark green
-    (1.0, (0, 50, 30)),       # near-black green (250 kg/m²)
+# Zero precipitation is fully transparent so dry areas don't obscure the basemap.
+PRECIPITATION_STOPS: list[tuple[float, tuple[int, int, int] | tuple[int, int, int, int]]] = [
+    (0.000, (255, 255, 255, 0)),    # transparent at zero precipitation
+    (0.002, (255, 255, 255, 255)),  # opaque white at ~0.5 mm
+    (0.15, (199, 233, 192)),        # very light green
+    (0.3, (120, 198, 168)),         # green
+    (0.5, (65, 171, 93)),           # medium green
+    (0.7, (35, 132, 67)),           # dark green
+    (0.85, (0, 90, 50)),            # very dark green
+    (1.0, (0, 50, 30)),             # near-black green (250 kg/m²)
 ]
 
 PRECIPITATION = WeatherColormap(
@@ -335,8 +341,12 @@ def export_color_ramps() -> dict[str, dict]:
             "valueMin": cmap.value_min,
             "valueMax": cmap.value_max,
             "stops": [
-                {"position": pos, "color": list(rgb)}
-                for pos, rgb in cmap.stops
+                {
+                    "position": pos,
+                    "color": list(color[:3]),
+                    **({"alpha": color[3]} if len(color) == 4 and color[3] != 255 else {}),
+                }
+                for pos, color in cmap.stops
             ],
         }
     return result

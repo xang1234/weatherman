@@ -15,6 +15,7 @@
 export interface ColorStop {
   position: number
   color: [number, number, number]
+  alpha?: number  // 0-255, defaults to 255
 }
 
 /** Color ramp definition for a weather layer. */
@@ -63,7 +64,8 @@ const WIND_SPEED_STOPS: ColorStop[] = [
 ]
 
 const PRECIPITATION_STOPS: ColorStop[] = [
-  { position: 0.00, color: [255, 255, 255] },
+  { position: 0.000, color: [255, 255, 255], alpha: 0 },    // transparent at zero
+  { position: 0.002, color: [255, 255, 255], alpha: 255 },  // opaque at ~0.5 mm
   { position: 0.15, color: [199, 233, 192] },
   { position: 0.30, color: [120, 198, 168] },
   { position: 0.50, color: [65, 171, 93] },
@@ -240,7 +242,8 @@ function oklabToLinearRgb(L: number, a: number, b: number): [number, number, num
 
 /**
  * Interpolate color stops into an RGBA Uint8Array.
- * Alpha is always 255 (fully opaque).
+ * Alpha is read from each stop's `alpha` field (default 255) and
+ * interpolated linearly (not in OKLAB — alpha is perceptually linear).
  */
 export function interpolateColorRamp(stops: ColorStop[], size = 1024): Uint8Array {
   const data = new Uint8Array(size * 4)
@@ -270,11 +273,15 @@ export function interpolateColorRamp(stops: ColorStop[], size = 1024): Uint8Arra
     const [L1, a1, b1] = linearRgbToOklab(srgbToLinear(s1.color[0]), srgbToLinear(s1.color[1]), srgbToLinear(s1.color[2]))
     const [lr, lg, lb] = oklabToLinearRgb(L0 + (L1 - L0) * frac, a0 + (a1 - a0) * frac, b0 + (b1 - b0) * frac)
 
+    // Interpolate alpha linearly (not in OKLAB — alpha is perceptually linear)
+    const alpha0 = s0.alpha ?? 255
+    const alpha1 = s1.alpha ?? 255
+
     const idx = i * 4
     data[idx + 0] = linearToSrgb(lr)
     data[idx + 1] = linearToSrgb(lg)
     data[idx + 2] = linearToSrgb(lb)
-    data[idx + 3] = 255
+    data[idx + 3] = Math.round(alpha0 + (alpha1 - alpha0) * frac)
   }
 
   return data
