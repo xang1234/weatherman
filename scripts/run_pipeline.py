@@ -39,6 +39,7 @@ from weatherman.ingest.gfs import (
     latest_available_cycle,
 )
 from weatherman.processing.cog import grib2_to_cog, wind_speed_to_cog
+from weatherman.processing.data_tiles import generate_all_data_tiles
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.lifecycle import DuplicateRun, RunLifecycle, RunState
 from weatherman.storage.manifest import (
@@ -129,7 +130,7 @@ def step_download(
 ) -> Path:
     """Download GFS GRIB2 files. Returns the run staging directory."""
     logger.info(
-        "Step 1/4: Downloading GFS GRIB2 for %s (hours: %s)",
+        "Step 1/5: Downloading GFS GRIB2 for %s (hours: %s)",
         run_id,
         forecast_hours,
     )
@@ -164,7 +165,7 @@ def step_generate_cogs(
 
     Returns the set of layer IDs that had at least one COG generated.
     """
-    logger.info("Step 2/4: Generating Cloud Optimized GeoTIFFs")
+    logger.info("Step 2/5: Generating Cloud Optimized GeoTIFFs")
     total = 0
     generated_layers: set[str] = set()
 
@@ -201,6 +202,58 @@ def step_generate_cogs(
     return generated_layers
 
 
+def step_generate_data_tiles(
+    run_id: RunID,
+    forecast_hours: list[int],
+    data_dir: Path,
+    store: LocalObjectStore,
+    layout: StorageLayout,
+    generated_layers: set[str],
+) -> int:
+    """Pre-generate data-encoded RGBA PNG tiles (z0–z5) for each layer/hour.
+
+    These tiles are placed in staging alongside the COGs and auto-publish
+    with the rest of the run artifacts.
+
+    Returns total tile count for logging.
+    """
+    from weatherman.tiling.colormaps import get_value_range
+
+    logger.info("Step 3/5: Pre-generating data tiles (z0–z5)")
+    total = 0
+
+    for layer in sorted(generated_layers):
+        try:
+            vmin, vmax = get_value_range(layer)
+        except KeyError:
+            logger.warning("  No value range for layer '%s', skipping data tiles", layer)
+            continue
+
+        for fhour in forecast_hours:
+            cog_key = layout.staging_cog_path(run_id, layer, fhour)
+            cog_path = data_dir / cog_key
+            if not cog_path.exists():
+                continue
+
+            count = 0
+            tiles = generate_all_data_tiles(str(cog_path), vmin, vmax)
+            try:
+                for z, x, y, png_bytes in tiles:
+                    tile_key = layout.staging_data_tile_path(
+                        run_id, layer, fhour, z, x, y,
+                    )
+                    store.write_bytes(tile_key, png_bytes)
+                    count += 1
+            finally:
+                tiles.close()
+
+            total += count
+            logger.info("  %s/f%03d: %d tiles", layer, fhour, count)
+
+    logger.info("Generated %d data tiles total", total)
+    return total
+
+
 def step_write_manifest(
     run_id: RunID,
     forecast_hours: list[int],
@@ -212,7 +265,7 @@ def step_write_manifest(
 
     Only includes layers that have actual COG data (from generated_layers).
     """
-    logger.info("Step 3/4: Writing UI manifest")
+    logger.info("Step 4/5: Writing UI manifest")
     active_layers = [lc for lc in LAYER_CONFIGS if lc.id in generated_layers]
     if not active_layers:
         logger.warning("No layers generated — skipping manifest write")
@@ -253,7 +306,7 @@ def step_publish_run(
     data_dir: Path,
 ) -> None:
     """Publish staged artifacts via the canonical publish helper."""
-    logger.info("Step 4/4: Publishing staged artifacts")
+    logger.info("Step 5/5: Publishing staged artifacts")
     catalog_path = layout.catalog_path
     if store.exists(catalog_path):
         catalog = RunCatalog.from_json(store.read_bytes(catalog_path).decode("utf-8"))
@@ -340,6 +393,9 @@ def main() -> None:
             run_id, forecast_hours, grib2_dir, data_dir, layout,
         )
 
+    step_generate_data_tiles(
+        run_id, forecast_hours, data_dir, store, layout, generated_layers,
+    )
     step_write_manifest(run_id, forecast_hours, store, layout, generated_layers)
     step_publish_run(run_id, store, layout, data_dir)
 

@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
+from weatherman.processing.data_tiles import MAX_DATA_TILE_ZOOM
+from weatherman.storage.object_store import ObjectStore
 from weatherman.tiling.colormaps import COLORMAPS, export_color_ramps, get_colormap, get_value_range
 from weatherman.tiling.data_encoder import encode_float_to_rgba, rgba_to_png_bytes
 
@@ -44,11 +46,15 @@ class TileService:
         catalog_loader: CatalogLoader,
         *,
         cog_root: str | None = None,
+        store: ObjectStore | None = None,
+        titiler_public_url: str | None = None,
     ) -> None:
         self._storage = storage
         self._titiler_url = titiler_base_url.rstrip("/")
+        self._titiler_public_url = (titiler_base_url if titiler_public_url is None else titiler_public_url).rstrip("/")
         self._catalog_loader = catalog_loader
         self._cog_root = cog_root
+        self._store = store
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def close(self) -> None:
@@ -140,6 +146,14 @@ class TileService:
             headers={"Cache-Control": cache_control},
         )
 
+    def _data_tile_path(
+        self, model: str, run_id: RunID, layer: str,
+        forecast_hour: int, z: int, x: int, y: int,
+    ) -> str:
+        """Build the storage key for a pre-generated data tile."""
+        layout = StorageLayout(model)
+        return layout.data_tile_path(run_id, layer, forecast_hour, z, x, y)
+
     async def fetch_data_tile(
         self,
         cog_uri: str,
@@ -149,12 +163,15 @@ class TileService:
         y: int,
         *,
         is_latest: bool = False,
+        model: str = "",
+        run_id: RunID | None = None,
+        forecast_hour: int = 0,
     ) -> Response:
-        """Fetch raw float data from TiTiler and return as encoded RGBA PNG.
+        """Fetch raw float data and return as encoded RGBA PNG.
 
-        Instead of a colorized tile, this returns float values packed into
-        R (low byte) and G (high byte) channels for GPU-side decoding.
-        The B channel flags nodata pixels (0xFF = nodata).
+        Checks for a pre-generated tile first (z0–z5). Falls back to
+        TiTiler for higher zoom levels or if the pre-generated tile
+        is missing.
         """
         try:
             vmin, vmax = get_value_range(layer)
@@ -163,6 +180,29 @@ class TileService:
                 status_code=400,
                 detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
             )
+
+        # Try pre-generated tile first (z0–z5)
+        if (
+            self._store is not None
+            and run_id is not None
+            and z <= MAX_DATA_TILE_ZOOM
+        ):
+            try:
+                tile_key = self._data_tile_path(
+                    model, run_id, layer, forecast_hour, z, x, y,
+                )
+                png_bytes = self._store.read_bytes(tile_key)
+                cache = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
+                return Response(
+                    content=png_bytes,
+                    media_type="image/png",
+                    headers={
+                        "Cache-Control": cache,
+                        "X-Value-Range": f"{vmin},{vmax}",
+                    },
+                )
+            except (FileNotFoundError, OSError):
+                pass  # Fall through to TiTiler
 
         # Request raw float32 data from TiTiler as numpy-compatible format
         params: dict[str, str] = {
@@ -222,13 +262,18 @@ class TileService:
         self,
         layer: str,
         cog_uri: str,
+        *,
+        model: str = "",
+        run_id: str = "",
+        forecast_hour: int = 0,
     ) -> dict:
-        """Build a TileJSON response with TiTiler-native tile URLs.
+        """Build a TileJSON response with tile URL templates.
 
-        Returns tile URL templates that point directly to TiTiler's
-        ``/cog/tiles`` endpoint with colormap and rescale baked into
-        the query string.  The browser fetches tiles from TiTiler
-        without proxying through Weatherman.
+        When ``titiler_public_url`` is set (non-empty), returns direct
+        TiTiler tile URLs with colormap/rescale baked into the query
+        string.  Otherwise returns short backend proxy URLs — the
+        backend applies the colormap server-side when proxying to
+        TiTiler, keeping URLs well under HTTP length limits.
         """
         try:
             colormap = get_colormap(layer)
@@ -238,19 +283,22 @@ class TileService:
                 detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
             )
 
-        # urlencode for simple params; quote the colormap JSON separately
-        # to avoid double-encoding (the URL goes into TileJSON as-is and
-        # MapLibre sends it verbatim — no extra decode step).
-        qs = urlencode({
-            "url": cog_uri,
-            "rescale": colormap.rescale_range(),
-            "resampling": "bilinear",
-        })
-        cmap_encoded = quote(colormap.to_json(), safe="")
-        tile_url = (
-            f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-            f"?{qs}&colormap={cmap_encoded}"
-        )
+        if self._titiler_public_url:
+            # Direct-to-TiTiler: bake colormap into URL (works when the
+            # browser can reach TiTiler directly without URI length limits).
+            qs = urlencode({
+                "url": cog_uri,
+                "rescale": colormap.rescale_range(),
+                "resampling": "bilinear",
+            })
+            cmap_encoded = quote(colormap.to_json(), safe="")
+            tile_url = (
+                f"{self._titiler_public_url}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+                f"?{qs}&colormap={cmap_encoded}"
+            )
+        else:
+            # Backend proxy: short URLs, colormap resolved server-side.
+            tile_url = f"/tiles/{model}/{run_id}/{layer}/{forecast_hour}/{{z}}/{{x}}/{{y}}.png"
 
         return {
             "tilejson": "3.0.0",
@@ -280,12 +328,18 @@ def init_tile_service(
     catalog_loader: CatalogLoader,
     *,
     cog_root: str | None = None,
+    store: ObjectStore | None = None,
+    titiler_public_url: str | None = None,
 ) -> TileService:
     """Initialize the module-level TileService. Call once at app startup."""
     global _service
     if _service is not None:
         raise RuntimeError("TileService already initialized — call shutdown_tile_service() first")
-    _service = TileService(storage, titiler_base_url, catalog_loader, cog_root=cog_root)
+    _service = TileService(
+        storage, titiler_base_url, catalog_loader,
+        cog_root=cog_root, store=store,
+        titiler_public_url=titiler_public_url,
+    )
     return _service
 
 
@@ -350,7 +404,13 @@ async def get_data_tile(
     is_latest = run_id == "latest"
     resolved_run_id = svc.resolve_run_id(model, run_id)
     cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
-    return await svc.fetch_data_tile(cog_uri, layer, z, x, y, is_latest=is_latest)
+    return await svc.fetch_data_tile(
+        cog_uri, layer, z, x, y,
+        is_latest=is_latest,
+        model=model,
+        run_id=resolved_run_id,
+        forecast_hour=forecast_hour,
+    )
 
 
 @router.get(
@@ -375,7 +435,10 @@ async def get_tilejson(
     resolved_run_id = svc.resolve_run_id(model, run_id)
     cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
 
-    data = svc.build_tilejson(layer, cog_uri)
+    data = svc.build_tilejson(
+        layer, cog_uri,
+        model=model, run_id=str(resolved_run_id), forecast_hour=forecast_hour,
+    )
     cache_control = svc.CACHE_LATEST if is_latest else svc.CACHE_IMMUTABLE
     return JSONResponse(content=data, headers={"Cache-Control": cache_control})
 

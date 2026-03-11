@@ -279,8 +279,11 @@ def create_app(
         setup_tracing(service_name="weatherman")
         cog_root_env = os.environ.get("TITILER_COG_ROOT")
         cog_root = str(Path(cog_root_env).resolve()) if cog_root_env else None
+        titiler_public_url = os.environ.get("TITILER_PUBLIC_URL")
         init_tile_service(
-            storage_config, titiler_url, catalog_loader, cog_root=cog_root,
+            storage_config, titiler_url, catalog_loader,
+            cog_root=cog_root, store=store,
+            titiler_public_url=titiler_public_url,
         )
         init_edr_service(catalog_loader, zarr_opener)
         init_ais_tile_service(ais_db_path)

@@ -178,3 +178,21 @@ class StorageLayout:
     def staging_manifest_path(self, run_id: RunID) -> str:
         """Staging UI manifest."""
         return f"{self.staging_prefix(run_id)}/ui/manifest.json"
+
+    # -- Data tile paths (pre-generated RGBA PNGs for GPU decoding) --
+
+    def data_tile_path(
+        self, run_id: RunID, layer: str, forecast_hour: int,
+        z: int, x: int, y: int,
+    ) -> str:
+        """Published data tile: models/<model>/runs/<run_id>/data_tiles/<layer>/<fhour>/<z>/<x>/<y>.png"""
+        _validate_layer(layer)
+        return f"{self.run_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.png"
+
+    def staging_data_tile_path(
+        self, run_id: RunID, layer: str, forecast_hour: int,
+        z: int, x: int, y: int,
+    ) -> str:
+        """Staging data tile: models/<model>/staging/<run_id>/data_tiles/<layer>/<fhour>/<z>/<x>/<y>.png"""
+        _validate_layer(layer)
+        return f"{self.staging_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.png"

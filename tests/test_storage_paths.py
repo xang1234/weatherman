@@ -200,6 +200,26 @@ class TestStorageLayout:
         with pytest.raises(ValueError):
             gfs.staging_cog_path(run_id, "../bad", 0)
 
+    def test_data_tile_path(self, gfs, run_id):
+        assert (
+            gfs.data_tile_path(run_id, "temperature", 6, 3, 4, 2)
+            == "models/gfs/runs/20260306T00Z/data_tiles/temperature/006/3/4/2.png"
+        )
+
+    def test_staging_data_tile_path(self, gfs, run_id):
+        assert (
+            gfs.staging_data_tile_path(run_id, "temperature", 6, 3, 4, 2)
+            == "models/gfs/staging/20260306T00Z/data_tiles/temperature/006/3/4/2.png"
+        )
+
+    def test_data_tile_path_rejects_invalid_layer(self, gfs, run_id):
+        with pytest.raises(ValueError):
+            gfs.data_tile_path(run_id, "../bad", 0, 0, 0, 0)
+
+    def test_data_tile_zero_padded_hour(self, gfs, run_id):
+        path = gfs.data_tile_path(run_id, "wind_speed", 0, 0, 0, 0)
+        assert "/000/" in path
+
 
 class TestStorageConfig:
     def test_full_path_no_prefix(self):

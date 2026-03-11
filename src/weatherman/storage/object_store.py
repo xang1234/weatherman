@@ -33,7 +33,11 @@ class ObjectStore(Protocol):
         ...
 
     def read_bytes(self, key: str) -> bytes:
-        """Read the contents of an object."""
+        """Read the contents of an object.
+
+        Raises FileNotFoundError (or a subclass of OSError) if the key
+        does not exist. Callers rely on this for fallback logic.
+        """
         ...
 
     def write_bytes(self, key: str, data: bytes) -> None:

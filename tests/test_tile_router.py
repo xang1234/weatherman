@@ -17,7 +17,8 @@ from PIL import Image
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
-from weatherman.tiling.data_encoder import decode_rgba_to_float
+from weatherman.storage.object_store import LocalObjectStore
+from weatherman.tiling.data_encoder import decode_rgba_to_float, encode_float_to_rgba, rgba_to_png_bytes
 from weatherman.tiling.router import (
     TileService,
     init_tile_service,
@@ -558,3 +559,90 @@ class TestColormapsEndpoint:
     def test_cache_header(self, client):
         resp = client.get("/tiles/colormaps.json")
         assert "max-age=86400" in resp.headers["cache-control"]
+
+
+# -- Pre-generated data tile tests --
+
+
+class TestPreGeneratedDataTiles:
+    """Tests for serving pre-generated data tiles with TiTiler fallback."""
+
+    @pytest.fixture()
+    def store_app(self, tmp_path):
+        """App with a LocalObjectStore that has a pre-generated tile."""
+        import weatherman.tiling.router as mod
+        mod._service = None
+
+        store = LocalObjectStore(tmp_path)
+
+        # Write a pre-generated tile at z3
+        layout = StorageLayout("gfs")
+        tile_key = layout.data_tile_path(RUN, "temperature", 0, 3, 4, 2)
+        # Create a small valid PNG tile
+        data = np.full((256, 256), 20.0, dtype=np.float32)
+        rgba = encode_float_to_rgba(data, -55.0, 55.0)
+        png_bytes = rgba_to_png_bytes(rgba)
+        store.write_bytes(tile_key, png_bytes)
+
+        app = FastAPI()
+        init_tile_service(STORAGE, TITILER_URL, _catalog_loader, store=store)
+        app.include_router(router)
+        yield app, store
+        mod._service = None
+
+    @pytest.fixture()
+    def store_client(self, store_app):
+        app, _ = store_app
+        return TestClient(app)
+
+    def test_data_tile_served_from_pregenerated(self, store_client):
+        """Pre-generated tile at z3 should be returned without TiTiler call."""
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+        ) as mock_get:
+            resp = store_client.get(
+                "/tiles/gfs/20260306T12Z/temperature/0/data/3/4/2.png"
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert "x-value-range" in resp.headers
+        # TiTiler should NOT have been called
+        mock_get.assert_not_called()
+
+    def test_data_tile_fallback_high_zoom(self, store_client):
+        """z7 tile (above MAX_DATA_TILE_ZOOM) should fall through to TiTiler."""
+        values = np.full((256, 256), 15.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_get:
+            resp = store_client.get(
+                "/tiles/gfs/20260306T12Z/temperature/0/data/7/64/64.png"
+            )
+
+        assert resp.status_code == 200
+        # TiTiler SHOULD have been called
+        mock_get.assert_called_once()
+
+    def test_data_tile_fallback_missing(self, store_client):
+        """z3 tile missing from store should fall through to TiTiler."""
+        values = np.full((256, 256), 15.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_get:
+            # Request a tile that's NOT in the store (x=0,y=0 instead of x=4,y=2)
+            resp = store_client.get(
+                "/tiles/gfs/20260306T12Z/temperature/0/data/3/0/0.png"
+            )
+
+        assert resp.status_code == 200
+        # TiTiler SHOULD have been called (fallback)
+        mock_get.assert_called_once()
