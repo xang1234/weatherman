@@ -1,0 +1,11 @@
+.venv/
+.git/
+.beads/
+.claude/
+.plans/
+.playwright-mcp/
+.pytest_cache/
+.data/
+frontend/
+*.duckdb
+**/__pycache__/
