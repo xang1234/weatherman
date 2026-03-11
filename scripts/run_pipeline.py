@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -384,14 +383,14 @@ def main() -> None:
     store = LocalObjectStore(data_dir)
     layout = StorageLayout("gfs")
 
-    # Download GRIB2 to a temp directory.
-    # Herbie caches downloads internally, so re-runs are fast even though
-    # the temp directory is cleaned up after COG generation.
-    with tempfile.TemporaryDirectory(prefix="gfs-pipeline-") as tmpdir:
-        grib2_dir = step_download(run_id, forecast_hours, Path(tmpdir))
-        generated_layers = step_generate_cogs(
-            run_id, forecast_hours, grib2_dir, data_dir, layout,
-        )
+    # Store GRIB2 files persistently so they survive container restarts.
+    # Individual files are cache-checked in download_variable().
+    grib2_base = data_dir / "models" / "gfs" / "grib2"
+    grib2_base.mkdir(parents=True, exist_ok=True)
+    grib2_dir = step_download(run_id, forecast_hours, grib2_base)
+    generated_layers = step_generate_cogs(
+        run_id, forecast_hours, grib2_dir, data_dir, layout,
+    )
 
     step_generate_data_tiles(
         run_id, forecast_hours, data_dir, store, layout, generated_layers,

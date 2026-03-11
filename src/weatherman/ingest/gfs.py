@@ -127,11 +127,28 @@ def download_variable(
         FileNotFoundError: If download produces no file.
         RuntimeError: If Herbie cannot find the data.
     """
-    h = _herbie_for_hour(run_id, forecast_hour, model=model, product=product)
-
     dest_dir = staging_dir / "grib2" / variable_name
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_file = dest_dir / f"f{forecast_hour:03d}.grib2"
+
+    # Skip if already downloaded (persistent GRIB2 cache)
+    if dest_file.exists() and dest_file.stat().st_size > 0:
+        size = dest_file.stat().st_size
+        logger.info(
+            "Cached %s fxx=%03d for %s (%d bytes)",
+            variable_name,
+            forecast_hour,
+            run_id,
+            size,
+        )
+        return DownloadResult(
+            variable=variable_name,
+            forecast_hour=forecast_hour,
+            local_path=dest_file,
+            size_bytes=size,
+        )
+
+    h = _herbie_for_hour(run_id, forecast_hour, model=model, product=product)
 
     logger.info(
         "Downloading %s fxx=%03d for %s",
