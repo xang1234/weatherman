@@ -25,6 +25,8 @@ import type {
 
 import vertexSource from './shaders/weather.vert.glsl?raw'
 import fragmentSource from './shaders/weather.frag.glsl?raw'
+import blurVertSource from './shaders/particle-update.vert.glsl?raw'
+import blurFragSource from './shaders/blur.frag.glsl?raw'
 import {
   createFullscreenQuad,
   createProgram,
@@ -88,6 +90,17 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _forecastHourT1 = -1
   private _temporalMix = 0
 
+  // Blur post-processing
+  private _blurProgram: GLProgram | null = null
+  private _fboTexture: WebGLTexture | null = null
+  private _fbo: WebGLFramebuffer | null = null
+  private _fboWidth = 0
+  private _fboHeight = 0
+  private _uBlurTexture: WebGLUniformLocation | null = null
+  private _uBlurTexelSize: WebGLUniformLocation | null = null
+  private _uBlurRadius: WebGLUniformLocation | null = null
+  private _uBlurOpacity: WebGLUniformLocation | null = null
+
   // Uniform locations
   private _uMatrix: WebGLUniformLocation | null = null
   private _uTileOffset: WebGLUniformLocation | null = null
@@ -146,6 +159,14 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uIsVector = gl.getUniformLocation(prog, 'u_isVector')
       this._uValueMin = gl.getUniformLocation(prog, 'u_valueMin')
       this._uValueMax = gl.getUniformLocation(prog, 'u_valueMax')
+
+      // Compile blur post-processing program
+      this._blurProgram = createProgram(gl, blurVertSource, blurFragSource)
+      const blurProg = this._blurProgram.program
+      this._uBlurTexture = gl.getUniformLocation(blurProg, 'u_texture')
+      this._uBlurTexelSize = gl.getUniformLocation(blurProg, 'u_texelSize')
+      this._uBlurRadius = gl.getUniformLocation(blurProg, 'u_blurRadius')
+      this._uBlurOpacity = gl.getUniformLocation(blurProg, 'u_opacity')
 
       this._createColorRamp(gl)
 
@@ -244,8 +265,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     if (tilesToDraw.length === 0) return
 
-    // Save MapLibre's GL state (blend, program, active texture unit, and per-unit bindings)
+    // Save MapLibre's GL state (blend, program, active texture unit, per-unit bindings, FBO, viewport)
     // We use up to 5 texture units: 0=U/scalar, 1=colorRamp, 2=T1, 3=V, 4=VT1
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
+    const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array
     const prevBlend = gl.isEnabled(gl.BLEND)
     const prevBlendSrc = gl.getParameter(gl.BLEND_SRC_RGB) as number
     const prevBlendDst = gl.getParameter(gl.BLEND_DST_RGB) as number
@@ -259,15 +282,29 @@ export class WeatherGLLayer implements CustomLayerInterface {
       prevTexBindings.push(gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null)
     }
 
-    // Enable premultiplied-alpha blending for correct compositing over the basemap
-    gl.enable(gl.BLEND)
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    // ── Phase 1: Render tiles to offscreen FBO ──────────────────
+
+    // Resize FBO if canvas dimensions changed
+    const fbW = gl.drawingBufferWidth
+    const fbH = gl.drawingBufferHeight
+    if (fbW !== this._fboWidth || fbH !== this._fboHeight) {
+      this._resizeFBO(gl, fbW, fbH)
+    }
+
+    // Bind offscreen FBO and clear
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbo)
+    gl.viewport(0, 0, this._fboWidth, this._fboHeight)
+    gl.clearColor(0, 0, 0, 0)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+
+    // Disable blending for the tile pass — tiles composite additively in the FBO
+    gl.disable(gl.BLEND)
 
     gl.useProgram(this._program.program)
 
     // Set shared uniforms (same for all tiles)
     gl.uniformMatrix4fv(this._uMatrix, false, options.modelViewProjectionMatrix)
-    gl.uniform1f(this._uOpacity, this._opacity)
+    gl.uniform1f(this._uOpacity, 1.0) // opacity applied in blur pass
     gl.uniform1i(this._uIsVector, isVector ? 1 : 0)
 
     // Pass value range for vector mode denormalization.
@@ -346,6 +383,34 @@ export class WeatherGLLayer implements CustomLayerInterface {
       gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     }
 
+    gl.bindVertexArray(null)
+
+    // ── Phase 2: Blur composite to screen ───────────────────────
+
+    // Restore MapLibre's FBO and viewport
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo)
+    gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3])
+
+    // Compute zoom-dependent blur radius: z3→3.0, z4→2.25, z5→1.5, z6→0.75, z7+→0.0
+    const blurRadius = Math.max(0, Math.min(3, (7 - zoom) * 0.75))
+
+    // Enable premultiplied-alpha blending for compositing over the basemap
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+
+    gl.useProgram(this._blurProgram!.program)
+
+    // Bind the offscreen FBO texture to unit 0
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this._fboTexture)
+    gl.uniform1i(this._uBlurTexture, 0)
+    gl.uniform2f(this._uBlurTexelSize, 1.0 / this._fboWidth, 1.0 / this._fboHeight)
+    gl.uniform1f(this._uBlurRadius, blurRadius)
+    gl.uniform1f(this._uBlurOpacity, this._opacity)
+
+    // Draw fullscreen quad (same VAO — compatible attribute layout)
+    gl.bindVertexArray(this._quad.vao)
+    gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
 
     // Restore MapLibre's GL state (blend + texture bindings + active unit + program)
@@ -468,6 +533,37 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._colorRampTexture = createColorRampTexture(gl, ramp)
   }
 
+  /** Create or resize the offscreen FBO for blur post-processing. */
+  private _resizeFBO(gl: WebGL2RenderingContext, width: number, height: number): void {
+    if (this._fboTexture) gl.deleteTexture(this._fboTexture)
+    if (this._fbo) gl.deleteFramebuffer(this._fbo)
+
+    const tex = gl.createTexture()
+    if (!tex) throw new Error('Failed to create blur FBO texture')
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+
+    const fbo = gl.createFramebuffer()
+    if (!fbo) throw new Error('Failed to create blur FBO')
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error(`Blur FBO incomplete: 0x${status.toString(16)}`)
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+
+    this._fboTexture = tex
+    this._fbo = fbo
+    this._fboWidth = width
+    this._fboHeight = height
+  }
+
   /** Free all GL resources. */
   private _cleanup(): void {
     if (this._tileManager) {
@@ -500,7 +596,25 @@ export class WeatherGLLayer implements CustomLayerInterface {
         gl.deleteTexture(this._colorRampTexture)
         this._colorRampTexture = null
       }
+      if (this._fbo) {
+        gl.deleteFramebuffer(this._fbo)
+        this._fbo = null
+      }
+      if (this._fboTexture) {
+        gl.deleteTexture(this._fboTexture)
+        this._fboTexture = null
+      }
+      if (this._blurProgram) {
+        deleteProgram(gl, this._blurProgram)
+        this._blurProgram = null
+      }
     }
+    this._fboWidth = 0
+    this._fboHeight = 0
+    this._uBlurTexture = null
+    this._uBlurTexelSize = null
+    this._uBlurRadius = null
+    this._uBlurOpacity = null
     this._uMatrix = null
     this._uTileOffset = null
     this._uTileScale = null
