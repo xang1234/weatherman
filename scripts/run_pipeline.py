@@ -296,7 +296,15 @@ def step_generate_data_tiles(
     logger.info("Step 3/5: Pre-generating data tiles (z0–z5)")
     total = 0
 
+    # Skip wind_u/wind_v: the WebGL vector pipeline fetches these on-demand
+    # via TiTiler fallback. Pre-generating doubles tile count and memory usage
+    # for layers that are never displayed directly (only used as GPU inputs).
+    skip_data_tiles = {"wind_u", "wind_v"}
+
     for layer in sorted(generated_layers):
+        if layer in skip_data_tiles:
+            logger.info("  Skipping data tile pre-gen for %s (TiTiler fallback)", layer)
+            continue
         try:
             vmin, vmax = get_value_range(layer)
         except KeyError:
