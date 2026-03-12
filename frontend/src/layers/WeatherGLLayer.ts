@@ -93,6 +93,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _forecastHourT1 = -1
   private _temporalMix = 0
 
+  // Diagnostic warning guards (one-shot to avoid console spam)
+  private _renderSkipWarned = false
+  private _noTilesWarned = false
+  private _renderSuccessLogged = false
+
   // Blur post-processing
   private _blurProgram: GLProgram | null = null
   private _fboTexture: WebGLTexture | null = null
@@ -204,12 +209,20 @@ export class WeatherGLLayer implements CustomLayerInterface {
    * tile managers, and draws each loaded tile as a projected quad.
    */
   render(gl: WebGLRenderingContext | WebGL2RenderingContext, options: CustomRenderMethodInput): void {
-    if (
-      !this._program || !this._quad || !this._colorRampTexture ||
+    if (!(gl instanceof WebGL2RenderingContext)) return
+    if (!this._program || !this._quad || !this._colorRampTexture ||
       !this._tileManager || !this._map ||
-      !this._model || !this._runId ||
-      !(gl instanceof WebGL2RenderingContext)
+      !this._model || !this._runId
     ) {
+      if (!this._renderSkipWarned) {
+        this._renderSkipWarned = true
+        const reason = !this._program ? 'shader compilation failed (_program is null)'
+          : !this._colorRampTexture ? 'color ramp texture missing'
+          : !this._tileManager ? 'tile manager not initialized'
+          : !this._model || !this._runId ? 'no dataset config (model/runId not set)'
+          : 'unknown'
+        console.error(`[WeatherGLLayer] render() skipped: ${reason}`)
+      }
       return
     }
 
@@ -268,7 +281,24 @@ export class WeatherGLLayer implements CustomLayerInterface {
       tilesToDraw.push({ coord, texT0, texT1, texV, texVT1 })
     }
 
-    if (tilesToDraw.length === 0) return
+    if (tilesToDraw.length === 0) {
+      if (!this._noTilesWarned) {
+        this._noTilesWarned = true
+        console.warn(
+          `[WeatherGLLayer] No tiles ready to draw (${visibleCoords.length} requested). Tiles may still be loading or all failed.`,
+        )
+      }
+      return
+    }
+    // Reset so warning fires again if tiles disappear after being available
+    this._noTilesWarned = false
+
+    if (!this._renderSuccessLogged) {
+      this._renderSuccessLogged = true
+      console.info(
+        `[WeatherGLLayer] Drawing ${tilesToDraw.length}/${visibleCoords.length} tiles at opacity=${this._opacity}`,
+      )
+    }
 
     // Save MapLibre's GL state (blend, program, active texture unit, per-unit bindings, FBO, viewport)
     // We use up to 5 texture units: 0=U/scalar, 1=colorRamp, 2=T1, 3=V, 4=VT1
@@ -307,8 +337,23 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     gl.useProgram(this._program.program)
 
+    // MapLibre's modelViewProjectionMatrix transforms from world-space pixels
+    // [0, worldSize] to clip space. Our vertex shader uses mercator [0, 1]
+    // coordinates, so we right-multiply by diag(worldSize) to convert
+    // mercator → world-space before the projection.
+    const worldSize = 512 * Math.pow(2, this._map!.getZoom())
+    const mvp = options.modelViewProjectionMatrix
+    const mercatorMatrix = new Float64Array(16)
+    // Right-multiply columns 0,1 by worldSize; column 2 by 1; column 3 unchanged
+    for (let i = 0; i < 4; i++) {
+      mercatorMatrix[i]      = mvp[i]      * worldSize  // column 0 (x)
+      mercatorMatrix[4 + i]  = mvp[4 + i]  * worldSize  // column 1 (y)
+      mercatorMatrix[8 + i]  = mvp[8 + i]               // column 2 (z, unchanged)
+      mercatorMatrix[12 + i] = mvp[12 + i]              // column 3 (translation, unchanged)
+    }
+
     // Set shared uniforms (same for all tiles)
-    gl.uniformMatrix4fv(this._uMatrix, false, options.modelViewProjectionMatrix)
+    gl.uniformMatrix4fv(this._uMatrix, false, mercatorMatrix)
     gl.uniform1f(this._uOpacity, 1.0) // opacity applied in blur pass
     gl.uniform1i(this._uIsVector, isVector ? 1 : 0)
     gl.uniform1i(this._uOceanOnly, OCEAN_ONLY_LAYERS.has(this._layerName) ? 1 : 0)
@@ -456,6 +501,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._createColorRamp(this._gl)
     }
 
+    // Reset render-skip warning so future failures are not silenced
+    this._renderSkipWarned = false
+
     this._applyLayerConfig()
     this._map?.triggerRepaint()
   }
@@ -499,6 +547,30 @@ export class WeatherGLLayer implements CustomLayerInterface {
    */
   private _applyLayerConfig(): void {
     if (!this._model || !this._runId) return
+
+    const targetLayer = this._isVector ? 'wind_u' : this._layerName
+
+    // During playback advancement, T1 already has the target forecast hour's
+    // tiles loaded (they were pre-fetched for temporal blending). Swap T0↔T1
+    // instead of clearing and re-fetching — gives instant transitions.
+    if (
+      this._tileManagerT1 &&
+      this._tileManagerT1.cacheSize > 0 &&
+      this._tileManagerT1.currentLayer === targetLayer &&
+      this._tileManagerT1.currentForecastHour === this._forecastHour
+    ) {
+      const tmpT = this._tileManager
+      this._tileManager = this._tileManagerT1
+      this._tileManagerT1 = tmpT
+
+      if (this._isVector) {
+        const tmpV = this._tileManagerV
+        this._tileManagerV = this._tileManagerVT1
+        this._tileManagerVT1 = tmpV
+      }
+      // Old T0 (now T1) will be reconfigured by the next setTemporalBlend call.
+      return
+    }
 
     if (this._isVector) {
       // Vector mode: split into U and V component tile fetches

@@ -198,6 +198,7 @@ export function setWeatherOverlayOpacity(
         opacity = WEATHER_FILL_OPACITY
       }
       map.setPaintProperty(layer.id, 'fill-opacity', opacity)
+      console.info(`[setWeatherOverlayOpacity] ${layer.id} fill-opacity → ${opacity}`)
     }
   }
 }

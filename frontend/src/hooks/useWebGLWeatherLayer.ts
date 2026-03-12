@@ -59,6 +59,7 @@ export function useWebGLWeatherLayer({
 
     const beforeId = weatherInsertBeforeId(m)
     m.addLayer(glLayer as maplibregl.CustomLayerInterface, beforeId)
+    console.info(`[useWebGLWeatherLayer] Added weather-gl layer (before: ${beforeId ?? 'end'})`)
 
     return () => {
       layerRef.current = null
@@ -75,18 +76,23 @@ export function useWebGLWeatherLayer({
 
   // Update dataset config when model/run/layer/forecastHour change.
   // Calls setConfig which clears the tile cache if params changed.
+  // NOTE: isLoaded is included in deps even though the effect doesn't read it
+  // directly — without it, if API data (runId, layer) arrives before the map
+  // loads, this effect fires while layerRef is still null, and never re-runs
+  // when the creation effect finally sets it (since data deps are unchanged).
   useEffect(() => {
     const glLayer = layerRef.current
     if (!glLayer || !runId || !layer) return
+    console.info(`[useWebGLWeatherLayer] setConfig: ${model}/${runId}/${layer}/fh${forecastHour}`)
     glLayer.setConfig(model, runId, layer, forecastHour)
-  }, [model, runId, layer, forecastHour])
+  }, [model, runId, layer, forecastHour, isLoaded])
 
   // Update temporal blend when forecastHourNext/temporalMix change.
   useEffect(() => {
     const glLayer = layerRef.current
     if (!glLayer) return
     glLayer.setTemporalBlend(forecastHourNext ?? -1, temporalMix)
-  }, [forecastHourNext, temporalMix])
+  }, [forecastHourNext, temporalMix, isLoaded])
 
   // Update opacity and basemap transparency when visibility/opacity change.
   useEffect(() => {
@@ -94,7 +100,9 @@ export function useWebGLWeatherLayer({
     const glLayer = layerRef.current
     if (!m || !isLoaded || !glLayer) return
 
-    glLayer.setOpacity(visible ? opacity : 0)
+    const effectiveOpacity = visible ? opacity : 0
+    console.info(`[useWebGLWeatherLayer] setOpacity(${effectiveOpacity}), setWeatherOverlayOpacity(active=${visible}, layer=${layer})`)
+    glLayer.setOpacity(effectiveOpacity)
     setWeatherOverlayOpacity(m, visible, layer)
   }, [map, isLoaded, opacity, visible, layer])
 

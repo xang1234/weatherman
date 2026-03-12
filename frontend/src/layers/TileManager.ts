@@ -64,6 +64,10 @@ export class TileManager {
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
 
+  /** Guard to emit the all-tiles-error warning only once. */
+  private _allErrorWarned = false
+
+
   /** In-flight fetches keyed by tile key, with Image + texture refs for cleanup. */
   private _pending = new Map<string, { image: HTMLImageElement; texture: WebGLTexture }>()
 
@@ -115,6 +119,22 @@ export class TileManager {
       this._fetchTile(z, x, y)
     }
     this._evict()
+
+    // One-time warning when all requested tiles are in error state
+    if (coords.length > 0 && !this._allErrorWarned) {
+      const allError = coords.every(({ z, x, y }) => {
+        const state = this.getTileState(z, x, y)
+        return state === 'error'
+      })
+      if (allError) {
+        this._allErrorWarned = true
+        console.warn(
+          `[TileManager] All ${coords.length} visible tiles are in error state — check tile server and COG paths`,
+        )
+      } else {
+        this._allErrorWarned = false
+      }
+    }
   }
 
   /**
@@ -145,6 +165,16 @@ export class TileManager {
     return this._tiles.size
   }
 
+  /** Current layer name this manager is fetching. */
+  get currentLayer(): string {
+    return this._layer
+  }
+
+  /** Current forecast hour this manager is fetching. */
+  get currentForecastHour(): number {
+    return this._forecastHour
+  }
+
   /** Clear all cached textures and abort pending fetches. */
   clear(): void {
     // Abort in-flight Image loads and delete their placeholder textures
@@ -162,6 +192,7 @@ export class TileManager {
     }
     this._tiles.clear()
     this._accessCounter = 0
+    this._allErrorWarned = false
   }
 
   /** Release all GL resources. Call when done with this manager. */
@@ -234,6 +265,7 @@ export class TileManager {
     }
 
     img.onerror = () => {
+      console.warn(`[TileManager] Failed to load tile: ${url}`)
       if (!this._pending.has(key)) {
         gl.deleteTexture(texture)
         return
