@@ -4,7 +4,7 @@ import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
 import { useWebGLWeatherLayer } from './useWebGLWeatherLayer'
 
 /** Feature flag: use WebGL data-tile pipeline instead of raster TileJSON. */
-const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER === 'true'
+const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER !== 'false'
 
 /** Imperative handle for driving temporal interpolation from the playback loop. */
 export interface WeatherLayerHandle {

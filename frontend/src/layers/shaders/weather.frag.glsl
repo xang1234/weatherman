@@ -111,7 +111,7 @@ float sampleWithFallback(sampler2D tex, vec2 uv) {
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nv = sampleBilinear(tex, uv + vec2(float(dx), float(dy)) * step);
+            float nv = decodeValue(texture(tex, uv + vec2(float(dx), float(dy)) * step));
             if (nv >= 0.0) {
                 total += nv;
                 count += 1.0;

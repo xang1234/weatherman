@@ -16,7 +16,9 @@ const PMTILES_SOURCE = RAW_BASEMAP_URL.startsWith('pmtiles://')
  * Whether to use PMTiles (production) or a raster tile fallback (local dev).
  * Set VITE_BASEMAP_URL to a valid PMTiles URL to use vector tiles.
  */
-const USE_PMTILES = !!import.meta.env.VITE_BASEMAP_URL
+const USE_PMTILES =
+  RAW_BASEMAP_URL.endsWith('.pmtiles') ||
+  RAW_BASEMAP_URL.startsWith('pmtiles://')
 
 /** Fill-layer opacity when weather overlay is active (Windy.com style). */
 const WEATHER_FILL_OPACITY = 0.3

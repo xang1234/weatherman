@@ -193,6 +193,54 @@ class TestGrib2ToCog:
         with rasterio.open(output) as ds:
             assert ds.overviews(1) == DEFAULT_OVERVIEW_LEVELS
 
+    def test_ocean_only_uses_nearest_resampling(self, tmp_path: Path):
+        """Ocean-only COGs must use nearest resampling to avoid NaN propagation.
+
+        When `ocean_only=True`, coastal fill extends data into NaN land cells,
+        but some deep-land cells remain NaN. Using `average` resampling for
+        overviews would blend filled cells with remaining NaN cells, propagating
+        NaN into overview pixels and reopening gaps at low zoom levels.
+        """
+        path = tmp_path / "ocean.grib2"
+        width, height = 72, 37
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        data = np.ones((height, width), dtype=np.float32)
+        # Simulate land cells as NaN (roughly upper-left quadrant)
+        data[:18, :36] = np.nan
+
+        with rasterio.open(
+            path, "w", driver="GTiff", dtype="float32", count=1,
+            width=width, height=height, crs="EPSG:4326", transform=transform,
+        ) as dst:
+            dst.write(data, 1)
+
+        output = tmp_path / "ocean_cog.tif"
+        grib2_to_cog(path, output, ocean_only=True)
+
+        with rasterio.open(output) as ds:
+            tags = ds.tags(ns="rio_overview")
+            assert tags.get("resampling") == "nearest"
+
+    def test_non_ocean_uses_average_resampling(self, tmp_path: Path):
+        """Non-ocean COGs should default to average resampling."""
+        path = tmp_path / "temp.grib2"
+        width, height = 72, 37
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        data = np.ones((height, width), dtype=np.float32)
+
+        with rasterio.open(
+            path, "w", driver="GTiff", dtype="float32", count=1,
+            width=width, height=height, crs="EPSG:4326", transform=transform,
+        ) as dst:
+            dst.write(data, 1)
+
+        output = tmp_path / "temp_cog.tif"
+        grib2_to_cog(path, output, ocean_only=False)
+
+        with rasterio.open(output) as ds:
+            tags = ds.tags(ns="rio_overview")
+            assert tags.get("resampling") == "average"
+
     def test_input_without_crs_gets_gfs_transform(self, tmp_path: Path):
         """GRIB2 files may lack CRS metadata — pipeline applies GFS transform."""
         path = tmp_path / "no_crs.grib2"
