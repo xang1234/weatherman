@@ -239,6 +239,20 @@ def step_generate_cogs(
             generated_layers.add("wind_speed")
             logger.info("  wind_speed/f%03d", fhour)
 
+            # Wind U/V components (raw): needed by the WebGL vector pipeline
+            # which interpolates in Cartesian space then reconstructs speed.
+            u_cog = data_dir / layout.staging_cog_path(run_id, "wind_u", fhour)
+            grib2_to_cog(u_grib, u_cog)
+            total += 1
+            generated_layers.add("wind_u")
+            logger.info("  wind_u/f%03d", fhour)
+
+            v_cog = data_dir / layout.staging_cog_path(run_id, "wind_v", fhour)
+            grib2_to_cog(v_grib, v_cog)
+            total += 1
+            generated_layers.add("wind_v")
+            logger.info("  wind_v/f%03d", fhour)
+
         # Precipitation (direct: apcp_sfc → precipitation)
         apcp_grib = grib2_dir / "grib2" / "apcp_sfc" / f"f{fhour:03d}.grib2"
         if apcp_grib.exists():
