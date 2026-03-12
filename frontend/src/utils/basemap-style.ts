@@ -24,6 +24,9 @@ const WEATHER_FILL_OPACITY = 0.3
 /** Layer IDs whose fill-opacity should be reduced for weather transparency. */
 const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
 
+/** Weather layers that only have data over ocean — need opaque earth mask. */
+const OCEAN_ONLY_LAYERS = new Set(['wave_height', 'wave_period', 'wave_direction'])
+
 /**
  * Light basemap style optimized for weather overlay readability.
  *
@@ -172,12 +175,24 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
 export function setWeatherOverlayOpacity(
   map: maplibregl.Map,
   active: boolean,
+  layerName?: string,
 ): void {
   const style = map.getStyle()
   if (!style?.layers) return
+  const oceanOnly = active && layerName != null && OCEAN_ONLY_LAYERS.has(layerName)
   for (const layer of style.layers) {
     if (layer.type === 'fill' && TRANSPARENT_FILL_LAYERS.has(layer.id)) {
-      map.setPaintProperty(layer.id, 'fill-opacity', active ? WEATHER_FILL_OPACITY : 1)
+      let opacity: number
+      if (!active) {
+        opacity = 1
+      } else if (oceanOnly) {
+        // Ocean-only layers: opaque earth masks wave color bleed,
+        // nearly transparent water lets wave colors show through.
+        opacity = layer.id === 'earth' ? 1.0 : 0.08
+      } else {
+        opacity = WEATHER_FILL_OPACITY
+      }
+      map.setPaintProperty(layer.id, 'fill-opacity', opacity)
     }
   }
 }

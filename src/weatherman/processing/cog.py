@@ -108,6 +108,7 @@ def grib2_to_cog(
     *,
     overview_levels: list[int] | None = None,
     resampling: Resampling = Resampling.average,
+    ocean_only: bool = False,
 ) -> COGResult:
     """Convert a single GRIB2 file to a Cloud Optimized GeoTIFF.
 
@@ -119,6 +120,8 @@ def grib2_to_cog(
         output_path: Path for the output COG file.
         overview_levels: Overview decimation factors (default: [2, 4, 8, 16]).
         resampling: Resampling method for overviews (default: average).
+        ocean_only: If True, apply coastal fill to extend valid data into
+            NaN cells near coastlines, and write NaN as nodata in the COG.
 
     Returns:
         COGResult with output metadata.
@@ -153,6 +156,11 @@ def grib2_to_cog(
             )
             transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
 
+    if ocean_only:
+        from weatherman.processing.coastal_fill import coastal_fill
+
+        data = coastal_fill(data)
+
     _write_cog(
         data=data,
         output_path=output_path,
@@ -161,6 +169,7 @@ def grib2_to_cog(
         transform=transform,
         overview_levels=overview_levels,
         resampling=resampling,
+        nodata=np.nan if ocean_only else None,
     )
 
     size = output_path.stat().st_size
@@ -283,6 +292,7 @@ def _write_cog(
     transform: rasterio.transform.Affine,
     overview_levels: list[int],
     resampling: Resampling,
+    nodata: float | None = None,
 ) -> None:
     """Write data as a COG with internal overviews.
 
@@ -298,6 +308,8 @@ def _write_cog(
         "crs": TARGET_CRS,
         "transform": transform,
     }
+    if nodata is not None:
+        profile["nodata"] = nodata
 
     with rasterio.open(output_path, "w", **profile) as dst:
         dst.write(data, 1)

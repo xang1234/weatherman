@@ -48,6 +48,9 @@ import {
 /** Layers that use U/V vector component tiles instead of scalar tiles. */
 const VECTOR_LAYERS = new Set(['wind_speed'])
 
+/** Layers that only have data over ocean — enables shader coastal fallback. */
+const OCEAN_ONLY_LAYERS = new Set(['wave_height', 'wave_period', 'wave_direction'])
+
 export interface WeatherGLLayerOptions {
   /** Unique layer ID for MapLibre. */
   id?: string
@@ -115,6 +118,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _uIsVector: WebGLUniformLocation | null = null
   private _uValueMin: WebGLUniformLocation | null = null
   private _uValueMax: WebGLUniformLocation | null = null
+  private _uOceanOnly: WebGLUniformLocation | null = null
 
   constructor(options: WeatherGLLayerOptions = {}) {
     this.id = options.id ?? 'weather-gl'
@@ -159,6 +163,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uIsVector = gl.getUniformLocation(prog, 'u_isVector')
       this._uValueMin = gl.getUniformLocation(prog, 'u_valueMin')
       this._uValueMax = gl.getUniformLocation(prog, 'u_valueMax')
+      this._uOceanOnly = gl.getUniformLocation(prog, 'u_oceanOnly')
 
       // Compile blur post-processing program
       this._blurProgram = createProgram(gl, blurVertSource, blurFragSource)
@@ -306,6 +311,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.uniformMatrix4fv(this._uMatrix, false, options.modelViewProjectionMatrix)
     gl.uniform1f(this._uOpacity, 1.0) // opacity applied in blur pass
     gl.uniform1i(this._uIsVector, isVector ? 1 : 0)
+    gl.uniform1i(this._uOceanOnly, OCEAN_ONLY_LAYERS.has(this._layerName) ? 1 : 0)
 
     // Pass value range for vector mode denormalization.
     // Wind U/V components are encoded with symmetric range [-max, +max]
@@ -628,6 +634,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._uIsVector = null
     this._uValueMin = null
     this._uValueMax = null
+    this._uOceanOnly = null
     this._gl = null
     this._map = null
   }

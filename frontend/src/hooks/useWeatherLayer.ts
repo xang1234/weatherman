@@ -182,12 +182,14 @@ function useRasterWeatherLayer({
   // Double-buffer state: front = visible layer, back = loading invisibly
   const bufferRef = useRef<BufferState>({ front: null, back: null, generation: 0, crossfadeRaf: null })
 
-  // Keep current opacity/visible in a ref so swap callbacks always read latest
-  // values without needing them in the main effect's dependency array.
+  // Keep current opacity/visible/layer in a ref so swap callbacks always read
+  // latest values without needing them in the main effect's dependency array.
   const opacityRef = useRef(opacity)
   const visibleRef = useRef(visible)
+  const layerRef = useRef(layer)
   opacityRef.current = opacity
   visibleRef.current = visible
+  layerRef.current = layer
 
   // Remove a source+layer pair from the map if they exist
   const removePair = useCallback((m: maplibregl.Map, srcId: string, lyrId: string) => {
@@ -244,7 +246,7 @@ function useRasterWeatherLayer({
       state.front = incoming
       state.back = null
       if (outgoing) removePair(m, outgoing.srcId, outgoing.lyrId)
-      if (state.front && isVisible) setWeatherOverlayOpacity(m, true)
+      if (state.front && isVisible) setWeatherOverlayOpacity(m, true, layerRef.current)
       return
     }
 
@@ -283,7 +285,7 @@ function useRasterWeatherLayer({
     }
 
     // Ensure basemap transparency is active during cross-fade
-    setWeatherOverlayOpacity(m, true)
+    setWeatherOverlayOpacity(m, true, layerRef.current)
     state.crossfadeRaf = requestAnimationFrame(animate)
   }, [removePair, cancelCrossfade])
 
@@ -386,11 +388,11 @@ function useRasterWeatherLayer({
     if (!m || !isLoaded) return
     const front = bufferRef.current.front
     const weatherShowing = visible && front != null
-    setWeatherOverlayOpacity(m, weatherShowing)
+    setWeatherOverlayOpacity(m, weatherShowing, layer)
     if (front && m.getLayer(front.lyrId)) {
       m.setPaintProperty(front.lyrId, 'raster-opacity', visible ? opacity : 0)
     }
-  }, [map, isLoaded, opacity, visible])
+  }, [map, isLoaded, opacity, visible, layer])
 
   // Prefetch adjacent hours for the current viewport to smooth playback.
   useEffect(() => {

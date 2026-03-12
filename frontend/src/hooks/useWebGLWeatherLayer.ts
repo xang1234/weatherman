@@ -95,8 +95,8 @@ export function useWebGLWeatherLayer({
     if (!m || !isLoaded || !glLayer) return
 
     glLayer.setOpacity(visible ? opacity : 0)
-    setWeatherOverlayOpacity(m, visible)
-  }, [map, isLoaded, opacity, visible])
+    setWeatherOverlayOpacity(m, visible, layer)
+  }, [map, isLoaded, opacity, visible, layer])
 
   return layerRef
 }

@@ -34,6 +34,7 @@ import sqlalchemy as sa
 from weatherman.events.emissions import emit_run_published
 from weatherman.ingest.gfs import (
     DEFAULT_SEARCH_PATTERNS,
+    DEFAULT_WAVE_SEARCH_PATTERNS,
     download_gfs_cycle,
     latest_available_cycle,
 )
@@ -68,6 +69,13 @@ PIPELINE_VARIABLES = {
     for k in ("tmp_2m", "ugrd_10m", "vgrd_10m", "apcp_sfc")
 }
 
+# Wave variables from GFS-Wave (WW3) — ocean-only with NaN over land
+WAVE_GRIB_TO_LAYER = {
+    "htsgw_sfc": "wave_height",
+    "perpw_sfc": "wave_period",
+    "dirpw_sfc": "wave_direction",
+}
+
 # Layer definitions matching colormaps.py
 LAYER_CONFIGS = [
     LayerConfig(
@@ -90,6 +98,27 @@ LAYER_CONFIGS = [
         unit="kg/m^2",
         palette_name="precipitation",
         value_range=ValueRange(min=0.0, max=250.0),
+    ),
+    LayerConfig(
+        id="wave_height",
+        display_name="Significant Wave Height",
+        unit="m",
+        palette_name="wave_height",
+        value_range=ValueRange(min=0.0, max=15.0),
+    ),
+    LayerConfig(
+        id="wave_period",
+        display_name="Peak Wave Period",
+        unit="s",
+        palette_name="wave_period",
+        value_range=ValueRange(min=0.0, max=25.0),
+    ),
+    LayerConfig(
+        id="wave_direction",
+        display_name="Peak Wave Direction",
+        unit="°",
+        palette_name="wave_direction",
+        value_range=ValueRange(min=0.0, max=360.0),
     ),
 ]
 
@@ -150,6 +179,28 @@ def step_download(
             logger.warning("  %s", err)
 
     # download_gfs_cycle writes to staging_dir/<run_id>/grib2/...
+
+    # GFS-Wave (WW3) download — separate model, same cycle/hours.
+    # Wave data may not be available for all cycles; log and continue.
+    logger.info("Downloading GFS-Wave (WW3) data for %s", run_id)
+    try:
+        wave_result = download_gfs_cycle(
+            run_id=run_id,
+            staging_dir=staging_dir,
+            forecast_hours=forecast_hours,
+            variables=DEFAULT_WAVE_SEARCH_PATTERNS,
+            model="gfs_wave",
+            product="global.0p25",
+        )
+        logger.info(
+            "Wave download: %d files (%.1f MB), %d errors",
+            wave_result.success_count,
+            wave_result.total_bytes / (1024 * 1024),
+            wave_result.error_count,
+        )
+    except Exception as exc:
+        logger.warning("GFS-Wave download failed (non-fatal): %s", exc)
+
     return staging_dir / str(run_id)
 
 
@@ -196,6 +247,16 @@ def step_generate_cogs(
             total += 1
             generated_layers.add("precipitation")
             logger.info("  precipitation/f%03d", fhour)
+
+        # Wave variables (ocean-only: htsgw_sfc → wave_height, etc.)
+        for grib_var, layer_id in WAVE_GRIB_TO_LAYER.items():
+            grib_path = grib2_dir / "grib2" / grib_var / f"f{fhour:03d}.grib2"
+            if grib_path.exists():
+                cog_path = data_dir / layout.staging_cog_path(run_id, layer_id, fhour)
+                grib2_to_cog(grib_path, cog_path, ocean_only=True)
+                total += 1
+                generated_layers.add(layer_id)
+                logger.info("  %s/f%03d", layer_id, fhour)
 
     logger.info("Generated %d COGs for layers: %s", total, sorted(generated_layers))
     return generated_layers

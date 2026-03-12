@@ -30,6 +30,10 @@ uniform float u_temporalMix;
 // The shader reconstructs speed = sqrt(U² + V²) for color ramp lookup.
 uniform int u_isVector;
 
+// Ocean-only flag: 0 = normal, 1 = ocean-only layer (wave_height, etc.).
+// When 1, sampleWithFallback tries surrounding texels if bilinear returns nodata.
+uniform int u_oceanOnly;
+
 // Value range for denormalization in vector mode.
 // Decoded [0,1] values are mapped back to [u_valueMin, u_valueMax].
 // Also used to normalize reconstructed speed to [0,1] for the color ramp.
@@ -91,6 +95,33 @@ float sampleBilinear(sampler2D tex, vec2 uv) {
     return result / totalWeight;
 }
 
+// Sample with coastal-edge fallback for ocean-only layers.
+// Tries bilinear first; if nodata and u_oceanOnly==1, averages up to 8
+// surrounding texels at 1-texel offset to recover coastal edge values.
+// For non-ocean layers, this is a zero-cost pass-through.
+float sampleWithFallback(sampler2D tex, vec2 uv) {
+    float val = sampleBilinear(tex, uv);
+    if (val >= 0.0 || u_oceanOnly == 0) return val;
+
+    // Try 8 neighbors at 1-texel offset
+    vec2 size = vec2(textureSize(tex, 0));
+    vec2 step = 1.0 / size;
+    float total = 0.0;
+    float count = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float nv = sampleBilinear(tex, uv + vec2(float(dx), float(dy)) * step);
+            if (nv >= 0.0) {
+                total += nv;
+                count += 1.0;
+            }
+        }
+    }
+    if (count == 0.0) return -1.0;
+    return total / count;
+}
+
 // Interpolate a scalar value between T0 and T1 with nodata handling.
 // Returns -1.0 if both are nodata.
 float temporalBlend(float v0, float v1) {
@@ -107,15 +138,15 @@ void main() {
         // Vector mode: sample U and V components separately,
         // interpolate in Cartesian space, reconstruct speed.
         float valueRange = u_valueMax - u_valueMin;
-        float u0 = sampleBilinear(u_dataTile, v_uv);
-        float v0 = sampleBilinear(u_dataTileV, v_uv);
+        float u0 = sampleWithFallback(u_dataTile, v_uv);
+        float v0 = sampleWithFallback(u_dataTileV, v_uv);
 
         // Both components must be valid for a valid wind vector
         if (u0 < 0.0 || v0 < 0.0) {
             if (u_temporalMix <= 0.0) discard;
             // Try T1 before discarding
-            float u1 = sampleBilinear(u_dataTileT1, v_uv);
-            float v1 = sampleBilinear(u_dataTileVT1, v_uv);
+            float u1 = sampleWithFallback(u_dataTileT1, v_uv);
+            float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
             if (u1 < 0.0 || v1 < 0.0) discard;
             // Use T1 only — T0 had nodata
             // Denormalize: [0,1] -> [valueMin, valueMax]
@@ -126,8 +157,8 @@ void main() {
             // Oblique vectors can exceed this — they clamp to ramp top.
             normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         } else if (u_temporalMix > 0.0) {
-            float u1 = sampleBilinear(u_dataTileT1, v_uv);
-            float v1 = sampleBilinear(u_dataTileVT1, v_uv);
+            float u1 = sampleWithFallback(u_dataTileT1, v_uv);
+            float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
             float uBlend = temporalBlend(u0, u1);
             float vBlend = temporalBlend(v0, v1);
             float uWind = uBlend * valueRange + u_valueMin;
@@ -143,10 +174,10 @@ void main() {
         }
     } else {
         // Scalar mode: single data tile per timestep
-        float v0 = sampleBilinear(u_dataTile, v_uv);
+        float v0 = sampleWithFallback(u_dataTile, v_uv);
 
         if (u_temporalMix > 0.0) {
-            float v1 = sampleBilinear(u_dataTileT1, v_uv);
+            float v1 = sampleWithFallback(u_dataTileT1, v_uv);
             if (v0 < 0.0 && v1 < 0.0) discard;
             if (v0 < 0.0) { normalized = v1; }
             else if (v1 < 0.0) { normalized = v0; }
