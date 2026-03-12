@@ -3,10 +3,13 @@ import type maplibregl from 'maplibre-gl'
 /**
  * Default PMTiles basemap URL (Protomaps daily build).
  * Override via VITE_BASEMAP_URL env var for local/offline use.
+ *
+ * NOTE: Protomaps daily builds expire after ~7 days. Update this date
+ * periodically, or self-host the PMTiles file for stability.
  */
 const RAW_BASEMAP_URL =
   import.meta.env.VITE_BASEMAP_URL ||
-  'https://build.protomaps.com/20260301.pmtiles'
+  'https://build.protomaps.com/20260311.pmtiles'
 
 const PMTILES_SOURCE = RAW_BASEMAP_URL.startsWith('pmtiles://')
   ? RAW_BASEMAP_URL
