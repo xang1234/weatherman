@@ -10,7 +10,15 @@
  *     in R (low) + G (high), B = nodata flag. Shader decodes manually.
  *   - **Float16**: Raw IEEE 754 half-precision binary. Uploaded as R16F
  *     textures with physical values stored directly. Nodata = -9999.0.
+ *
+ * When a TileFetchClient is provided, all network fetches are delegated to
+ * a Web Worker — keeping fetch callbacks off the main thread to prevent
+ * jank during rapid playback or panning. The worker returns decoded data
+ * via Transferable objects (zero-copy); TileManager handles the final
+ * texture upload since WebGL contexts are thread-bound.
  */
+
+import type { TileFetchClient, TileFetchResult, TileFetchError } from '@/workers/TileFetchClient'
 
 /** Loading state for a single tile. */
 export type TileState = 'pending' | 'loaded' | 'error'
@@ -41,6 +49,9 @@ export interface TileManagerOptions {
   maxTextures?: number
   /** Tile format: 'png' (default) or 'f16' (Float16 binary). */
   format?: TileFormat
+  /** Shared Web Worker client for off-thread fetching. When provided,
+   *  all fetches go through the worker instead of the main thread. */
+  fetchClient?: TileFetchClient
 }
 
 /**
@@ -53,6 +64,8 @@ export interface TileManagerOptions {
  *   // In render loop:
  *   const tex = mgr.getTexture(z, x, y)
  */
+let _nextManagerId = 0
+
 export class TileManager {
   private _gl: WebGL2RenderingContext
   private _apiBase: string
@@ -81,6 +94,19 @@ export class TileManager {
   /** In-flight Float16 fetches with AbortController for cancellation. */
   private _pendingF16 = new Map<string, { abort: AbortController; texture: WebGLTexture }>()
 
+  /** Shared Web Worker client for off-thread fetching (optional). */
+  private _fetchClient: TileFetchClient | null = null
+
+  /** Unique ID for this manager instance, used to namespace worker keys. */
+  private _id: string
+
+  /** Pending worker-initiated fetches: tile key → pre-allocated placeholder texture. */
+  private _pendingWorker = new Map<string, WebGLTexture>()
+
+  /** Unsubscribe functions for worker listener cleanup. */
+  private _unsubLoaded: (() => void) | null = null
+  private _unsubError: (() => void) | null = null
+
   /** Callback invoked when a tile finishes loading (for triggering repaint). */
   onTileLoaded: (() => void) | null = null
 
@@ -94,6 +120,8 @@ export class TileManager {
     this._apiBase = options.apiBase ?? ''
     this._maxTextures = options.maxTextures ?? 128
     this._format = options.format ?? 'png'
+    this._fetchClient = options.fetchClient ?? null
+    this._id = String(_nextManagerId++)
   }
 
   /**
@@ -121,6 +149,12 @@ export class TileManager {
    * Starts fetching any tiles not already cached or pending.
    */
   updateVisibleTiles(coords: TileCoord[]): void {
+    // Lazily wire up worker callbacks on first use (not in constructor,
+    // because onTileLoaded may not be set yet at construction time).
+    if (this._fetchClient && !this._unsubLoaded) {
+      this._wireWorkerCallbacks()
+    }
+
     for (const { z, x, y } of coords) {
       const key = tileKey(z, x, y)
       const existing = this._tiles.get(key)
@@ -131,7 +165,7 @@ export class TileManager {
         existing.lastAccess = ++this._accessCounter
         continue
       }
-      if (this._pending.has(key) || this._pendingF16.has(key)) continue
+      if (this._pending.has(key) || this._pendingF16.has(key) || this._pendingWorker.has(key)) continue
       this._fetchTile(z, x, y)
     }
     this._evict()
@@ -167,13 +201,13 @@ export class TileManager {
   /** Get the loading state for a tile. */
   getTileState(z: number, x: number, y: number): TileState | null {
     const key = tileKey(z, x, y)
-    if (this._pending.has(key) || this._pendingF16.has(key)) return 'pending'
+    if (this._pending.has(key) || this._pendingF16.has(key) || this._pendingWorker.has(key)) return 'pending'
     return this._tiles.get(key)?.state ?? null
   }
 
   /** Returns true if any tiles are currently loading. */
   get isLoading(): boolean {
-    return this._pending.size > 0 || this._pendingF16.size > 0
+    return this._pending.size > 0 || this._pendingF16.size > 0 || this._pendingWorker.size > 0
   }
 
   /** Number of textures currently cached. */
@@ -209,6 +243,15 @@ export class TileManager {
     }
     this._pendingF16.clear()
 
+    // Cancel and clean up worker-pending fetches
+    if (this._fetchClient && this._pendingWorker.size > 0) {
+      for (const [key, texture] of this._pendingWorker) {
+        this._fetchClient.cancel(this._workerKey(key))
+        this._gl.deleteTexture(texture)
+      }
+      this._pendingWorker.clear()
+    }
+
     // Delete all cached textures
     for (const entry of this._tiles.values()) {
       this._gl.deleteTexture(entry.texture)
@@ -222,6 +265,11 @@ export class TileManager {
   destroy(): void {
     this.clear()
     this.onTileLoaded = null
+    // Unsubscribe from worker events
+    this._unsubLoaded?.()
+    this._unsubError?.()
+    this._unsubLoaded = null
+    this._unsubError = null
   }
 
   // ── Private ──────────────────────────────────────────────────────
@@ -232,11 +280,141 @@ export class TileManager {
   }
 
   private _fetchTile(z: number, x: number, y: number): void {
-    if (this._format === 'f16') {
+    if (this._fetchClient) {
+      this._fetchTileViaWorker(z, x, y)
+    } else if (this._format === 'f16') {
       this._fetchTileF16(z, x, y)
     } else {
       this._fetchTilePng(z, x, y)
     }
+  }
+
+  /** Build a worker-namespaced key to avoid collisions between managers. */
+  private _workerKey(tileKey: string): string {
+    return `${this._id}:${tileKey}`
+  }
+
+  /** Extract the tile key from a worker-namespaced key, or null if not ours. */
+  private _parseWorkerKey(workerKey: string): string | null {
+    const prefix = `${this._id}:`
+    return workerKey.startsWith(prefix) ? workerKey.slice(prefix.length) : null
+  }
+
+  /**
+   * Delegate tile fetch to the Web Worker.
+   * Creates a placeholder texture and sends the fetch request;
+   * the worker callback handles texture upload when data arrives.
+   */
+  private _fetchTileViaWorker(z: number, x: number, y: number): void {
+    const key = tileKey(z, x, y)
+    const gl = this._gl
+    const url = this._buildUrl(z, x, y)
+
+    const texture = gl.createTexture()
+    if (!texture) return
+
+    // Initialize 1x1 placeholder (same as direct-fetch paths)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    if (this._format === 'f16') {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, 1, 1, 0, gl.RED, gl.HALF_FLOAT, new Uint16Array([0]))
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]))
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+
+    this._pendingWorker.set(key, texture)
+    // Use namespaced key in worker to avoid collisions between managers
+    this._fetchClient!.fetch(this._workerKey(key), url, this._format)
+  }
+
+  /**
+   * Wire up worker callbacks. Called once lazily from updateVisibleTiles
+   * so that onTileLoaded is already set by the time callbacks fire.
+   *
+   * Because TileFetchClient is a singleton shared across TileManagers,
+   * each manager registers its own listener and filters results by
+   * checking _pendingWorker membership (only the manager that requested
+   * a tile will have that key in its pending map).
+   */
+  private _wireWorkerCallbacks(): void {
+    const client = this._fetchClient!
+
+    this._unsubLoaded = client.addLoadedListener((result: TileFetchResult) => {
+      const tileKey = this._parseWorkerKey(result.key)
+      if (!tileKey) return // Not our namespace
+      const texture = this._pendingWorker.get(tileKey)
+      if (!texture) return // Not our tile (already cleared/cancelled)
+
+      this._pendingWorker.delete(tileKey)
+      this._uploadWorkerResult(tileKey, texture, result)
+    })
+
+    this._unsubError = client.addErrorListener((error: TileFetchError) => {
+      const tileKey = this._parseWorkerKey(error.key)
+      if (!tileKey) return
+      const texture = this._pendingWorker.get(tileKey)
+      if (!texture) return
+
+      this._pendingWorker.delete(tileKey)
+      console.warn(`[TileManager] Worker fetch failed: ${tileKey} — ${error.error}`)
+      this._tiles.set(tileKey, {
+        key: tileKey,
+        texture,
+        state: 'error',
+        lastAccess: ++this._accessCounter,
+      })
+    })
+  }
+
+  /**
+   * Upload tile data received from the worker into the pre-allocated texture.
+   * Handles both PNG (ImageBitmap) and Float16 (ArrayBuffer) formats.
+   */
+  private _uploadWorkerResult(key: string, texture: WebGLTexture, result: TileFetchResult): void {
+    const gl = this._gl
+
+    if (result.format === 'f16') {
+      const buffer = result.data as ArrayBuffer
+      const side = result.side ?? -1
+
+      if (side <= 0) {
+        console.warn(`[TileManager] Float16 tile from worker has non-square size`)
+        this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+        return
+      }
+
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.R16F,
+        side, side, 0,
+        gl.RED, gl.HALF_FLOAT,
+        new Uint16Array(buffer),
+      )
+      gl.bindTexture(gl.TEXTURE_2D, null)
+    } else {
+      // PNG: ImageBitmap — can be uploaded directly via texImage2D
+      const bitmap = result.data as ImageBitmap
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA,
+        gl.RGBA, gl.UNSIGNED_BYTE,
+        bitmap,
+      )
+      gl.bindTexture(gl.TEXTURE_2D, null)
+      bitmap.close()
+    }
+
+    this._tiles.set(key, {
+      key,
+      texture,
+      state: 'loaded',
+      lastAccess: ++this._accessCounter,
+    })
+    this.onTileLoaded?.()
   }
 
   /** Fetch a Float16 binary tile and upload as R16F texture. */

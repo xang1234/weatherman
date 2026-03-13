@@ -45,6 +45,7 @@ import {
   type TileCoord,
   type TileFormat,
 } from './TileManager'
+import { getTileFetchClient } from '@/workers/TileFetchClient'
 
 /** Layers that use U/V vector component tiles instead of scalar tiles. */
 const VECTOR_LAYERS = new Set(['wind_speed'])
@@ -191,8 +192,12 @@ export class WeatherGLLayer implements CustomLayerInterface {
       // T0 = current forecast hour, T1 = next hour (for temporal interpolation).
       // In vector mode, the main managers fetch U-component tiles
       // and the V managers fetch V-component tiles.
+      //
+      // All managers share a single TileFetchClient (Web Worker) so that
+      // network fetch callbacks never block the main thread render loop.
       const triggerRepaint = () => map.triggerRepaint()
-      const tmOpts = { apiBase: this._apiBase, format: this._tileFormat }
+      const fetchClient = getTileFetchClient()
+      const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
       this._tileManager = new TileManager(gl, tmOpts)
       this._tileManager.onTileLoaded = triggerRepaint
       this._tileManagerT1 = new TileManager(gl, tmOpts)

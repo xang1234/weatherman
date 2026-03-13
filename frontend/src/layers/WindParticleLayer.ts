@@ -45,6 +45,7 @@ import {
   type TileCoord,
   type TileFormat,
 } from './TileManager'
+import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
@@ -566,7 +567,8 @@ export class WindParticleLayer implements CustomLayerInterface {
   /** Create tile managers for wind data fetching. */
   private _initTileManagers(gl: WebGL2RenderingContext): void {
     const triggerRepaint = () => this._map?.triggerRepaint()
-    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat }
+    const fetchClient = getTileFetchClient()
+    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
     this._windUManager = new TileManager(gl, tmOpts)
     this._windUManager.onTileLoaded = triggerRepaint
     this._windVManager = new TileManager(gl, tmOpts)
