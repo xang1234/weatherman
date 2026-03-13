@@ -601,6 +601,131 @@ function tileKey(z: number, x: number, y: number): string {
   return `${z}/${x}/${y}`
 }
 
+// ── Pan prefetch ─────────────────────────────────────────────────
+
+/** Direction of viewport movement in map coordinate space. */
+export interface PanDirection {
+  /** Positive = east, negative = west (degrees longitude). */
+  dx: number
+  /** Positive = north, negative = south (degrees latitude). */
+  dy: number
+}
+
+/**
+ * Tracks viewport center movement between frames to determine pan direction.
+ *
+ * Returns a non-null PanDirection when the viewport center has moved by
+ * more than a small threshold since the previous update — indicating
+ * the user is actively panning.
+ */
+export class PanVelocityTracker {
+  private _prevLng = NaN
+  private _prevLat = NaN
+
+  /** Minimum center movement in degrees to register as panning. */
+  private static readonly THRESHOLD = 0.001
+
+  /**
+   * Feed the current viewport center and get the movement direction.
+   * Returns null on the first call or when the viewport is stationary.
+   */
+  update(centerLng: number, centerLat: number): PanDirection | null {
+    const prevLng = this._prevLng
+    const prevLat = this._prevLat
+    this._prevLng = centerLng
+    this._prevLat = centerLat
+
+    if (isNaN(prevLng)) return null
+
+    let dx = centerLng - prevLng
+    const dy = centerLat - prevLat
+
+    // Handle antimeridian wrapping
+    if (dx > 180) dx -= 360
+    if (dx < -180) dx += 360
+
+    if (Math.abs(dx) < PanVelocityTracker.THRESHOLD &&
+        Math.abs(dy) < PanVelocityTracker.THRESHOLD) {
+      return null
+    }
+
+    return { dx, dy }
+  }
+
+  /** Reset tracking (e.g. on config change or layer swap). */
+  reset(): void {
+    this._prevLng = NaN
+    this._prevLat = NaN
+  }
+}
+
+/**
+ * Compute one ring of tiles beyond the visible set in the direction of
+ * viewport movement. Used during panning to prevent blank tiles at
+ * viewport edges.
+ *
+ * Returns only tiles that are not already in the visible set.
+ * Handles antimeridian wrapping for x coordinates and clamps y to
+ * valid tile range (no tiles beyond the poles).
+ */
+export function computePanPrefetchTiles(
+  visible: TileCoord[],
+  direction: PanDirection,
+  z: number,
+): TileCoord[] {
+  if (visible.length === 0) return []
+
+  const n = 2 ** z
+
+  // Find bounding box of visible tiles
+  let xMin = Infinity, xMax = -Infinity
+  let yMin = Infinity, yMax = -Infinity
+  for (const { x, y } of visible) {
+    if (x < xMin) xMin = x
+    if (x > xMax) xMax = x
+    if (y < yMin) yMin = y
+    if (y > yMax) yMax = y
+  }
+
+  const visibleSet = new Set(visible.map(c => `${c.x},${c.y}`))
+  const prefetch: TileCoord[] = []
+
+  const addIfNew = (x: number, y: number) => {
+    if (y < 0 || y >= n) return // beyond poles
+    x = ((x % n) + n) % n // antimeridian wrap
+    const key = `${x},${y}`
+    if (visibleSet.has(key)) return
+    visibleSet.add(key) // prevent duplicates in prefetch set
+    prefetch.push({ z, x, y })
+  }
+
+  // One column/row in the direction of movement
+  if (direction.dx > 0) {
+    // Panning east → prefetch east column
+    for (let y = yMin; y <= yMax; y++) addIfNew(xMax + 1, y)
+  }
+  if (direction.dx < 0) {
+    // Panning west → prefetch west column
+    for (let y = yMin; y <= yMax; y++) addIfNew(xMin - 1, y)
+  }
+  if (direction.dy > 0) {
+    // Panning north → lower tile-y → prefetch row above
+    for (let x = xMin; x <= xMax; x++) addIfNew(x, yMin - 1)
+  }
+  if (direction.dy < 0) {
+    // Panning south → higher tile-y → prefetch row below
+    for (let x = xMin; x <= xMax; x++) addIfNew(x, yMax + 1)
+  }
+
+  // Diagonal corner tiles (if panning diagonally)
+  if (direction.dx > 0 && direction.dy > 0) addIfNew(xMax + 1, yMin - 1)
+  if (direction.dx > 0 && direction.dy < 0) addIfNew(xMax + 1, yMax + 1)
+  if (direction.dx < 0 && direction.dy > 0) addIfNew(xMin - 1, yMin - 1)
+  if (direction.dx < 0 && direction.dy < 0) addIfNew(xMin - 1, yMax + 1)
+
+  return prefetch
+}
+
 // ── Visible tile computation ─────────────────────────────────────
 // Extracted from useWeatherLayer for reuse by the GL pipeline.
 

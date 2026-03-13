@@ -41,7 +41,9 @@ import {
 } from './gl-utils'
 import {
   TileManager,
+  PanVelocityTracker,
   computeVisibleTiles,
+  computePanPrefetchTiles,
   type TileCoord,
   type TileFormat,
 } from './TileManager'
@@ -163,6 +165,9 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _trailWidth = 0
   private _trailHeight = 0
 
+  // ── Pan prefetch ───────────────────────────────────────────────────
+  private _panTracker = new PanVelocityTracker()
+
   // ── Timing & performance watchdog ──────────────────────────────────
   private _lastFrameTime = 0
   private _frameCount = 0
@@ -267,12 +272,23 @@ export class WindParticleLayer implements CustomLayerInterface {
       south: mapBounds.getSouth(),
     }, zoom)
 
+    // Pan prefetch: detect movement and prefetch one tile ring ahead
+    const centerLng = (mapBounds.getWest() + mapBounds.getEast()) / 2
+    const centerLat = (mapBounds.getNorth() + mapBounds.getSouth()) / 2
+    const panDir = this._panTracker.update(centerLng, centerLat)
+    const prefetchCoords = panDir
+      ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
+      : []
+    const allCoords = prefetchCoords.length > 0
+      ? visibleCoords.concat(prefetchCoords)
+      : visibleCoords
+
     if (this._windConfigured) {
-      this._windUManager?.updateVisibleTiles(visibleCoords)
-      this._windVManager?.updateVisibleTiles(visibleCoords)
+      this._windUManager?.updateVisibleTiles(allCoords)
+      this._windVManager?.updateVisibleTiles(allCoords)
       if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
-        this._windUT1Manager?.updateVisibleTiles(visibleCoords)
-        this._windVT1Manager?.updateVisibleTiles(visibleCoords)
+        this._windUT1Manager?.updateVisibleTiles(allCoords)
+        this._windVT1Manager?.updateVisibleTiles(allCoords)
       }
     }
 

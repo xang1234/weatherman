@@ -41,7 +41,9 @@ import {
 } from './color-ramps'
 import {
   TileManager,
+  PanVelocityTracker,
   computeVisibleTiles,
+  computePanPrefetchTiles,
   type TileCoord,
   type TileFormat,
 } from './TileManager'
@@ -97,6 +99,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
   // Temporal interpolation state
   private _forecastHourT1 = -1
   private _temporalMix = 0
+
+  // Pan prefetch: tracks viewport movement to prefetch tiles ahead of the pan
+  private _panTracker = new PanVelocityTracker()
 
   // Diagnostic warning guards (one-shot to avoid console spam)
   private _renderSkipWarned = false
@@ -251,16 +256,28 @@ export class WeatherGLLayer implements CustomLayerInterface {
       south: bounds.getSouth(),
     }, zoom)
 
+    // Pan prefetch: detect viewport movement and prefetch one tile ring
+    // in the direction of movement to prevent blank edges during panning.
+    const centerLng = (bounds.getWest() + bounds.getEast()) / 2
+    const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2
+    const panDir = this._panTracker.update(centerLng, centerLat)
+    const prefetchCoords = panDir
+      ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
+      : []
+    const allCoords = prefetchCoords.length > 0
+      ? visibleCoords.concat(prefetchCoords)
+      : visibleCoords
+
     // Update all active tile managers — starts fetches for any missing tiles
-    this._tileManager.updateVisibleTiles(visibleCoords)
+    this._tileManager.updateVisibleTiles(allCoords)
     const blending = this._temporalMix > 0 && this._forecastHourT1 >= 0 && this._tileManagerT1 != null
     if (blending) {
-      this._tileManagerT1!.updateVisibleTiles(visibleCoords)
+      this._tileManagerT1!.updateVisibleTiles(allCoords)
     }
     if (isVector && this._tileManagerV) {
-      this._tileManagerV.updateVisibleTiles(visibleCoords)
+      this._tileManagerV.updateVisibleTiles(allCoords)
       if (blending && this._tileManagerVT1) {
-        this._tileManagerVT1.updateVisibleTiles(visibleCoords)
+        this._tileManagerVT1.updateVisibleTiles(allCoords)
       }
     }
 
