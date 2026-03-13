@@ -8,6 +8,8 @@ import { useWeatherInspector } from '@/hooks/useWeatherInspector'
 import { useWeatherLayer, type WeatherLayerHandle } from '@/hooks/useWeatherLayer'
 import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
+import { useVesselTrack } from '@/hooks/useVesselTrack'
+import { useWindParticles, type WindParticleHandle } from '@/hooks/useWindParticles'
 import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
@@ -135,6 +137,7 @@ export function MapView() {
       const nextIdx = (idx + 1) % hours.length
 
       handleRef.current.setTemporalBlend?.(hours[nextIdx], mix)
+      windParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
 
       if (mix >= 1) {
         // Step complete — advance the hour.
@@ -143,9 +146,13 @@ export function MapView() {
         // the next RAF tick's setTemporalBlend destroys T1's tiles.
         playbackIdxRef.current = nextIdx
         handleRef.current.advanceForecastHour?.(hours[nextIdx])
+        windParticlesRef.current.advanceForecastHour?.(hours[nextIdx])
         setSelectedForecastHour(hours[nextIdx])
         startTime = performance.now()
         handleRef.current.setTemporalBlend?.(
+          hours[(nextIdx + 1) % hours.length], 0,
+        )
+        windParticlesRef.current.setTemporalBlend?.(
           hours[(nextIdx + 1) % hours.length], 0,
         )
       }
@@ -169,7 +176,22 @@ export function MapView() {
     snapshotDate: aisDate,
   })
 
+  const windParticles = useWindParticles({
+    map,
+    isLoaded,
+    layer: resolvedLayerId ?? '',
+    model: 'gfs',
+    runId: runId ?? '',
+    forecastHour: forecastHour ?? 0,
+    visible: resolvedLayerId === 'wind_speed',
+  })
+
+  // Keep particle handle in a ref for the RAF loop
+  const windParticlesRef = useRef<WindParticleHandle>(windParticles)
+  windParticlesRef.current = windParticles
+
   useVesselPopup({ map, isLoaded })
+  useVesselTrack({ map, isLoaded, snapshotDate: aisDate })
   const inspector = useWeatherInspector({
     map,
     isLoaded,

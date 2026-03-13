@@ -1,9 +1,12 @@
-"""AIS vector tile endpoint — serves MVT tiles from the daily snapshot.
+"""AIS endpoints — vector tiles, bbox queries, and track playback.
 
 URL patterns::
 
     /ais/tiles/{snapshot_date}/{z}/{x}/{y}.pbf   — single MVT tile
     /ais/tiles/{snapshot_date}/tilejson.json      — TileJSON metadata
+    /ais/tiles/latest                             — latest snapshot date
+    /ais/bbox                                     — vessels in bounding box (GeoJSON)
+    /ais/tracks/{mmsi}                            — vessel track (GeoJSON LineString)
 
 Tiles are date-keyed and immutable: once a day's snapshot is built, its tiles
 never change.  This enables aggressive ``Cache-Control: immutable`` headers
@@ -16,14 +19,15 @@ suitable for rendering directional arrows color-coded by ship type.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated, Optional
 
 import duckdb
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from weatherman.ais.mvt import MAX_ZOOM, MIN_ZOOM, GeneratedTile, generate_tile_with_stats
+from weatherman.ais.tracks import query_track
 from weatherman.observability.metrics import AIS_TILE_BYTES, AIS_TILE_FEATURES
 from weatherman.tenancy import get_tenant_id
 
@@ -265,4 +269,158 @@ async def get_ais_tilejson(
     return JSONResponse(
         content=data,
         headers={"Cache-Control": CACHE_IMMUTABLE},
+    )
+
+
+# ── AIS feature query router ──────────────────────────────────────────
+
+query_router = APIRouter(prefix="/ais", tags=["ais-queries"])
+
+
+@query_router.get(
+    "/bbox",
+    summary="Query vessels within a bounding box",
+)
+def get_vessels_bbox(
+    west: Annotated[float, Query(ge=-180, le=180)],
+    south: Annotated[float, Query(ge=-90, le=90)],
+    east: Annotated[float, Query(ge=-180, le=180)],
+    north: Annotated[float, Query(ge=-90, le=90)],
+    snapshot_date: date | None = None,
+    limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+    tenant_id: str = Depends(get_tenant_id),
+    svc: AISTileService = Depends(get_ais_tile_service),
+) -> JSONResponse:
+    """Return GeoJSON FeatureCollection of vessels in the bounding box.
+
+    If ``snapshot_date`` is omitted, uses the latest available date.
+    Results are capped at ``limit`` (default 1000, max 5000).
+    """
+    if snapshot_date is None:
+        snapshot_date = svc.latest_snapshot_date()
+        if snapshot_date is None:
+            raise HTTPException(status_code=404, detail="No AIS snapshots available")
+
+    con = svc.connection
+    rows = con.execute(
+        """
+        SELECT mmsi, vessel_name, lat, lon, sog, heading,
+               shiptype, vessel_class, dwt, destination, destinationtidied, eta
+        FROM ais_snapshot
+        WHERE "date" = $snapshot_date
+          AND tenant_id = $tenant_id
+          AND lon BETWEEN $west AND $east
+          AND lat BETWEEN $south AND $north
+        LIMIT $limit
+        """,
+        {
+            "snapshot_date": snapshot_date,
+            "tenant_id": tenant_id,
+            "west": west,
+            "south": south,
+            "east": east,
+            "north": north,
+            "limit": limit,
+        },
+    ).fetchall()
+
+    features = []
+    for row in rows:
+        mmsi, name, lat, lon, sog, heading, shiptype, vessel_class, dwt, dest, dest_tidy, eta = row
+        props: dict = {"mmsi": mmsi}
+        if name:
+            props["vessel_name"] = name
+        if sog is not None:
+            props["sog"] = sog
+        if heading is not None:
+            props["heading"] = heading
+        if shiptype:
+            props["shiptype"] = shiptype
+        if vessel_class:
+            props["vessel_class"] = vessel_class
+        if dwt is not None:
+            props["dwt"] = dwt
+        if dest:
+            props["destination"] = dest
+        if dest_tidy:
+            props["destinationtidied"] = dest_tidy
+        if eta is not None:
+            props["eta"] = str(eta)
+
+        features.append({
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [lon, lat],
+            },
+            "properties": props,
+        })
+
+    return JSONResponse(
+        content={
+            "type": "FeatureCollection",
+            "features": features,
+        },
+        headers={"Cache-Control": "public, max-age=60"},
+    )
+
+
+@query_router.get(
+    "/tracks/{mmsi}",
+    summary="Get vessel track as GeoJSON LineString",
+)
+def get_vessel_track(
+    mmsi: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    tenant_id: str = Depends(get_tenant_id),
+    svc: AISTileService = Depends(get_ais_tile_service),
+) -> JSONResponse:
+    """Return a GeoJSON Feature with a LineString geometry for the vessel's track.
+
+    Defaults to the last 7 days if no date range is specified.
+    Properties include timestamps and SOG for each point.
+    """
+    if end_date is None:
+        latest = svc.latest_snapshot_date()
+        end_date = latest if latest else date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=7)
+
+    con = svc.connection
+    points = query_track(
+        mmsi=mmsi,
+        start_date=start_date,
+        end_date=end_date,
+        tenant_id=tenant_id,
+        con=con,
+    )
+
+    if not points:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No track data found for MMSI {mmsi} between {start_date} and {end_date}",
+        )
+
+    coordinates = [[p.lon, p.lat] for p in points]
+    timestamps = [p.timestamp.isoformat() for p in points]
+    sog_values = [p.sog for p in points]
+
+    return JSONResponse(
+        content={
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coordinates,
+            },
+            "properties": {
+                "mmsi": mmsi,
+                "timestamps": timestamps,
+                "sog": sog_values,
+                "point_count": len(points),
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+        },
+        headers={"Cache-Control": "public, max-age=300"},
     )

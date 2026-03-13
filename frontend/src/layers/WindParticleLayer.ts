@@ -6,7 +6,7 @@
  *   Pass 1 — State Update (ping-pong)
  *     Read particle positions from state texture A, write updated positions
  *     to state texture B via a fullscreen-quad fragment shader, then swap.
- *     Currently a random walk; wind advection is added by wx-0pg.2.
+ *     Particles are advected by sampling wind U/V data tiles.
  *
  *   Pass 2 — Trail Composite (ping-pong)
  *     Bind trail write FBO. Draw the previous trail texture at 95% opacity
@@ -39,6 +39,11 @@ import {
   type GLProgram,
   type QuadGeometry,
 } from './gl-utils'
+import {
+  TileManager,
+  computeVisibleTiles,
+  type TileCoord,
+} from './TileManager'
 
 /** Particles per axis in the state texture. */
 const STATE_SIZE = 256
@@ -46,12 +51,23 @@ const STATE_SIZE = 256
 const PARTICLE_COUNT = STATE_SIZE * STATE_SIZE
 /** Trail fade factor per frame. 0.95^60 ≈ 0.046 → ~2 second trails at 60fps. */
 const TRAIL_FADE = 0.95
+/**
+ * Speed scale: converts m/s wind speed to mercator [0,1] displacement per second.
+ * 1 m/s ≈ 1/40_000_000 of Earth circumference ≈ 2.5e-8 in mercator.
+ * Multiplied by a visual amplification factor for perceptible particle motion.
+ */
+const SPEED_SCALE = 0.000003
+
+/** Number of texture units used in the update pass (state + 4 wind tiles). */
+const UPDATE_TEX_UNITS = 5
 
 export interface WindParticleLayerOptions {
   /** Unique layer ID for MapLibre. */
   id?: string
   /** Overlay opacity 0-1. Default: 1.0. */
   opacity?: number
+  /** Base URL for the data tile API. Default: '' (same-origin). */
+  apiBase?: string
 }
 
 export class WindParticleLayer implements CustomLayerInterface {
@@ -62,6 +78,22 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _map: MaplibreMap | null = null
   private _gl: WebGL2RenderingContext | null = null
   private _opacity: number
+  private _apiBase: string
+
+  // ── Wind data tile managers ─────────────────────────────────────────
+  private _windUManager: TileManager | null = null
+  private _windVManager: TileManager | null = null
+  private _windUT1Manager: TileManager | null = null
+  private _windVT1Manager: TileManager | null = null
+  private _windConfigured = false
+
+  // Wind dataset config
+  private _model = ''
+  private _runId = ''
+  private _forecastHourT1 = -1
+  private _temporalMix = 0
+  private _valueMin = -50
+  private _valueMax = 50
 
   // ── State update pass ───────────────────────────────────────────────
   private _updateProgram: GLProgram | null = null
@@ -72,6 +104,15 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // Update uniforms
   private _uUpdateStateTex: WebGLUniformLocation | null = null
+  private _uUpdateWindU: WebGLUniformLocation | null = null
+  private _uUpdateWindV: WebGLUniformLocation | null = null
+  private _uUpdateWindUT1: WebGLUniformLocation | null = null
+  private _uUpdateWindVT1: WebGLUniformLocation | null = null
+  private _uUpdateTemporalMix: WebGLUniformLocation | null = null
+  private _uUpdateHasWindData: WebGLUniformLocation | null = null
+  private _uUpdateValueMin: WebGLUniformLocation | null = null
+  private _uUpdateValueMax: WebGLUniformLocation | null = null
+  private _uUpdateSpeedScale: WebGLUniformLocation | null = null
   private _uUpdateDt: WebGLUniformLocation | null = null
   private _uUpdateSeed: WebGLUniformLocation | null = null
   private _uUpdateViewportBounds: WebGLUniformLocation | null = null
@@ -106,6 +147,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   constructor(options: WindParticleLayerOptions = {}) {
     this.id = options.id ?? 'wind-particles'
     this._opacity = options.opacity ?? 1.0
+    this._apiBase = options.apiBase ?? ''
   }
 
   // ── CustomLayerInterface ────────────────────────────────────────────
@@ -127,6 +169,7 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     try {
       this._initResources(gl)
+      this._initTileManagers(gl)
     } catch (e) {
       console.error('[WindParticleLayer] Initialization failed:', e)
       this._cleanup()
@@ -152,8 +195,47 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._lastFrameTime = now
     this._frameCount++
 
+    // ── Update wind tile managers with current viewport ──
+    const zoom = Math.max(0, Math.min(8, Math.floor(this._map.getZoom())))
+    const mapBounds = this._map.getBounds()
+    const visibleCoords = computeVisibleTiles({
+      west: mapBounds.getWest(),
+      north: mapBounds.getNorth(),
+      east: mapBounds.getEast(),
+      south: mapBounds.getSouth(),
+    }, zoom)
+
+    if (this._windConfigured) {
+      this._windUManager?.updateVisibleTiles(visibleCoords)
+      this._windVManager?.updateVisibleTiles(visibleCoords)
+      if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
+        this._windUT1Manager?.updateVisibleTiles(visibleCoords)
+        this._windVT1Manager?.updateVisibleTiles(visibleCoords)
+      }
+    }
+
+    // Find a wind tile that covers the viewport center for binding to the shader.
+    // Particles sample from this single tile — at low zoom this covers the whole
+    // visible area. At high zoom, particles near tile edges may sample nodata
+    // and fall back to random drift, which is acceptable.
+    const centerCoord = this._pickCenterTile(visibleCoords)
+    let windUTex: WebGLTexture | null = null
+    let windVTex: WebGLTexture | null = null
+    let windUT1Tex: WebGLTexture | null = null
+    let windVT1Tex: WebGLTexture | null = null
+
+    if (centerCoord && this._windConfigured) {
+      windUTex = this._windUManager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
+      windVTex = this._windVManager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
+      if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
+        windUT1Tex = this._windUT1Manager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
+        windVT1Tex = this._windVT1Manager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
+      }
+    }
+
+    const hasWindData = windUTex != null && windVTex != null
+
     // ── Save MapLibre GL state BEFORE any GL calls ──
-    // Must capture state before _resizeTrailTextures which modifies FBO bindings.
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
     const prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number
@@ -164,9 +246,9 @@ export class WindParticleLayer implements CustomLayerInterface {
     const prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA) as number
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
 
-    // Save texture bindings for units 0 and 1
+    // Save texture bindings for all units we touch
     const prevTexBindings: (WebGLTexture | null)[] = []
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < UPDATE_TEX_UNITS; i++) {
       gl.activeTexture(gl.TEXTURE0 + i)
       prevTexBindings.push(gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null)
     }
@@ -190,11 +272,36 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.viewport(0, 0, STATE_SIZE, STATE_SIZE)
     gl.disable(gl.BLEND)
 
+    gl.useProgram(this._updateProgram.program)
+
+    // Bind state texture to unit 0
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[stateRead])
-
-    gl.useProgram(this._updateProgram.program)
     gl.uniform1i(this._uUpdateStateTex, 0)
+
+    // Bind wind textures to units 1-4
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, windUTex)
+    gl.uniform1i(this._uUpdateWindU, 1)
+
+    gl.activeTexture(gl.TEXTURE2)
+    gl.bindTexture(gl.TEXTURE_2D, windVTex)
+    gl.uniform1i(this._uUpdateWindV, 2)
+
+    gl.activeTexture(gl.TEXTURE3)
+    gl.bindTexture(gl.TEXTURE_2D, windUT1Tex)
+    gl.uniform1i(this._uUpdateWindUT1, 3)
+
+    gl.activeTexture(gl.TEXTURE4)
+    gl.bindTexture(gl.TEXTURE_2D, windVT1Tex)
+    gl.uniform1i(this._uUpdateWindVT1, 4)
+
+    // Set uniforms
+    gl.uniform1f(this._uUpdateTemporalMix, hasWindData && windUT1Tex && windVT1Tex ? this._temporalMix : 0)
+    gl.uniform1i(this._uUpdateHasWindData, hasWindData ? 1 : 0)
+    gl.uniform1f(this._uUpdateValueMin, this._valueMin)
+    gl.uniform1f(this._uUpdateValueMax, this._valueMax)
+    gl.uniform1f(this._uUpdateSpeedScale, SPEED_SCALE)
     gl.uniform1f(this._uUpdateDt, dt)
     gl.uniform1f(this._uUpdateSeed, (now * 137.0) % 1000.0)
 
@@ -212,7 +319,6 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._stateReadIndex = stateWrite
 
     // Ensure state texture write is complete before Pass 2b reads it.
-    // Required on some mobile WebGL2 implementations (Safari/Metal).
     gl.flush()
 
     // ────────────────────────────────────────────────────────────────
@@ -252,8 +358,8 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniformMatrix4fv(this._uDrawMatrix, false, options.modelViewProjectionMatrix)
 
     // Point size: scale with zoom so particles stay visually proportional
-    const zoom = this._map.getZoom()
-    const pointSize = Math.max(1.0, Math.min(4.0, zoom * 0.4))
+    const mapZoom = this._map.getZoom()
+    const pointSize = Math.max(1.0, Math.min(4.0, mapZoom * 0.4))
     gl.uniform1f(this._uDrawPointSize, pointSize)
 
     gl.bindVertexArray(this._drawVao)
@@ -284,7 +390,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindVertexArray(null)
 
     // ── Restore MapLibre GL state ──
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < UPDATE_TEX_UNITS; i++) {
       gl.activeTexture(gl.TEXTURE0 + i)
       gl.bindTexture(gl.TEXTURE_2D, prevTexBindings[i])
     }
@@ -310,6 +416,48 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // ── Public API ──────────────────────────────────────────────────────
 
+  /** Configure the wind dataset to fetch tiles from. */
+  setWindConfig(model: string, runId: string, forecastHour: number, valueMin: number, valueMax: number): void {
+    this._model = model
+    this._runId = runId
+    this._valueMin = valueMin
+    this._valueMax = valueMax
+
+    this._windUManager?.setLayer(model, runId, 'wind_u', forecastHour)
+    this._windVManager?.setLayer(model, runId, 'wind_v', forecastHour)
+    this._windConfigured = true
+    this._map?.triggerRepaint()
+  }
+
+  /** Set temporal interpolation for the particle wind field. */
+  setTemporalBlend(forecastHourT1: number, mix: number): void {
+    this._forecastHourT1 = forecastHourT1
+    this._temporalMix = Math.max(0, Math.min(1, mix))
+
+    if (forecastHourT1 >= 0 && this._model && this._runId) {
+      this._windUT1Manager?.setLayer(this._model, this._runId, 'wind_u', forecastHourT1)
+      this._windVT1Manager?.setLayer(this._model, this._runId, 'wind_v', forecastHourT1)
+    }
+    this._map?.triggerRepaint()
+  }
+
+  /** Synchronously advance the forecast hour, swapping T0↔T1. */
+  advanceForecastHour(newHour: number): void {
+    if (
+      this._windUT1Manager &&
+      this._windUT1Manager.cacheSize > 0 &&
+      this._windUT1Manager.currentForecastHour === newHour &&
+      this._windVT1Manager &&
+      this._windVT1Manager.cacheSize > 0 &&
+      this._windVT1Manager.currentForecastHour === newHour
+    ) {
+      ;[this._windUManager, this._windUT1Manager] = [this._windUT1Manager, this._windUManager]
+      ;[this._windVManager, this._windVT1Manager] = [this._windVT1Manager, this._windVManager]
+    }
+    this._temporalMix = 0
+    this._map?.triggerRepaint()
+  }
+
   /** Get the current "read" state texture. */
   get stateTexture(): WebGLTexture | null {
     return this._stateTextures?.[this._stateReadIndex] ?? null
@@ -333,11 +481,32 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // ── Private ─────────────────────────────────────────────────────────
 
+  /** Pick the tile coordinate closest to the viewport center. */
+  private _pickCenterTile(coords: TileCoord[]): TileCoord | null {
+    if (coords.length === 0) return null
+    if (coords.length === 1) return coords[0]
+    // Return the middle tile from the sorted list
+    return coords[Math.floor(coords.length / 2)]
+  }
+
   /** Convert latitude to web mercator Y in [0,1]. */
   private _latToMercatorY(lat: number): number {
     const sinLat = Math.sin((lat * Math.PI) / 180)
     const y = 0.5 - (Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI))
     return Math.max(0, Math.min(1, y))
+  }
+
+  /** Create tile managers for wind data fetching. */
+  private _initTileManagers(gl: WebGL2RenderingContext): void {
+    const triggerRepaint = () => this._map?.triggerRepaint()
+    this._windUManager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windUManager.onTileLoaded = triggerRepaint
+    this._windVManager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windVManager.onTileLoaded = triggerRepaint
+    this._windUT1Manager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windUT1Manager.onTileLoaded = triggerRepaint
+    this._windVT1Manager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windVT1Manager.onTileLoaded = triggerRepaint
   }
 
   /** Create all GL resources: programs, textures, FBOs. */
@@ -357,6 +526,15 @@ export class WindParticleLayer implements CustomLayerInterface {
     // ── Cache uniform locations ──
     const up = this._updateProgram.program
     this._uUpdateStateTex = gl.getUniformLocation(up, 'u_stateTex')
+    this._uUpdateWindU = gl.getUniformLocation(up, 'u_windU')
+    this._uUpdateWindV = gl.getUniformLocation(up, 'u_windV')
+    this._uUpdateWindUT1 = gl.getUniformLocation(up, 'u_windUT1')
+    this._uUpdateWindVT1 = gl.getUniformLocation(up, 'u_windVT1')
+    this._uUpdateTemporalMix = gl.getUniformLocation(up, 'u_temporalMix')
+    this._uUpdateHasWindData = gl.getUniformLocation(up, 'u_hasWindData')
+    this._uUpdateValueMin = gl.getUniformLocation(up, 'u_valueMin')
+    this._uUpdateValueMax = gl.getUniformLocation(up, 'u_valueMax')
+    this._uUpdateSpeedScale = gl.getUniformLocation(up, 'u_speedScale')
     this._uUpdateDt = gl.getUniformLocation(up, 'u_dt')
     this._uUpdateSeed = gl.getUniformLocation(up, 'u_seed')
     this._uUpdateViewportBounds = gl.getUniformLocation(up, 'u_viewportBounds')
@@ -482,6 +660,16 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   /** Free all GL resources. */
   private _cleanup(): void {
+    // Destroy tile managers
+    this._windUManager?.destroy()
+    this._windUManager = null
+    this._windVManager?.destroy()
+    this._windVManager = null
+    this._windUT1Manager?.destroy()
+    this._windUT1Manager = null
+    this._windVT1Manager?.destroy()
+    this._windVT1Manager = null
+
     const gl = this._gl
     if (gl) {
       // Trail resources
@@ -540,6 +728,15 @@ export class WindParticleLayer implements CustomLayerInterface {
     }
 
     this._uUpdateStateTex = null
+    this._uUpdateWindU = null
+    this._uUpdateWindV = null
+    this._uUpdateWindUT1 = null
+    this._uUpdateWindVT1 = null
+    this._uUpdateTemporalMix = null
+    this._uUpdateHasWindData = null
+    this._uUpdateValueMin = null
+    this._uUpdateValueMax = null
+    this._uUpdateSpeedScale = null
     this._uUpdateDt = null
     this._uUpdateSeed = null
     this._uUpdateViewportBounds = null

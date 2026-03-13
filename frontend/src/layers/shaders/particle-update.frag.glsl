@@ -5,6 +5,30 @@ precision highp float;
 // R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = reserved
 uniform sampler2D u_stateTex;
 
+// Wind U/V data tiles (T0) — 16-bit encoded PNGs from TiTiler.
+// R = low byte, G = high byte of uint16 value, B = nodata flag.
+uniform sampler2D u_windU;
+uniform sampler2D u_windV;
+
+// Wind U/V data tiles (T1) — next timestep for temporal interpolation.
+uniform sampler2D u_windUT1;
+uniform sampler2D u_windVT1;
+
+// Temporal blend factor: 0.0 = T0 only, 1.0 = T1 only.
+uniform float u_temporalMix;
+
+// Whether wind textures are bound and valid (0 = no wind data, 1 = have data).
+uniform int u_hasWindData;
+
+// Value range for denormalization: wind encoded as [valueMin, valueMax] → [0,1].
+// Typically symmetric: valueMin = -50, valueMax = 50 for m/s.
+uniform float u_valueMin;
+uniform float u_valueMax;
+
+// Speed scaling factor: converts m/s displacement to mercator units per second.
+// Tuned so particles move at visually appropriate speed.
+uniform float u_speedScale;
+
 // Time delta in seconds since last frame
 uniform float u_dt;
 
@@ -33,6 +57,41 @@ vec2 hash2(vec2 p) {
     );
 }
 
+// ── Wind field sampling ─────────────────────────────────────────────
+
+// Decode 16-bit value from RGBA tile texel. Returns normalized [0,1] or -1.0 for nodata.
+float decodeWind(vec4 texel) {
+    if (texel.b > 0.5) return -1.0; // nodata
+    return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
+}
+
+// Sample wind vector at a mercator position. Returns wind in m/s or vec2(0) if nodata.
+vec2 sampleWind(vec2 pos) {
+    // Particle positions are in mercator [0,1] which maps directly to tile UV
+    float u0 = decodeWind(texture(u_windU, pos));
+    float v0 = decodeWind(texture(u_windV, pos));
+
+    if (u0 < 0.0 || v0 < 0.0) return vec2(0.0);
+
+    float valueRange = u_valueMax - u_valueMin;
+
+    if (u_temporalMix > 0.0) {
+        float u1 = decodeWind(texture(u_windUT1, pos));
+        float v1 = decodeWind(texture(u_windVT1, pos));
+        // If T1 is nodata, use T0 only
+        if (u1 >= 0.0 && v1 >= 0.0) {
+            u0 = mix(u0, u1, u_temporalMix);
+            v0 = mix(v0, v1, u_temporalMix);
+        }
+    }
+
+    // Denormalize from [0,1] to [valueMin, valueMax] (m/s)
+    float uWind = u0 * valueRange + u_valueMin;
+    float vWind = v0 * valueRange + u_valueMin;
+
+    return vec2(uWind, vWind);
+}
+
 // ── Main update ─────────────────────────────────────────────────────
 
 void main() {
@@ -46,14 +105,36 @@ void main() {
     float maxLife = 4.0;
     age += u_dt / maxLife;
 
-    // Random walk offset (placeholder — wind advection replaces this in wx-0pg.2)
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
-    vec2 rnd = hash2(seedOffset) * 2.0 - 1.0; // [-1, 1]
 
-    // ~0.001 in mercator units per frame ≈ visible gentle drift
-    float walkSpeed = 0.001;
-    lon += rnd.x * walkSpeed;
-    lat += rnd.y * walkSpeed;
+    if (u_hasWindData == 1) {
+        // Sample wind field at current particle position
+        vec2 wind = sampleWind(vec2(lon, lat));
+        float speed = length(wind);
+
+        if (speed > 0.001) {
+            // Advect by wind: convert m/s to mercator displacement
+            // u_speedScale converts physical velocity to mercator units/second
+            lon += wind.x * u_speedScale * u_dt;
+            lat -= wind.y * u_speedScale * u_dt; // Y is inverted in mercator
+
+            // Add slight random jitter for visual richness (1% of displacement)
+            vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
+            lon += rnd.x * speed * u_speedScale * u_dt * 0.01;
+            lat -= rnd.y * speed * u_speedScale * u_dt * 0.01;
+        } else {
+            // No wind at this location — gentle random drift
+            vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
+            lon += rnd.x * 0.0002;
+            lat += rnd.y * 0.0002;
+        }
+    } else {
+        // No wind data bound — random walk fallback
+        vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
+        float walkSpeed = 0.001;
+        lon += rnd.x * walkSpeed;
+        lat += rnd.y * walkSpeed;
+    }
 
     // Respawn if aged out or drifted outside viewport
     bool outOfBounds = lon < u_viewportBounds.x || lon > u_viewportBounds.z ||

@@ -58,6 +58,7 @@ from weatherman.ais.router import (
     shutdown_ais_tile_service,
 )
 from weatherman.ais.router import router as ais_tile_router
+from weatherman.ais.router import query_router as ais_query_router
 from weatherman.tiling.router import (
     CatalogLoader,
     init_tile_service,
@@ -322,6 +323,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(tile_router)
     app.include_router(ais_tile_router)
+    app.include_router(ais_query_router)
     app.include_router(edr_router)
     app.include_router(events_router)
 
