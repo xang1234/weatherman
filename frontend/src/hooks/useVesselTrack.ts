@@ -50,14 +50,16 @@ export function useVesselTrack({
         const geojson = await resp.json()
 
         if (controller.signal.aborted) return
-        if (!m!.getSource(TRACK_SOURCE_ID)) {
-          m!.addSource(TRACK_SOURCE_ID, {
-            type: 'geojson',
-            data: geojson,
-          })
-        }
 
-        // Track line layer — gradient from blue (old) to cyan (recent)
+        // Defensive: remove any stale layers before adding (race on rapid clicks)
+        removeTrack(m!)
+
+        m!.addSource(TRACK_SOURCE_ID, {
+          type: 'geojson',
+          data: geojson,
+        })
+
+        // Track line layer
         m!.addLayer({
           id: TRACK_LINE_LAYER_ID,
           type: 'line',
@@ -78,14 +80,12 @@ export function useVesselTrack({
         if (coords.length > 0) {
           const pointFeatures: GeoJSON.Feature[] = []
 
-          // Start point (green)
           pointFeatures.push({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: coords[0] },
             properties: { role: 'start' },
           })
 
-          // End point (red)
           if (coords.length > 1) {
             pointFeatures.push({
               type: 'Feature',
