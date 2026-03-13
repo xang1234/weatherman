@@ -108,7 +108,7 @@ function drain(): void {
   if (queue.length > 0 && inFlight.size >= maxConcurrent) {
     const bestQueued = queue[0] // Already sorted, so [0] is highest priority
     let worstKey: string | null = null
-    let worstPriority: TilePriority = -1 as TilePriority
+    let worstPriority = -1
 
     for (const [k, entry] of inFlight) {
       if (entry.priority > worstPriority) {
@@ -117,7 +117,7 @@ function drain(): void {
       }
     }
 
-    if (worstKey && bestQueued.priority < worstPriority) {
+    if (worstKey != null && bestQueued.priority < worstPriority) {
       // Cancel the lowest-priority in-flight to make room.
       // The cancelled tile is simply dropped — the main thread will
       // re-request it on the next frame if it's still needed.
