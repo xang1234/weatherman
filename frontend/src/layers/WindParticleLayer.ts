@@ -45,11 +45,10 @@ import {
   type TileCoord,
   type TileFormat,
 } from './TileManager'
+import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 
-/** Particles per axis in the state texture. */
-const STATE_SIZE = 256
-/** Total particle count: STATE_SIZE² = 65536. */
-const PARTICLE_COUNT = STATE_SIZE * STATE_SIZE
+/** Default particles per axis (used if no stateSize option and detection unavailable). */
+const DEFAULT_STATE_SIZE = 256
 /** Trail fade factor per frame. 0.95^60 ≈ 0.046 → ~2 second trails at 60fps. */
 const TRAIL_FADE = 0.95
 /**
@@ -62,6 +61,12 @@ const SPEED_SCALE = 0.000003
 /** Number of texture units used in the update pass (state + 4 wind tiles). */
 const UPDATE_TEX_UNITS = 5
 
+/** Frames of frame-time history for the performance watchdog. */
+const PERF_WINDOW = 60
+
+/** Frame time threshold in ms — if rolling average exceeds this, log a warning. */
+const PERF_WARN_THRESHOLD_MS = 20
+
 export interface WindParticleLayerOptions {
   /** Unique layer ID for MapLibre. */
   id?: string
@@ -71,6 +76,12 @@ export interface WindParticleLayerOptions {
   apiBase?: string
   /** Tile format: 'png' (default) or 'f16' (Float16 binary). */
   tileFormat?: TileFormat
+  /**
+   * Override particle state texture size (particles = stateSize²).
+   * Must be a power of 2. If omitted, auto-detected from GPU capability.
+   * Valid range: 64-1024.
+   */
+  stateSize?: number
 }
 
 export class WindParticleLayer implements CustomLayerInterface {
@@ -83,6 +94,12 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _opacity: number
   private _apiBase: string
   private _tileFormat: TileFormat
+
+  // ── Adaptive particle count ───────────────────────────────────────
+  private _stateSize: number
+  private _particleCount: number
+  private _gpuTier: GpuTier = 'medium'
+  private _stateSizeOverride: number | undefined
 
   // ── Wind data tile managers ─────────────────────────────────────────
   private _windUManager: TileManager | null = null
@@ -145,15 +162,21 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _trailWidth = 0
   private _trailHeight = 0
 
-  // ── Timing ──────────────────────────────────────────────────────────
+  // ── Timing & performance watchdog ──────────────────────────────────
   private _lastFrameTime = 0
   private _frameCount = 0
+  private _frameTimes: number[] = []
+  private _perfWarned = false
 
   constructor(options: WindParticleLayerOptions = {}) {
     this.id = options.id ?? 'wind-particles'
     this._opacity = options.opacity ?? 1.0
     this._apiBase = options.apiBase ?? ''
     this._tileFormat = options.tileFormat ?? 'png'
+    this._stateSizeOverride = options.stateSize
+    // Temporary defaults — overwritten by GPU detection in onAdd()
+    this._stateSize = DEFAULT_STATE_SIZE
+    this._particleCount = DEFAULT_STATE_SIZE * DEFAULT_STATE_SIZE
   }
 
   // ── CustomLayerInterface ────────────────────────────────────────────
@@ -172,6 +195,20 @@ export class WindParticleLayer implements CustomLayerInterface {
       console.error('[WindParticleLayer] EXT_color_buffer_float not supported')
       return
     }
+
+    // ── Adaptive particle count: detect GPU tier ──
+    if (this._stateSizeOverride != null) {
+      this._stateSize = clampStateSize(this._stateSizeOverride)
+    } else {
+      const tier = detectGpuTier(gl)
+      this._gpuTier = tier.tier
+      this._stateSize = tier.stateSize
+      console.info(
+        `[WindParticleLayer] GPU: "${tier.renderer}" → tier=${tier.tier}, ` +
+        `stateSize=${tier.stateSize} (${tier.stateSize ** 2} particles)`
+      )
+    }
+    this._particleCount = this._stateSize * this._stateSize
 
     try {
       this._initResources(gl)
@@ -195,11 +232,29 @@ export class WindParticleLayer implements CustomLayerInterface {
       return
     }
 
-    // ── Timing ──
+    // ── Timing & performance watchdog ──
     const now = performance.now() / 1000
     const dt = this._lastFrameTime > 0 ? Math.min(now - this._lastFrameTime, 0.1) : 0.016
     this._lastFrameTime = now
     this._frameCount++
+
+    // Track frame times for performance monitoring
+    const frameTimeMs = dt * 1000
+    this._frameTimes.push(frameTimeMs)
+    if (this._frameTimes.length > PERF_WINDOW) {
+      this._frameTimes.shift()
+    }
+    if (!this._perfWarned && this._frameTimes.length === PERF_WINDOW) {
+      const avg = this._frameTimes.reduce((a, b) => a + b, 0) / PERF_WINDOW
+      if (avg > PERF_WARN_THRESHOLD_MS) {
+        console.warn(
+          `[WindParticleLayer] Low FPS detected: avg frame time ${avg.toFixed(1)}ms ` +
+          `(${(1000 / avg).toFixed(0)} fps) with ${this._particleCount} particles ` +
+          `(tier=${this._gpuTier}). Consider reducing stateSize.`
+        )
+        this._perfWarned = true
+      }
+    }
 
     // ── Update wind tile managers with current viewport ──
     const zoom = Math.max(0, Math.min(8, Math.floor(this._map.getZoom())))
@@ -275,7 +330,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const stateWrite = 1 - stateRead
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._stateFbos[stateWrite])
-    gl.viewport(0, 0, STATE_SIZE, STATE_SIZE)
+    gl.viewport(0, 0, this._stateSize, this._stateSize)
     gl.disable(gl.BLEND)
 
     gl.useProgram(this._updateProgram.program)
@@ -370,7 +425,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform1f(this._uDrawPointSize, pointSize)
 
     gl.bindVertexArray(this._drawVao)
-    gl.drawArrays(gl.POINTS, 0, PARTICLE_COUNT)
+    gl.drawArrays(gl.POINTS, 0, this._particleCount)
     gl.bindVertexArray(null)
 
     this._trailReadIndex = trailWrite
@@ -472,12 +527,17 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   /** State texture dimensions. */
   get stateSize(): number {
-    return STATE_SIZE
+    return this._stateSize
   }
 
   /** Total particle count. */
   get particleCount(): number {
-    return PARTICLE_COUNT
+    return this._particleCount
+  }
+
+  /** Detected or configured GPU tier. */
+  get gpuTier(): GpuTier {
+    return this._gpuTier
   }
 
   /** Update overlay opacity at runtime. */
@@ -572,13 +632,13 @@ export class WindParticleLayer implements CustomLayerInterface {
     // Trail textures are created lazily on first render (need canvas size)
   }
 
-  /** Create an RGBA32F texture at STATE_SIZE × STATE_SIZE. */
+  /** Create an RGBA32F texture at stateSize × stateSize. */
   private _createStateTexture(gl: WebGL2RenderingContext): WebGLTexture {
     const tex = gl.createTexture()
     if (!tex) throw new Error('Failed to create state texture')
 
     gl.bindTexture(gl.TEXTURE_2D, tex)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, STATE_SIZE, STATE_SIZE, 0, gl.RGBA, gl.FLOAT, null)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this._stateSize, this._stateSize, 0, gl.RGBA, gl.FLOAT, null)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -589,8 +649,8 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   /** Fill state texture with random particle positions. */
   private _initializeParticles(gl: WebGL2RenderingContext, tex: WebGLTexture): void {
-    const data = new Float32Array(PARTICLE_COUNT * 4)
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const data = new Float32Array(this._particleCount * 4)
+    for (let i = 0; i < this._particleCount; i++) {
       const offset = i * 4
       data[offset + 0] = Math.random()  // lon [0,1]
       data[offset + 1] = Math.random()  // lat [0,1]
@@ -598,7 +658,7 @@ export class WindParticleLayer implements CustomLayerInterface {
       data[offset + 3] = 1.0            // reserved
     }
     gl.bindTexture(gl.TEXTURE_2D, tex)
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, STATE_SIZE, STATE_SIZE, gl.RGBA, gl.FLOAT, data)
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this._stateSize, this._stateSize, gl.RGBA, gl.FLOAT, data)
     gl.bindTexture(gl.TEXTURE_2D, null)
   }
 

@@ -2,8 +2,9 @@
  * React hook for the GPU wind-particle animation layer.
  *
  * Creates a WindParticleLayer (MapLibre custom layer) that renders
- * 65K GPU-advected particles using wind U/V data tiles. Particles
- * are advected by the actual wind field and leave fading trails.
+ * GPU-advected particles using wind U/V data tiles. Particle count
+ * is auto-adapted to the device GPU (16K-262K particles).
+ * Particles are advected by the actual wind field and leave fading trails.
  *
  * Only active when the current weather layer is wind_speed.
  */
