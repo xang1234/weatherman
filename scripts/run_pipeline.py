@@ -40,7 +40,7 @@ from weatherman.ingest.gfs import (
 )
 from weatherman.processing.cog import grib2_to_cog, wind_speed_to_cog
 from weatherman.processing.data_tiles import generate_all_data_tiles
-from weatherman.storage.catalog import RunCatalog
+from weatherman.storage.catalog import RunCatalog, RunStatus
 from weatherman.storage.lifecycle import DuplicateRun, RunLifecycle, RunState
 from weatherman.storage.manifest import (
     LayerConfig,
@@ -465,6 +465,19 @@ def main() -> None:
 
     store = LocalObjectStore(data_dir)
     layout = StorageLayout("gfs")
+
+    # Skip pipeline if this run is already published
+    catalog_path = layout.catalog_path
+    if store.exists(catalog_path):
+        catalog = RunCatalog.from_json(store.read_bytes(catalog_path).decode("utf-8"))
+        entry = catalog.get_entry(run_id)
+        if entry is not None and entry.status in (RunStatus.PUBLISHED, RunStatus.SUPERSEDED):
+            logger.info(
+                "Run %s already exists in catalog (status: %s) — skipping pipeline.",
+                run_id,
+                entry.status.value,
+            )
+            sys.exit(0)
 
     # Store GRIB2 files persistently so they survive container restarts.
     # Individual files are cache-checked in download_variable().
