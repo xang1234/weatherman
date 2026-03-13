@@ -44,6 +44,14 @@ uniform vec4 u_viewportBounds; // (minLon, minLat, maxLon, maxLat)
 in vec2 v_uv;
 out vec4 fragColor;
 
+// ── Nodata sentinel ────────────────────────────────────────────────
+// Must be far below any valid physical wind value (-50 m/s).
+const float NODATA = -99999.0;
+bool isNodata(float v) { return v < -99000.0; }
+
+// Nodata threshold for Float16 tiles (backend writes -9999.0).
+const float F16_NODATA_THRESH = -9000.0;
+
 // ── Pseudo-random hash ──────────────────────────────────────────────
 // Based on Wang hash — gives decorrelated values per texel per frame.
 
@@ -62,18 +70,15 @@ vec2 hash2(vec2 p) {
 
 // ── Wind field sampling ─────────────────────────────────────────────
 
-// Nodata sentinel threshold for Float16 tiles.
-const float F16_NODATA_THRESH = -9000.0;
-
 // Decode wind tile texel. Returns normalized [0,1] (PNG) or physical m/s (Float16),
-// or -1.0 for nodata.
+// or NODATA sentinel for missing data.
 float decodeWind(vec4 texel) {
     if (u_isFloat16 == 1) {
         float val = texel.r;
-        if (val < F16_NODATA_THRESH) return -1.0;
+        if (val < F16_NODATA_THRESH) return NODATA;
         return val;
     }
-    if (texel.b > 0.5) return -1.0;
+    if (texel.b > 0.5) return NODATA;
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
@@ -83,13 +88,13 @@ vec2 sampleWind(vec2 pos) {
     float u0 = decodeWind(texture(u_windU, pos));
     float v0 = decodeWind(texture(u_windV, pos));
 
-    if (u0 < 0.0 || v0 < 0.0) return vec2(0.0);
+    if (isNodata(u0) || isNodata(v0)) return vec2(0.0);
 
     if (u_temporalMix > 0.0) {
         float u1 = decodeWind(texture(u_windUT1, pos));
         float v1 = decodeWind(texture(u_windVT1, pos));
         // If T1 is nodata, use T0 only
-        if (u1 >= 0.0 && v1 >= 0.0) {
+        if (!isNodata(u1) && !isNodata(v1)) {
             u0 = mix(u0, u1, u_temporalMix);
             v0 = mix(v0, v1, u_temporalMix);
         }

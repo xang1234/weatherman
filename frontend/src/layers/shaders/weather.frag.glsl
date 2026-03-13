@@ -47,21 +47,30 @@ uniform int u_isFloat16;
 
 out vec4 fragColor;
 
-// Nodata sentinel for Float16 tiles (-9999.0, check with margin for f16 rounding).
+// ── Nodata sentinel ────────────────────────────────────────────────
+// Used as the out-of-band signal for "no data at this texel".
+// Must be far below any valid physical value (wind: -50 m/s,
+// temperature: -55°C, pressure: 92000 Pa). -99999.0 is safe.
+const float NODATA = -99999.0;
+
+// Check if a value is the nodata sentinel.
+bool isNodata(float v) { return v < -99000.0; }
+
+// Nodata threshold for Float16 tiles (backend writes -9999.0).
 const float F16_NODATA_THRESH = -9000.0;
 
 // Decode a texel based on tile format.
-// PNG mode: returns normalized [0,1], or -1.0 for nodata.
-// Float16 mode: returns physical value directly, or -1.0 for nodata.
+// PNG mode: returns normalized [0,1], or NODATA for missing data.
+// Float16 mode: returns physical value directly, or NODATA for missing data.
 float decodeValue(vec4 texel) {
     if (u_isFloat16 == 1) {
         // R16F texture: physical value in .r channel
         float val = texel.r;
-        if (val < F16_NODATA_THRESH) return -1.0;
+        if (val < F16_NODATA_THRESH) return NODATA;
         return val;
     }
     // PNG: 16-bit uint packed in R (low) + G (high), B = nodata flag
-    if (texel.b > 0.5) return -1.0;
+    if (texel.b > 0.5) return NODATA;
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
@@ -100,14 +109,14 @@ float sampleBilinear(sampler2D tex, vec2 uv) {
     float totalWeight = 0.0;
     float result = 0.0;
     for (int i = 0; i < 4; i++) {
-        if (vals[i] >= 0.0) {
+        if (!isNodata(vals[i])) {
             result += vals[i] * weights[i];
             totalWeight += weights[i];
         }
     }
 
     // All 4 neighbors are nodata — signal nodata upstream
-    if (totalWeight == 0.0) return -1.0;
+    if (totalWeight == 0.0) return NODATA;
 
     return result / totalWeight;
 }
@@ -118,7 +127,7 @@ float sampleBilinear(sampler2D tex, vec2 uv) {
 // For non-ocean layers, this is a zero-cost pass-through.
 float sampleWithFallback(sampler2D tex, vec2 uv) {
     float val = sampleBilinear(tex, uv);
-    if (val >= 0.0 || u_oceanOnly == 0) return val;
+    if (!isNodata(val) || u_oceanOnly == 0) return val;
 
     // Try 8 neighbors at 1-texel offset
     vec2 size = vec2(textureSize(tex, 0));
@@ -129,22 +138,22 @@ float sampleWithFallback(sampler2D tex, vec2 uv) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
             float nv = decodeValue(texture(tex, uv + vec2(float(dx), float(dy)) * step));
-            if (nv >= 0.0) {
+            if (!isNodata(nv)) {
                 total += nv;
                 count += 1.0;
             }
         }
     }
-    if (count == 0.0) return -1.0;
+    if (count == 0.0) return NODATA;
     return total / count;
 }
 
 // Interpolate a scalar value between T0 and T1 with nodata handling.
-// Returns -1.0 if both are nodata.
+// Returns NODATA if both are nodata.
 float temporalBlend(float v0, float v1) {
-    if (v0 < 0.0 && v1 < 0.0) return -1.0;
-    if (v0 < 0.0) return v1;
-    if (v1 < 0.0) return v0;
+    if (isNodata(v0) && isNodata(v1)) return NODATA;
+    if (isNodata(v0)) return v1;
+    if (isNodata(v1)) return v0;
     return mix(v0, v1, u_temporalMix);
 }
 
@@ -172,12 +181,12 @@ void main() {
         float v0 = sampleWithFallback(u_dataTileV, v_uv);
 
         // Both components must be valid for a valid wind vector
-        if (u0 < 0.0 || v0 < 0.0) {
+        if (isNodata(u0) || isNodata(v0)) {
             if (u_temporalMix <= 0.0) discard;
             // Try T1 before discarding
             float u1 = sampleWithFallback(u_dataTileT1, v_uv);
             float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
-            if (u1 < 0.0 || v1 < 0.0) discard;
+            if (isNodata(u1) || isNodata(v1)) discard;
             float uWind = toPhysical(u1);
             float vWind = toPhysical(v1);
             float speed = sqrt(uWind * uWind + vWind * vWind);
@@ -203,12 +212,12 @@ void main() {
 
         if (u_temporalMix > 0.0) {
             float v1 = sampleWithFallback(u_dataTileT1, v_uv);
-            if (v0 < 0.0 && v1 < 0.0) discard;
-            if (v0 < 0.0) v0 = v1;
-            else if (v1 >= 0.0) v0 = mix(v0, v1, u_temporalMix);
+            if (isNodata(v0) && isNodata(v1)) discard;
+            if (isNodata(v0)) v0 = v1;
+            else if (!isNodata(v1)) v0 = mix(v0, v1, u_temporalMix);
             // else keep v0
         } else {
-            if (v0 < 0.0) discard;
+            if (isNodata(v0)) discard;
         }
 
         // In Float16 mode, v0 is physical — normalize for color ramp.

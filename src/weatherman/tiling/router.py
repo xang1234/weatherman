@@ -275,6 +275,15 @@ class TileService:
         encoded as -9999.0. No value range header is needed since physical
         values are stored directly.
         """
+        # Validate layer name
+        try:
+            get_value_range(layer)
+        except KeyError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
+            )
+
         # Request raw float32 data from TiTiler
         params: dict[str, str] = {
             "url": cog_uri,
