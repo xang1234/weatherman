@@ -290,8 +290,8 @@ export class TileManager {
   }
 
   /** Build a worker-namespaced key to avoid collisions between managers. */
-  private _workerKey(tileKey: string): string {
-    return `${this._id}:${tileKey}`
+  private _workerKey(localKey: string): string {
+    return `${this._id}:${localKey}`
   }
 
   /** Extract the tile key from a worker-namespaced key, or null if not ours. */
@@ -344,25 +344,31 @@ export class TileManager {
     const client = this._fetchClient!
 
     this._unsubLoaded = client.addLoadedListener((result: TileFetchResult) => {
-      const tileKey = this._parseWorkerKey(result.key)
-      if (!tileKey) return // Not our namespace
-      const texture = this._pendingWorker.get(tileKey)
-      if (!texture) return // Not our tile (already cleared/cancelled)
+      const localKey = this._parseWorkerKey(result.key)
+      if (!localKey) return // Not our namespace
+      const texture = this._pendingWorker.get(localKey)
+      if (!texture) {
+        // Tile was cancelled/cleared while in-flight — free transferred data
+        if (result.format === 'png' && result.data instanceof ImageBitmap) {
+          result.data.close()
+        }
+        return
+      }
 
-      this._pendingWorker.delete(tileKey)
-      this._uploadWorkerResult(tileKey, texture, result)
+      this._pendingWorker.delete(localKey)
+      this._uploadWorkerResult(localKey, texture, result)
     })
 
     this._unsubError = client.addErrorListener((error: TileFetchError) => {
-      const tileKey = this._parseWorkerKey(error.key)
-      if (!tileKey) return
-      const texture = this._pendingWorker.get(tileKey)
+      const localKey = this._parseWorkerKey(error.key)
+      if (!localKey) return
+      const texture = this._pendingWorker.get(localKey)
       if (!texture) return
 
-      this._pendingWorker.delete(tileKey)
-      console.warn(`[TileManager] Worker fetch failed: ${tileKey} — ${error.error}`)
-      this._tiles.set(tileKey, {
-        key: tileKey,
+      this._pendingWorker.delete(localKey)
+      console.warn(`[TileManager] Worker fetch failed: ${localKey} — ${error.error}`)
+      this._tiles.set(localKey, {
+        key: localKey,
         texture,
         state: 'error',
         lastAccess: ++this._accessCounter,
