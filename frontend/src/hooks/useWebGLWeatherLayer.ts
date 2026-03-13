@@ -51,9 +51,11 @@ export function useWebGLWeatherLayer({
     const m = map.current
     if (!m || !isLoaded) return
 
+    const tileFormat = import.meta.env.VITE_USE_FLOAT16_TILES === 'true' ? 'f16' as const : 'png' as const
     const glLayer = new WeatherGLLayer({
       id: 'weather-gl',
       apiBase,
+      tileFormat,
     })
     layerRef.current = glLayer
 

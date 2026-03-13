@@ -43,6 +43,7 @@ import {
   TileManager,
   computeVisibleTiles,
   type TileCoord,
+  type TileFormat,
 } from './TileManager'
 
 /** Particles per axis in the state texture. */
@@ -68,6 +69,8 @@ export interface WindParticleLayerOptions {
   opacity?: number
   /** Base URL for the data tile API. Default: '' (same-origin). */
   apiBase?: string
+  /** Tile format: 'png' (default) or 'f16' (Float16 binary). */
+  tileFormat?: TileFormat
 }
 
 export class WindParticleLayer implements CustomLayerInterface {
@@ -79,6 +82,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _gl: WebGL2RenderingContext | null = null
   private _opacity: number
   private _apiBase: string
+  private _tileFormat: TileFormat
 
   // ── Wind data tile managers ─────────────────────────────────────────
   private _windUManager: TileManager | null = null
@@ -110,6 +114,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _uUpdateWindVT1: WebGLUniformLocation | null = null
   private _uUpdateTemporalMix: WebGLUniformLocation | null = null
   private _uUpdateHasWindData: WebGLUniformLocation | null = null
+  private _uUpdateIsFloat16: WebGLUniformLocation | null = null
   private _uUpdateValueMin: WebGLUniformLocation | null = null
   private _uUpdateValueMax: WebGLUniformLocation | null = null
   private _uUpdateSpeedScale: WebGLUniformLocation | null = null
@@ -148,6 +153,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.id = options.id ?? 'wind-particles'
     this._opacity = options.opacity ?? 1.0
     this._apiBase = options.apiBase ?? ''
+    this._tileFormat = options.tileFormat ?? 'png'
   }
 
   // ── CustomLayerInterface ────────────────────────────────────────────
@@ -299,6 +305,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     // Set uniforms
     gl.uniform1f(this._uUpdateTemporalMix, hasWindData && windUT1Tex && windVT1Tex ? this._temporalMix : 0)
     gl.uniform1i(this._uUpdateHasWindData, hasWindData ? 1 : 0)
+    gl.uniform1i(this._uUpdateIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
     gl.uniform1f(this._uUpdateValueMin, this._valueMin)
     gl.uniform1f(this._uUpdateValueMax, this._valueMax)
     gl.uniform1f(this._uUpdateSpeedScale, SPEED_SCALE)
@@ -499,13 +506,14 @@ export class WindParticleLayer implements CustomLayerInterface {
   /** Create tile managers for wind data fetching. */
   private _initTileManagers(gl: WebGL2RenderingContext): void {
     const triggerRepaint = () => this._map?.triggerRepaint()
-    this._windUManager = new TileManager(gl, { apiBase: this._apiBase })
+    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat }
+    this._windUManager = new TileManager(gl, tmOpts)
     this._windUManager.onTileLoaded = triggerRepaint
-    this._windVManager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windVManager = new TileManager(gl, tmOpts)
     this._windVManager.onTileLoaded = triggerRepaint
-    this._windUT1Manager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windUT1Manager = new TileManager(gl, tmOpts)
     this._windUT1Manager.onTileLoaded = triggerRepaint
-    this._windVT1Manager = new TileManager(gl, { apiBase: this._apiBase })
+    this._windVT1Manager = new TileManager(gl, tmOpts)
     this._windVT1Manager.onTileLoaded = triggerRepaint
   }
 
@@ -532,6 +540,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateWindVT1 = gl.getUniformLocation(up, 'u_windVT1')
     this._uUpdateTemporalMix = gl.getUniformLocation(up, 'u_temporalMix')
     this._uUpdateHasWindData = gl.getUniformLocation(up, 'u_hasWindData')
+    this._uUpdateIsFloat16 = gl.getUniformLocation(up, 'u_isFloat16')
     this._uUpdateValueMin = gl.getUniformLocation(up, 'u_valueMin')
     this._uUpdateValueMax = gl.getUniformLocation(up, 'u_valueMax')
     this._uUpdateSpeedScale = gl.getUniformLocation(up, 'u_speedScale')
@@ -734,6 +743,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateWindVT1 = null
     this._uUpdateTemporalMix = null
     this._uUpdateHasWindData = null
+    this._uUpdateIsFloat16 = null
     this._uUpdateValueMin = null
     this._uUpdateValueMax = null
     this._uUpdateSpeedScale = null

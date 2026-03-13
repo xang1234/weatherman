@@ -1,18 +1,22 @@
 /**
  * WebGL tile manager for data-encoded weather tiles.
  *
- * Manages the lifecycle of fetching data tile PNGs and uploading them
- * as WebGL textures. Handles tile URL construction, Image-based fetch,
- * texture upload, LRU eviction, and provides texture lookups for the
- * weather fragment shader.
+ * Manages the lifecycle of fetching data tiles and uploading them
+ * as WebGL textures. Handles tile URL construction, fetch, texture upload,
+ * LRU eviction, and provides texture lookups for the weather fragment shader.
  *
- * Data tiles are RGBA PNGs where float32 values are encoded as:
- *   R = low byte of uint16, G = high byte, B = nodata flag (0xFF), A = 0xFF
- * The shader decodes these back to physical values on the GPU.
+ * Supports two tile formats:
+ *   - **PNG** (default): RGBA where float32 values are encoded as 16-bit uint
+ *     in R (low) + G (high), B = nodata flag. Shader decodes manually.
+ *   - **Float16**: Raw IEEE 754 half-precision binary. Uploaded as R16F
+ *     textures with physical values stored directly. Nodata = -9999.0.
  */
 
 /** Loading state for a single tile. */
 export type TileState = 'pending' | 'loaded' | 'error'
+
+/** Tile data format. */
+export type TileFormat = 'png' | 'f16'
 
 /** A single cached tile with its WebGL texture and metadata. */
 interface TileEntry {
@@ -35,6 +39,8 @@ export interface TileManagerOptions {
   apiBase?: string
   /** Maximum number of textures to keep in GPU memory. Default: 128. */
   maxTextures?: number
+  /** Tile format: 'png' (default) or 'f16' (Float16 binary). */
+  format?: TileFormat
 }
 
 /**
@@ -51,6 +57,7 @@ export class TileManager {
   private _gl: WebGL2RenderingContext
   private _apiBase: string
   private _maxTextures: number
+  private _format: TileFormat
 
   /** Current dataset parameters. Changing these invalidates the cache. */
   private _model = ''
@@ -71,13 +78,22 @@ export class TileManager {
   /** In-flight fetches keyed by tile key, with Image + texture refs for cleanup. */
   private _pending = new Map<string, { image: HTMLImageElement; texture: WebGLTexture }>()
 
+  /** In-flight Float16 fetches with AbortController for cancellation. */
+  private _pendingF16 = new Map<string, { abort: AbortController; texture: WebGLTexture }>()
+
   /** Callback invoked when a tile finishes loading (for triggering repaint). */
   onTileLoaded: (() => void) | null = null
+
+  /** Whether this manager fetches Float16 binary tiles. */
+  get isFloat16(): boolean {
+    return this._format === 'f16'
+  }
 
   constructor(gl: WebGL2RenderingContext, options: TileManagerOptions = {}) {
     this._gl = gl
     this._apiBase = options.apiBase ?? ''
     this._maxTextures = options.maxTextures ?? 128
+    this._format = options.format ?? 'png'
   }
 
   /**
@@ -115,7 +131,7 @@ export class TileManager {
         existing.lastAccess = ++this._accessCounter
         continue
       }
-      if (this._pending.has(key)) continue
+      if (this._pending.has(key) || this._pendingF16.has(key)) continue
       this._fetchTile(z, x, y)
     }
     this._evict()
@@ -151,13 +167,13 @@ export class TileManager {
   /** Get the loading state for a tile. */
   getTileState(z: number, x: number, y: number): TileState | null {
     const key = tileKey(z, x, y)
-    if (this._pending.has(key)) return 'pending'
+    if (this._pending.has(key) || this._pendingF16.has(key)) return 'pending'
     return this._tiles.get(key)?.state ?? null
   }
 
   /** Returns true if any tiles are currently loading. */
   get isLoading(): boolean {
-    return this._pending.size > 0
+    return this._pending.size > 0 || this._pendingF16.size > 0
   }
 
   /** Number of textures currently cached. */
@@ -186,6 +202,13 @@ export class TileManager {
     }
     this._pending.clear()
 
+    // Abort in-flight Float16 fetches
+    for (const { abort, texture } of this._pendingF16.values()) {
+      abort.abort()
+      this._gl.deleteTexture(texture)
+    }
+    this._pendingF16.clear()
+
     // Delete all cached textures
     for (const entry of this._tiles.values()) {
       this._gl.deleteTexture(entry.texture)
@@ -204,10 +227,98 @@ export class TileManager {
   // ── Private ──────────────────────────────────────────────────────
 
   private _buildUrl(z: number, x: number, y: number): string {
-    return `${this._apiBase}/tiles/${this._model}/${this._runId}/${this._layer}/${this._forecastHour}/data/${z}/${x}/${y}.png`
+    const ext = this._format === 'f16' ? 'bin' : 'png'
+    return `${this._apiBase}/tiles/${this._model}/${this._runId}/${this._layer}/${this._forecastHour}/data/${z}/${x}/${y}.${ext}`
   }
 
   private _fetchTile(z: number, x: number, y: number): void {
+    if (this._format === 'f16') {
+      this._fetchTileF16(z, x, y)
+    } else {
+      this._fetchTilePng(z, x, y)
+    }
+  }
+
+  /** Fetch a Float16 binary tile and upload as R16F texture. */
+  private _fetchTileF16(z: number, x: number, y: number): void {
+    const key = tileKey(z, x, y)
+    const gl = this._gl
+    const url = this._buildUrl(z, x, y)
+
+    const texture = gl.createTexture()
+    if (!texture) return
+
+    // Initialize with 1x1 placeholder (R16F)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.R16F,
+      1, 1, 0,
+      gl.RED, gl.HALF_FLOAT,
+      new Uint16Array([0]),
+    )
+    // GL_NEAREST — manual bilinear in shader for nodata handling
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+
+    const abort = new AbortController()
+    this._pendingF16.set(key, { abort, texture })
+
+    fetch(url, { signal: abort.signal })
+      .then(resp => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        return resp.arrayBuffer()
+      })
+      .then(buffer => {
+        if (!this._pendingF16.has(key)) {
+          gl.deleteTexture(texture)
+          return
+        }
+        this._pendingF16.delete(key)
+
+        // Determine tile dimensions from buffer size (assumes square tiles)
+        const pixelCount = buffer.byteLength / 2  // 2 bytes per float16
+        const side = Math.sqrt(pixelCount)
+        if (side !== Math.floor(side)) {
+          console.warn(`[TileManager] Float16 tile has non-square size: ${pixelCount} pixels`)
+          this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+          return
+        }
+
+        // Upload Float16 data as R16F texture
+        gl.bindTexture(gl.TEXTURE_2D, texture)
+        gl.texImage2D(
+          gl.TEXTURE_2D, 0, gl.R16F,
+          side, side, 0,
+          gl.RED, gl.HALF_FLOAT,
+          new Uint16Array(buffer),
+        )
+        gl.bindTexture(gl.TEXTURE_2D, null)
+
+        this._tiles.set(key, {
+          key,
+          texture,
+          state: 'loaded',
+          lastAccess: ++this._accessCounter,
+        })
+        this.onTileLoaded?.()
+      })
+      .catch(err => {
+        if (err.name === 'AbortError') return
+        console.warn(`[TileManager] Failed to load Float16 tile: ${url}`, err)
+        if (!this._pendingF16.has(key)) {
+          gl.deleteTexture(texture)
+          return
+        }
+        this._pendingF16.delete(key)
+        this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+      })
+  }
+
+  /** Fetch a PNG data tile and upload as RGBA texture (original path). */
+  private _fetchTilePng(z: number, x: number, y: number): void {
     const key = tileKey(z, x, y)
     const gl = this._gl
     const url = this._buildUrl(z, x, y)

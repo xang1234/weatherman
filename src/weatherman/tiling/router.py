@@ -24,7 +24,7 @@ from weatherman.storage.paths import RunID, StorageLayout
 from weatherman.processing.data_tiles import MAX_DATA_TILE_ZOOM
 from weatherman.storage.object_store import ObjectStore
 from weatherman.tiling.colormaps import COLORMAPS, export_color_ramps, get_colormap, get_value_range
-from weatherman.tiling.data_encoder import encode_float_to_rgba, rgba_to_png_bytes
+from weatherman.tiling.data_encoder import encode_float_to_f16, encode_float_to_rgba, rgba_to_png_bytes
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
 
@@ -258,6 +258,75 @@ class TileService:
             },
         )
 
+    async def fetch_data_tile_f16(
+        self,
+        cog_uri: str,
+        layer: str,
+        z: int,
+        x: int,
+        y: int,
+        *,
+        is_latest: bool = False,
+    ) -> Response:
+        """Fetch raw float data and return as Float16 binary.
+
+        Returns a flat buffer of IEEE 754 half-precision floats (little-endian),
+        suitable for direct upload to a WebGL2 R16F texture. Nodata pixels are
+        encoded as -9999.0. No value range header is needed since physical
+        values are stored directly.
+        """
+        # Request raw float32 data from TiTiler
+        params: dict[str, str] = {
+            "url": cog_uri,
+            "resampling": "bilinear",
+        }
+
+        titiler_path = (
+            f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}"
+            f"@1x.tif"
+        )
+
+        try:
+            resp = await self._client.get(titiler_path, params=params)
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="TiTiler request timed out")
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"TiTiler unreachable: {exc}"
+            ) from exc
+
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Tile not found")
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"TiTiler returned {resp.status_code}",
+            )
+
+        try:
+            with rasterio.io.MemoryFile(resp.content) as memfile:
+                with memfile.open() as dataset:
+                    data = dataset.read(1).astype("float32")
+                    nodata = dataset.nodata
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to decode TiTiler response: {exc}",
+            ) from exc
+
+        f16_bytes = encode_float_to_f16(data, nodata=nodata)
+
+        cache_control = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
+        return Response(
+            content=f16_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": cache_control,
+                "X-Tile-Format": "float16",
+                "X-Tile-Size": f"{data.shape[1]},{data.shape[0]}",
+            },
+        )
+
     def build_tilejson(
         self,
         layer: str,
@@ -410,6 +479,39 @@ async def get_data_tile(
         model=model,
         run_id=resolved_run_id,
         forecast_hour=forecast_hour,
+    )
+
+
+@router.get(
+    "/{model}/{run_id}/{layer}/{forecast_hour}/data/{z}/{x}/{y}.bin",
+    summary="Get a high-fidelity Float16 data tile",
+    response_class=Response,
+)
+async def get_data_tile_f16(
+    model: str,
+    run_id: str,
+    layer: str,
+    forecast_hour: Annotated[int, Path(ge=0)],
+    z: int,
+    x: int,
+    y: int,
+    svc: TileService = Depends(get_tile_service),
+) -> Response:
+    """Serve a Float16 binary data tile for high-fidelity GPU rendering.
+
+    Returns raw IEEE 754 half-precision floats (little-endian) as
+    application/octet-stream. Physical values are stored directly with
+    no normalization — the GPU reads them as R16F textures. Nodata
+    pixels contain -9999.0.
+
+    Supports 'latest' as run_id.
+    """
+    is_latest = run_id == "latest"
+    resolved_run_id = svc.resolve_run_id(model, run_id)
+    cog_uri = svc.cog_s3_uri(model, resolved_run_id, layer, forecast_hour)
+    return await svc.fetch_data_tile_f16(
+        cog_uri, layer, z, x, y,
+        is_latest=is_latest,
     )
 
 

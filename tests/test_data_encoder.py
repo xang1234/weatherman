@@ -1,10 +1,13 @@
-"""Tests for the float-to-RGBA data tile encoder."""
+"""Tests for the float-to-RGBA data tile encoder and Float16 binary encoder."""
 
 import numpy as np
 import pytest
 
 from weatherman.tiling.data_encoder import (
+    FLOAT16_NODATA,
+    decode_f16_to_float,
     decode_rgba_to_float,
+    encode_float_to_f16,
     encode_float_to_rgba,
     rgba_to_png_bytes,
 )
@@ -114,6 +117,76 @@ class TestRoundTrip:
         decoded, mask = self._round_trip(data, 0.0, 10.0)
         expected_mask = np.isnan(data)
         np.testing.assert_array_equal(mask, expected_mask)
+
+
+class TestEncodeFloatToF16:
+    def test_basic_encoding_size(self):
+        data = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+        buf = encode_float_to_f16(data)
+        assert len(buf) == 2 * 2 * 2  # H * W * 2 bytes per float16
+
+    def test_nan_encoded_as_sentinel(self):
+        data = np.array([[1.0, np.nan], [2.0, 3.0]], dtype=np.float32)
+        buf = encode_float_to_f16(data)
+        arr = np.frombuffer(buf, dtype=np.float16).reshape(2, 2)
+        assert arr[0, 1] == np.float16(FLOAT16_NODATA)
+        assert arr[0, 0] != np.float16(FLOAT16_NODATA)
+
+    def test_explicit_nodata_sentinel(self):
+        data = np.array([[1.0, -9999.0], [2.0, 3.0]], dtype=np.float32)
+        buf = encode_float_to_f16(data, nodata=-9999.0)
+        arr = np.frombuffer(buf, dtype=np.float16).reshape(2, 2)
+        assert arr[0, 1] == np.float16(FLOAT16_NODATA)
+
+    def test_physical_values_preserved(self):
+        """Float16 stores physical values directly — no normalization."""
+        data = np.array([[0.5, -25.3, 49.9]], dtype=np.float32)
+        buf = encode_float_to_f16(data)
+        arr = np.frombuffer(buf, dtype=np.float16).reshape(1, 3)
+        # Float16 precision: values should be very close (within f16 rounding)
+        np.testing.assert_allclose(arr.astype(np.float32), data, rtol=1e-2)
+
+
+class TestF16RoundTrip:
+    def test_wind_round_trip(self):
+        """Wind U/V range: -50 to +50 m/s."""
+        rng = np.random.default_rng(42)
+        data = rng.uniform(-50.0, 50.0, size=(64, 64)).astype(np.float32)
+        buf = encode_float_to_f16(data)
+        decoded, mask = decode_f16_to_float(buf, 64, 64)
+        assert not np.any(mask)
+        # Float16 has ~0.03 m/s precision at 50 m/s, much better near 0
+        max_error = np.max(np.abs(decoded - data))
+        assert max_error < 0.1, f"Max error {max_error} exceeds 0.1 m/s"
+
+    def test_light_wind_precision(self):
+        """Float16 should have much better precision near zero than 8-bit PNG."""
+        rng = np.random.default_rng(43)
+        data = rng.uniform(-1.0, 1.0, size=(64, 64)).astype(np.float32)
+        buf = encode_float_to_f16(data)
+        decoded, mask = decode_f16_to_float(buf, 64, 64)
+        assert not np.any(mask)
+        max_error = np.max(np.abs(decoded - data))
+        # Float16 near zero: precision ~0.001 m/s (much better than PNG's ~0.0015)
+        assert max_error < 0.002, f"Max error {max_error} for light winds"
+
+    def test_nodata_survives_round_trip(self):
+        data = np.array([[1.0, np.nan, 3.0], [np.nan, 5.0, 6.0]], dtype=np.float32)
+        buf = encode_float_to_f16(data)
+        decoded, mask = decode_f16_to_float(buf, 2, 3)
+        expected_mask = np.isnan(data)
+        np.testing.assert_array_equal(mask, expected_mask)
+
+    def test_temperature_round_trip(self):
+        """Temperature range: -55 to +55 C."""
+        rng = np.random.default_rng(44)
+        data = rng.uniform(-55.0, 55.0, size=(64, 64)).astype(np.float32)
+        buf = encode_float_to_f16(data)
+        decoded, mask = decode_f16_to_float(buf, 64, 64)
+        assert not np.any(mask)
+        max_error = np.max(np.abs(decoded - data))
+        # Float16 at 55: precision ~0.03
+        assert max_error < 0.1, f"Max error {max_error}"
 
 
 class TestRgbaToPngBytes:

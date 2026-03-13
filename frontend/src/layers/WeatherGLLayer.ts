@@ -43,6 +43,7 @@ import {
   TileManager,
   computeVisibleTiles,
   type TileCoord,
+  type TileFormat,
 } from './TileManager'
 
 /** Layers that use U/V vector component tiles instead of scalar tiles. */
@@ -60,6 +61,8 @@ export interface WeatherGLLayerOptions {
   opacity?: number
   /** Base URL for the data tile API. Default: '' (same-origin). */
   apiBase?: string
+  /** Tile format: 'png' (default) or 'f16' (Float16 binary). */
+  tileFormat?: TileFormat
 }
 
 export class WeatherGLLayer implements CustomLayerInterface {
@@ -70,6 +73,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _layerName: string
   private _opacity: number
   private _apiBase: string
+  private _tileFormat: TileFormat
   private _map: MaplibreMap | null = null
   private _gl: WebGL2RenderingContext | null = null
   private _program: GLProgram | null = null
@@ -124,12 +128,14 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _uValueMin: WebGLUniformLocation | null = null
   private _uValueMax: WebGLUniformLocation | null = null
   private _uOceanOnly: WebGLUniformLocation | null = null
+  private _uIsFloat16: WebGLUniformLocation | null = null
 
   constructor(options: WeatherGLLayerOptions = {}) {
     this.id = options.id ?? 'weather-gl'
     this._layerName = options.layer ?? 'temperature'
     this._opacity = options.opacity ?? 0.7
     this._apiBase = options.apiBase ?? ''
+    this._tileFormat = options.tileFormat ?? 'png'
   }
 
   /** Whether the current layer uses U/V vector component tiles. */
@@ -169,6 +175,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uValueMin = gl.getUniformLocation(prog, 'u_valueMin')
       this._uValueMax = gl.getUniformLocation(prog, 'u_valueMax')
       this._uOceanOnly = gl.getUniformLocation(prog, 'u_oceanOnly')
+      this._uIsFloat16 = gl.getUniformLocation(prog, 'u_isFloat16')
 
       // Compile blur post-processing program
       this._blurProgram = createProgram(gl, blurVertSource, blurFragSource)
@@ -185,13 +192,14 @@ export class WeatherGLLayer implements CustomLayerInterface {
       // In vector mode, the main managers fetch U-component tiles
       // and the V managers fetch V-component tiles.
       const triggerRepaint = () => map.triggerRepaint()
-      this._tileManager = new TileManager(gl, { apiBase: this._apiBase })
+      const tmOpts = { apiBase: this._apiBase, format: this._tileFormat }
+      this._tileManager = new TileManager(gl, tmOpts)
       this._tileManager.onTileLoaded = triggerRepaint
-      this._tileManagerT1 = new TileManager(gl, { apiBase: this._apiBase })
+      this._tileManagerT1 = new TileManager(gl, tmOpts)
       this._tileManagerT1.onTileLoaded = triggerRepaint
-      this._tileManagerV = new TileManager(gl, { apiBase: this._apiBase })
+      this._tileManagerV = new TileManager(gl, tmOpts)
       this._tileManagerV.onTileLoaded = triggerRepaint
-      this._tileManagerVT1 = new TileManager(gl, { apiBase: this._apiBase })
+      this._tileManagerVT1 = new TileManager(gl, tmOpts)
       this._tileManagerVT1.onTileLoaded = triggerRepaint
 
       // Apply dataset config if already set before onAdd
@@ -357,15 +365,21 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.uniform1f(this._uOpacity, 1.0) // opacity applied in blur pass
     gl.uniform1i(this._uIsVector, isVector ? 1 : 0)
     gl.uniform1i(this._uOceanOnly, OCEAN_ONLY_LAYERS.has(this._layerName) ? 1 : 0)
+    gl.uniform1i(this._uIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
 
-    // Pass value range for vector mode denormalization.
-    // Wind U/V components are encoded with symmetric range [-max, +max]
-    // where max = wind_speed color ramp ceiling.
+    // Pass value range for denormalization.
+    // Vector mode: Wind U/V components use symmetric range [-max, +max].
+    // Scalar mode with Float16: pass physical range for normalization.
+    // Scalar mode with PNG: values are pre-normalized [0,1].
     if (isVector) {
       const ramp = COLOR_RAMPS[this._layerName]
       const max = ramp?.valueMax ?? 50
       gl.uniform1f(this._uValueMin, -max)
       gl.uniform1f(this._uValueMax, max)
+    } else if (this._tileFormat === 'f16') {
+      const ramp = COLOR_RAMPS[this._layerName]
+      gl.uniform1f(this._uValueMin, ramp?.valueMin ?? 0)
+      gl.uniform1f(this._uValueMax, ramp?.valueMax ?? 1)
     } else {
       gl.uniform1f(this._uValueMin, 0)
       gl.uniform1f(this._uValueMax, 1)
@@ -759,6 +773,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._uValueMin = null
     this._uValueMax = null
     this._uOceanOnly = null
+    this._uIsFloat16 = null
     this._gl = null
     this._map = null
   }

@@ -20,6 +20,9 @@ uniform float u_temporalMix;
 // Whether wind textures are bound and valid (0 = no wind data, 1 = have data).
 uniform int u_hasWindData;
 
+// Float16 mode flag: 0 = 8-bit PNG tiles, 1 = R16F Float16 binary tiles.
+uniform int u_isFloat16;
+
 // Value range for denormalization: wind encoded as [valueMin, valueMax] → [0,1].
 // Typically symmetric: valueMin = -50, valueMax = 50 for m/s.
 uniform float u_valueMin;
@@ -59,9 +62,18 @@ vec2 hash2(vec2 p) {
 
 // ── Wind field sampling ─────────────────────────────────────────────
 
-// Decode 16-bit value from RGBA tile texel. Returns normalized [0,1] or -1.0 for nodata.
+// Nodata sentinel threshold for Float16 tiles.
+const float F16_NODATA_THRESH = -9000.0;
+
+// Decode wind tile texel. Returns normalized [0,1] (PNG) or physical m/s (Float16),
+// or -1.0 for nodata.
 float decodeWind(vec4 texel) {
-    if (texel.b > 0.5) return -1.0; // nodata
+    if (u_isFloat16 == 1) {
+        float val = texel.r;
+        if (val < F16_NODATA_THRESH) return -1.0;
+        return val;
+    }
+    if (texel.b > 0.5) return -1.0;
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
@@ -73,8 +85,6 @@ vec2 sampleWind(vec2 pos) {
 
     if (u0 < 0.0 || v0 < 0.0) return vec2(0.0);
 
-    float valueRange = u_valueMax - u_valueMin;
-
     if (u_temporalMix > 0.0) {
         float u1 = decodeWind(texture(u_windUT1, pos));
         float v1 = decodeWind(texture(u_windVT1, pos));
@@ -85,11 +95,15 @@ vec2 sampleWind(vec2 pos) {
         }
     }
 
-    // Denormalize from [0,1] to [valueMin, valueMax] (m/s)
-    float uWind = u0 * valueRange + u_valueMin;
-    float vWind = v0 * valueRange + u_valueMin;
+    // In Float16 mode, values are already physical (m/s).
+    // In PNG mode, denormalize from [0,1] to [valueMin, valueMax].
+    if (u_isFloat16 == 0) {
+        float valueRange = u_valueMax - u_valueMin;
+        u0 = u0 * valueRange + u_valueMin;
+        v0 = v0 * valueRange + u_valueMin;
+    }
 
-    return vec2(uWind, vWind);
+    return vec2(u0, v0);
 }
 
 // ── Main update ─────────────────────────────────────────────────────

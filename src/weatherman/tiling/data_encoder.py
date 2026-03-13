@@ -1,13 +1,24 @@
-"""Encode float32 weather values into RGBA PNGs for GPU-side decoding.
+"""Encode float32 weather values for GPU-side decoding.
 
-The encoding packs a normalized float into 16-bit unsigned integers spread
-across R (low byte) and G (high byte) channels, with B used as a nodata
-flag and A fixed to 0xFF to prevent PNG pre-multiplication artifacts.
+Two encoding formats are supported:
 
-Decoding on the GPU (GLSL):
-    float value = (pixel.r + pixel.g * 256.0) / 65535.0;
-    float physical = mix(vmin, vmax, value);
-    bool nodata = pixel.b > 0.5;
+1. **RGBA PNG (8-bit)** — Default format for broad compatibility.
+   Packs a normalized float into 16-bit unsigned integers spread across
+   R (low byte) and G (high byte) channels, with B used as a nodata flag
+   and A fixed to 0xFF to prevent PNG pre-multiplication artifacts.
+
+   Decoding on the GPU (GLSL):
+       float value = (pixel.r + pixel.g * 256.0) / 65535.0;
+       float physical = mix(vmin, vmax, value);
+       bool nodata = pixel.b > 0.5;
+
+2. **Float16 binary** — High-fidelity format for professional use.
+   Raw IEEE 754 half-precision floats stored as little-endian bytes.
+   Physical values are stored directly (no normalization), with -9999.0
+   as the nodata sentinel. The GPU samples these as R16F textures.
+
+   Advantages over PNG: no quantization at range boundaries, better
+   precision near zero (critical for light winds), no vmin/vmax needed.
 """
 
 from __future__ import annotations
@@ -88,6 +99,66 @@ def rgba_to_png_bytes(rgba: NDArray[np.uint8]) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG", compress_level=1)  # fast compression
     return buf.getvalue()
+
+
+FLOAT16_NODATA: float = -9999.0
+"""Sentinel value for nodata in Float16 binary tiles.
+
+Chosen to be far outside any physical weather value range and
+unambiguous across all GPU implementations (avoids NaN portability
+issues in GLSL ES 3.0).
+"""
+
+
+def encode_float_to_f16(
+    data: NDArray[np.floating],
+    nodata: float | None = None,
+) -> bytes:
+    """Encode a 2D float array to raw Float16 binary bytes.
+
+    Physical values are preserved directly — no normalization or range
+    mapping. Nodata pixels are written as the ``FLOAT16_NODATA`` sentinel
+    (-9999.0). The output is a flat little-endian byte buffer suitable
+    for uploading to a WebGL2 ``R16F`` texture via ``gl.HALF_FLOAT``.
+
+    Args:
+        data: 2D array of float32 weather values (H×W).
+        nodata: Sentinel value for missing data. NaN is always treated as nodata.
+
+    Returns:
+        Raw bytes of length ``H * W * 2`` (IEEE 754 binary16, little-endian).
+    """
+    # Build nodata mask: NaN always, plus explicit sentinel
+    mask = np.isnan(data)
+    if nodata is not None and not np.isnan(nodata):
+        mask |= data == nodata
+
+    # Replace nodata with sentinel before float16 conversion
+    clean = np.where(mask, FLOAT16_NODATA, data).astype(np.float16)
+
+    return clean.tobytes()
+
+
+def decode_f16_to_float(
+    buf: bytes,
+    height: int,
+    width: int,
+) -> tuple[NDArray[np.floating], NDArray[np.bool_]]:
+    """Decode Float16 binary bytes back to float32 values (for testing).
+
+    Args:
+        buf: Raw Float16 bytes from encode_float_to_f16.
+        height: Tile height in pixels.
+        width: Tile width in pixels.
+
+    Returns:
+        Tuple of (values, nodata_mask) where values is float32 and
+        nodata_mask is boolean.
+    """
+    arr = np.frombuffer(buf, dtype=np.float16).reshape(height, width)
+    values = arr.astype(np.float32)
+    nodata_mask = values <= FLOAT16_NODATA + 1.0  # allow float16 rounding
+    return values, nodata_mask
 
 
 def decode_rgba_to_float(

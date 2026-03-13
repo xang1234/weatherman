@@ -40,11 +40,28 @@ uniform int u_oceanOnly;
 uniform float u_valueMin;
 uniform float u_valueMax;
 
+// Float16 mode flag: 0 = 8-bit PNG tiles, 1 = R16F Float16 binary tiles.
+// When 1, textures contain physical values directly (no decode needed).
+// Nodata sentinel is -9999.0 instead of the B-channel flag.
+uniform int u_isFloat16;
+
 out vec4 fragColor;
 
-// Decode 16-bit value and return normalized [0,1], or -1.0 for nodata.
+// Nodata sentinel for Float16 tiles (-9999.0, check with margin for f16 rounding).
+const float F16_NODATA_THRESH = -9000.0;
+
+// Decode a texel based on tile format.
+// PNG mode: returns normalized [0,1], or -1.0 for nodata.
+// Float16 mode: returns physical value directly, or -1.0 for nodata.
 float decodeValue(vec4 texel) {
-    if (texel.b > 0.5) return -1.0; // nodata
+    if (u_isFloat16 == 1) {
+        // R16F texture: physical value in .r channel
+        float val = texel.r;
+        if (val < F16_NODATA_THRESH) return -1.0;
+        return val;
+    }
+    // PNG: 16-bit uint packed in R (low) + G (high), B = nodata flag
+    if (texel.b > 0.5) return -1.0;
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
@@ -131,13 +148,26 @@ float temporalBlend(float v0, float v1) {
     return mix(v0, v1, u_temporalMix);
 }
 
+// Convert a decoded value to physical units (m/s for wind, etc.).
+// In Float16 mode, values are already physical. In PNG mode, denormalize.
+float toPhysical(float val) {
+    if (u_isFloat16 == 1) return val;
+    return val * (u_valueMax - u_valueMin) + u_valueMin;
+}
+
+// Normalize a physical value to [0,1] for color ramp lookup.
+float toNormalized(float physical) {
+    float range = u_valueMax - u_valueMin;
+    if (range == 0.0) return 0.0;
+    return clamp((physical - u_valueMin) / range, 0.0, 1.0);
+}
+
 void main() {
     float normalized;
 
     if (u_isVector == 1) {
         // Vector mode: sample U and V components separately,
         // interpolate in Cartesian space, reconstruct speed.
-        float valueRange = u_valueMax - u_valueMin;
         float u0 = sampleWithFallback(u_dataTile, v_uv);
         float v0 = sampleWithFallback(u_dataTileV, v_uv);
 
@@ -148,27 +178,22 @@ void main() {
             float u1 = sampleWithFallback(u_dataTileT1, v_uv);
             float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
             if (u1 < 0.0 || v1 < 0.0) discard;
-            // Use T1 only — T0 had nodata
-            // Denormalize: [0,1] -> [valueMin, valueMax]
-            float uWind = u1 * valueRange + u_valueMin;
-            float vWind = v1 * valueRange + u_valueMin;
+            float uWind = toPhysical(u1);
+            float vWind = toPhysical(v1);
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            // Normalize speed to [0,1] for color ramp. Max displayable = u_valueMax.
-            // Oblique vectors can exceed this — they clamp to ramp top.
             normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         } else if (u_temporalMix > 0.0) {
             float u1 = sampleWithFallback(u_dataTileT1, v_uv);
             float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
             float uBlend = temporalBlend(u0, u1);
             float vBlend = temporalBlend(v0, v1);
-            float uWind = uBlend * valueRange + u_valueMin;
-            float vWind = vBlend * valueRange + u_valueMin;
+            float uWind = toPhysical(uBlend);
+            float vWind = toPhysical(vBlend);
             float speed = sqrt(uWind * uWind + vWind * vWind);
             normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         } else {
-            // Denormalize: [0,1] -> [valueMin, valueMax]
-            float uWind = u0 * valueRange + u_valueMin;
-            float vWind = v0 * valueRange + u_valueMin;
+            float uWind = toPhysical(u0);
+            float vWind = toPhysical(v0);
             float speed = sqrt(uWind * uWind + vWind * vWind);
             normalized = clamp(speed / u_valueMax, 0.0, 1.0);
         }
@@ -179,13 +204,16 @@ void main() {
         if (u_temporalMix > 0.0) {
             float v1 = sampleWithFallback(u_dataTileT1, v_uv);
             if (v0 < 0.0 && v1 < 0.0) discard;
-            if (v0 < 0.0) { normalized = v1; }
-            else if (v1 < 0.0) { normalized = v0; }
-            else { normalized = mix(v0, v1, u_temporalMix); }
+            if (v0 < 0.0) v0 = v1;
+            else if (v1 >= 0.0) v0 = mix(v0, v1, u_temporalMix);
+            // else keep v0
         } else {
             if (v0 < 0.0) discard;
-            normalized = v0;
         }
+
+        // In Float16 mode, v0 is physical — normalize for color ramp.
+        // In PNG mode, v0 is already normalized [0,1].
+        normalized = (u_isFloat16 == 1) ? toNormalized(v0) : v0;
     }
 
     // Color ramp lookup — sample the 1D texture at the normalized position.
