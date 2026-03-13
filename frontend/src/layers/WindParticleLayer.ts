@@ -440,7 +440,20 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     gl.useProgram(this._drawProgram.program)
     gl.uniform1i(this._uDrawStateTex, 0)
-    gl.uniformMatrix4fv(this._uDrawMatrix, false, options.modelViewProjectionMatrix)
+
+    // MapLibre's modelViewProjectionMatrix transforms from world coordinates
+    // [0, worldSize] to clip space. Our particles use mercator [0, 1], so we
+    // right-multiply columns 0,1 by worldSize to convert the matrix.
+    const mvp = options.modelViewProjectionMatrix
+    const worldSize = 512 * Math.pow(2, this._map.getZoom())
+    const mercatorMatrix = new Float32Array(16)
+    for (let i = 0; i < 4; i++) {
+      mercatorMatrix[i]      = mvp[i]      * worldSize  // column 0 (x)
+      mercatorMatrix[4 + i]  = mvp[4 + i]  * worldSize  // column 1 (y)
+      mercatorMatrix[8 + i]  = mvp[8 + i]               // column 2 (z)
+      mercatorMatrix[12 + i] = mvp[12 + i]              // column 3 (translation)
+    }
+    gl.uniformMatrix4fv(this._uDrawMatrix, false, mercatorMatrix)
 
     // Point size: scale with zoom so particles stay visually proportional
     const mapZoom = this._map.getZoom()

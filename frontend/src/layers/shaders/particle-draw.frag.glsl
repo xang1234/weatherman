@@ -13,6 +13,6 @@ void main() {
     // Fade out as particle ages (age 0→1 over lifespan)
     alpha *= 1.0 - v_age;
 
-    // Output premultiplied alpha (white particles)
+    // White particle with premultiplied alpha
     fragColor = vec4(alpha, alpha, alpha, alpha);
 }
