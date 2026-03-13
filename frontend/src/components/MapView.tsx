@@ -107,6 +107,8 @@ export function MapView() {
   handleRef.current = weatherHandle
   const forecastHoursRef = useRef(forecastHours)
   forecastHoursRef.current = forecastHours
+  const forecastIndexRef = useRef(forecastIndex)
+  forecastIndexRef.current = forecastIndex
   const playbackIdxRef = useRef(0)
 
   const PLAYBACK_STEP_MS = 1200
@@ -114,9 +116,11 @@ export function MapView() {
   useEffect(() => {
     if (!isPlaying || forecastHours.length < 2) return
 
-    // Seed the playback index from React state, but only on effect start —
-    // subsequent steps are tracked via the ref to survive effect restarts.
-    playbackIdxRef.current = forecastIndex >= 0 ? forecastIndex : 0
+    // Seed the playback index from the latest forecastIndex ref.
+    // Using a ref (not the dep) avoids restarting the RAF loop on every
+    // step advance — setSelectedForecastHour changes forecastIndex each
+    // step, and restarting would fire the cleanup snap (setTemporalBlend(-1,0)).
+    playbackIdxRef.current = forecastIndexRef.current >= 0 ? forecastIndexRef.current : 0
 
     let rafId: number
     let startTime = performance.now()
@@ -133,8 +137,12 @@ export function MapView() {
       handleRef.current.setTemporalBlend?.(hours[nextIdx], mix)
 
       if (mix >= 1) {
-        // Step complete — advance the hour via React state
+        // Step complete — advance the hour.
+        // Swap T0↔T1 BEFORE reconfiguring T1 for the next-next hour.
+        // This must be synchronous — if deferred to React effects,
+        // the next RAF tick's setTemporalBlend destroys T1's tiles.
         playbackIdxRef.current = nextIdx
+        handleRef.current.advanceForecastHour?.(hours[nextIdx])
         setSelectedForecastHour(hours[nextIdx])
         startTime = performance.now()
         handleRef.current.setTemporalBlend?.(
@@ -150,7 +158,8 @@ export function MapView() {
       cancelAnimationFrame(rafId)
       handleRef.current.setTemporalBlend?.(-1, 0) // snap clean on pause
     }
-  }, [isPlaying, forecastIndex])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying])
 
   const aisDate = sse.aisDate ?? latestAISDate
 

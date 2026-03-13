@@ -9,6 +9,7 @@ const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER !== 'false'
 /** Imperative handle for driving temporal interpolation from the playback loop. */
 export interface WeatherLayerHandle {
   setTemporalBlend?(forecastHourT1: number, mix: number): void
+  advanceForecastHour?(newHour: number): void
 }
 
 export interface UseWeatherLayerOptions {
@@ -156,6 +157,9 @@ export function useWeatherLayer(options: UseWeatherLayerOptions): WeatherLayerHa
     return {
       setTemporalBlend(forecastHourT1: number, mix: number) {
         layerRef.current?.setTemporalBlend(forecastHourT1, mix)
+      },
+      advanceForecastHour(newHour: number) {
+        layerRef.current?.advanceForecastHour(newHour)
       },
     }
   }

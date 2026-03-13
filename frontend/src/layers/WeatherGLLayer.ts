@@ -408,7 +408,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
       // Bind T1 data tile to unit 2 if available, otherwise null it and
       // set mix to 0 so the shader won't sample a stale binding from a
       // previous tile iteration.
-      if (texT1) {
+      // In vector mode, require BOTH U T1 and V T1 for temporal blending.
+      // If V T1 hasn't loaded yet, sampling null TEXTURE4 decodes as 0.0
+      // (not nodata), which denormalizes to -valueMax → huge speed → red flash.
+      const canBlendT1 = texT1 != null && (!isVector || texVT1 != null)
+      if (canBlendT1) {
         gl.activeTexture(gl.TEXTURE2)
         gl.bindTexture(gl.TEXTURE_2D, texT1)
         gl.uniform1f(this._uTemporalMix, this._temporalMix)
@@ -492,6 +496,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
   /** Update the dataset to render. Clears tile cache if params changed. */
   setConfig(model: string, runId: string, layer: string, forecastHour: number): void {
     const layerChanged = layer !== this._layerName
+    // If advanceForecastHour already set all these fields synchronously,
+    // skip _applyLayerConfig to avoid clearing T0's freshly-swapped tiles.
+    const configUnchanged = model === this._model && runId === this._runId &&
+      layer === this._layerName && forecastHour === this._forecastHour
     this._model = model
     this._runId = runId
     this._layerName = layer
@@ -504,7 +512,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
     // Reset render-skip warning so future failures are not silenced
     this._renderSkipWarned = false
 
-    this._applyLayerConfig()
+    if (!configUnchanged) {
+      this._applyLayerConfig()
+    }
     this._map?.triggerRepaint()
   }
 
@@ -524,6 +534,43 @@ export class WeatherGLLayer implements CustomLayerInterface {
         this._tileManagerVT1?.setLayer(this._model, this._runId, 'wind_v', forecastHourT1)
       }
     }
+    this._map?.triggerRepaint()
+  }
+
+  /**
+   * Synchronously advance the forecast hour, swapping T0↔T1 if T1 has
+   * the target hour's tiles pre-fetched. Called from the RAF playback loop
+   * BEFORE setTemporalBlend reconfigures T1 for the next-next hour —
+   * this prevents the race where React's async effect fires too late and
+   * finds T1 already pointing at a different hour.
+   */
+  advanceForecastHour(newHour: number): void {
+    this._forecastHour = newHour
+    const targetLayer = this._isVector ? 'wind_u' : this._layerName
+
+    // T1 should have newHour's tiles (pre-fetched during blend).
+    // Swap T0↔T1 so T0 now serves newHour immediately.
+    if (
+      this._tileManagerT1 &&
+      this._tileManagerT1.cacheSize > 0 &&
+      this._tileManagerT1.currentLayer === targetLayer &&
+      this._tileManagerT1.currentForecastHour === newHour &&
+      // Vector mode: V T1 must also be ready — otherwise swapping
+      // produces U/V mismatch (U has tiles, V doesn't).
+      (!this._isVector || (
+        this._tileManagerVT1 != null &&
+        this._tileManagerVT1.cacheSize > 0 &&
+        this._tileManagerVT1.currentForecastHour === newHour
+      ))
+    ) {
+      ;[this._tileManager, this._tileManagerT1] = [this._tileManagerT1, this._tileManager]
+      if (this._isVector) {
+        ;[this._tileManagerV, this._tileManagerVT1] = [this._tileManagerVT1, this._tileManagerV]
+      }
+    }
+    // If swap failed: T0 keeps old tiles. render() still draws them
+    // (they're loaded textures). setConfig will clear + re-fetch later.
+    this._temporalMix = 0
     this._map?.triggerRepaint()
   }
 
@@ -557,7 +604,12 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._tileManagerT1 &&
       this._tileManagerT1.cacheSize > 0 &&
       this._tileManagerT1.currentLayer === targetLayer &&
-      this._tileManagerT1.currentForecastHour === this._forecastHour
+      this._tileManagerT1.currentForecastHour === this._forecastHour &&
+      (!this._isVector || (
+        this._tileManagerVT1 != null &&
+        this._tileManagerVT1.cacheSize > 0 &&
+        this._tileManagerVT1.currentForecastHour === this._forecastHour
+      ))
     ) {
       const tmpT = this._tileManager
       this._tileManager = this._tileManagerT1
