@@ -279,16 +279,22 @@ export class WindParticleLayer implements CustomLayerInterface {
     const prefetchCoords = panDir
       ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
       : []
-    const allCoords = prefetchCoords.length > 0
-      ? visibleCoords.concat(prefetchCoords)
-      : visibleCoords
 
     if (this._windConfigured) {
-      this._windUManager?.updateVisibleTiles(allCoords)
-      this._windVManager?.updateVisibleTiles(allCoords)
+      // Priority: P0 = visible current time, P1 = visible next time, P2 = prefetch
+      this._windUManager?.updateVisibleTiles(visibleCoords, 0)
+      this._windVManager?.updateVisibleTiles(visibleCoords, 0)
+      if (prefetchCoords.length > 0) {
+        this._windUManager?.updateVisibleTiles(prefetchCoords, 2)
+        this._windVManager?.updateVisibleTiles(prefetchCoords, 2)
+      }
       if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
-        this._windUT1Manager?.updateVisibleTiles(allCoords)
-        this._windVT1Manager?.updateVisibleTiles(allCoords)
+        this._windUT1Manager?.updateVisibleTiles(visibleCoords, 1)
+        this._windVT1Manager?.updateVisibleTiles(visibleCoords, 1)
+        if (prefetchCoords.length > 0) {
+          this._windUT1Manager?.updateVisibleTiles(prefetchCoords, 2)
+          this._windVT1Manager?.updateVisibleTiles(prefetchCoords, 2)
+        }
       }
     }
 

@@ -12,6 +12,7 @@
 
 import type {
   MainToWorkerMessage,
+  TilePriority,
   WorkerToMainMessage,
 } from './tile-fetch-protocol'
 
@@ -88,9 +89,15 @@ export class TileFetchClient {
     return () => this._errorListeners.delete(listener)
   }
 
-  /** Request the worker to fetch a tile. */
-  fetch(key: string, url: string, format: 'png' | 'f16'): void {
-    const msg: MainToWorkerMessage = { type: 'fetch', key, url, format }
+  /** Request the worker to fetch a tile with a given priority. */
+  fetch(key: string, url: string, format: 'png' | 'f16', priority: TilePriority = 0): void {
+    const msg: MainToWorkerMessage = { type: 'fetch', key, url, format, priority }
+    this._worker.postMessage(msg)
+  }
+
+  /** Update worker configuration (e.g. max concurrent fetches). */
+  configure(options: { maxConcurrent?: number }): void {
+    const msg: MainToWorkerMessage = { type: 'configure', ...options }
     this._worker.postMessage(msg)
   }
 

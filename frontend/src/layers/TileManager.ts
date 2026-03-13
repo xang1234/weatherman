@@ -18,6 +18,7 @@
  * texture upload since WebGL contexts are thread-bound.
  */
 
+import type { TilePriority } from '@/workers/tile-fetch-protocol'
 import type { TileFetchClient, TileFetchResult, TileFetchError } from '@/workers/TileFetchClient'
 
 /** Loading state for a single tile. */
@@ -147,8 +148,11 @@ export class TileManager {
   /**
    * Request tiles for the given visible coordinates.
    * Starts fetching any tiles not already cached or pending.
+   *
+   * @param priority Fetch priority for the worker queue (0=highest, 2=lowest).
+   *   Defaults to 0 (current viewport, current time).
    */
-  updateVisibleTiles(coords: TileCoord[]): void {
+  updateVisibleTiles(coords: TileCoord[], priority: TilePriority = 0): void {
     // Lazily wire up worker callbacks on first use (not in constructor,
     // because onTileLoaded may not be set yet at construction time).
     if (this._fetchClient && !this._unsubLoaded) {
@@ -166,7 +170,7 @@ export class TileManager {
         continue
       }
       if (this._pending.has(key) || this._pendingF16.has(key) || this._pendingWorker.has(key)) continue
-      this._fetchTile(z, x, y)
+      this._fetchTile(z, x, y, priority)
     }
     this._evict()
 
@@ -279,9 +283,9 @@ export class TileManager {
     return `${this._apiBase}/tiles/${this._model}/${this._runId}/${this._layer}/${this._forecastHour}/data/${z}/${x}/${y}.${ext}`
   }
 
-  private _fetchTile(z: number, x: number, y: number): void {
+  private _fetchTile(z: number, x: number, y: number, priority: TilePriority = 0): void {
     if (this._fetchClient) {
-      this._fetchTileViaWorker(z, x, y)
+      this._fetchTileViaWorker(z, x, y, priority)
     } else if (this._format === 'f16') {
       this._fetchTileF16(z, x, y)
     } else {
@@ -305,7 +309,7 @@ export class TileManager {
    * Creates a placeholder texture and sends the fetch request;
    * the worker callback handles texture upload when data arrives.
    */
-  private _fetchTileViaWorker(z: number, x: number, y: number): void {
+  private _fetchTileViaWorker(z: number, x: number, y: number, priority: TilePriority = 0): void {
     const key = tileKey(z, x, y)
     const gl = this._gl
     const url = this._buildUrl(z, x, y)
@@ -328,7 +332,7 @@ export class TileManager {
 
     this._pendingWorker.set(key, texture)
     // Use namespaced key in worker to avoid collisions between managers
-    this._fetchClient!.fetch(this._workerKey(key), url, this._format)
+    this._fetchClient!.fetch(this._workerKey(key), url, this._format, priority)
   }
 
   /**

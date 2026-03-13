@@ -7,6 +7,15 @@
 
 // ── Main → Worker ─────────────────────────────────────────────────
 
+/**
+ * Tile fetch priority levels (lower number = higher priority).
+ *
+ *   0 — Current viewport, current time (what the user is looking at)
+ *   1 — Current viewport, next time step (temporal blend)
+ *   2 — Adjacent / prefetch tiles (speculative)
+ */
+export type TilePriority = 0 | 1 | 2
+
 export interface FetchTileMessage {
   type: 'fetch'
   /** Unique key for this tile (e.g. "z/x/y"). */
@@ -15,6 +24,8 @@ export interface FetchTileMessage {
   url: string
   /** Tile format determines decode strategy. */
   format: 'png' | 'f16'
+  /** Fetch priority — lower is higher priority. Defaults to 0. */
+  priority: TilePriority
 }
 
 export interface CancelTileMessage {
@@ -27,10 +38,17 @@ export interface CancelAllMessage {
   type: 'cancel-all'
 }
 
+export interface ConfigureMessage {
+  type: 'configure'
+  /** Maximum number of concurrent in-flight fetches. Default: 6. */
+  maxConcurrent?: number
+}
+
 export type MainToWorkerMessage =
   | FetchTileMessage
   | CancelTileMessage
   | CancelAllMessage
+  | ConfigureMessage
 
 // ── Worker → Main ─────────────────────────────────────────────────
 

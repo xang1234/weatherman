@@ -264,20 +264,32 @@ export class WeatherGLLayer implements CustomLayerInterface {
     const prefetchCoords = panDir
       ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
       : []
-    const allCoords = prefetchCoords.length > 0
-      ? visibleCoords.concat(prefetchCoords)
-      : visibleCoords
 
-    // Update all active tile managers — starts fetches for any missing tiles
-    this._tileManager.updateVisibleTiles(allCoords)
+    // Update tile managers with priority-differentiated fetches:
+    //   P0 = visible tiles, current time (what user sees now)
+    //   P1 = visible tiles, next time step (temporal blend)
+    //   P2 = prefetch tiles (speculative, for smooth panning)
+    this._tileManager.updateVisibleTiles(visibleCoords, 0)
+    if (prefetchCoords.length > 0) {
+      this._tileManager.updateVisibleTiles(prefetchCoords, 2)
+    }
     const blending = this._temporalMix > 0 && this._forecastHourT1 >= 0 && this._tileManagerT1 != null
     if (blending) {
-      this._tileManagerT1!.updateVisibleTiles(allCoords)
+      this._tileManagerT1!.updateVisibleTiles(visibleCoords, 1)
+      if (prefetchCoords.length > 0) {
+        this._tileManagerT1!.updateVisibleTiles(prefetchCoords, 2)
+      }
     }
     if (isVector && this._tileManagerV) {
-      this._tileManagerV.updateVisibleTiles(allCoords)
+      this._tileManagerV.updateVisibleTiles(visibleCoords, 0)
+      if (prefetchCoords.length > 0) {
+        this._tileManagerV.updateVisibleTiles(prefetchCoords, 2)
+      }
       if (blending && this._tileManagerVT1) {
-        this._tileManagerVT1.updateVisibleTiles(allCoords)
+        this._tileManagerVT1.updateVisibleTiles(visibleCoords, 1)
+        if (prefetchCoords.length > 0) {
+          this._tileManagerVT1.updateVisibleTiles(prefetchCoords, 2)
+        }
       }
     }
 
