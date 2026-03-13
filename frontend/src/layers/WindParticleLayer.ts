@@ -617,7 +617,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uCompositeTexture = gl.getUniformLocation(cp, 'u_texture')
     this._uCompositeOpacity = gl.getUniformLocation(cp, 'u_opacity')
 
-    // ── State textures (RGBA32F, 256×256) ──
+    // ── State textures (RGBA32F, stateSize × stateSize) ──
     this._stateTextures = [null, null]
     this._stateFbos = [null, null]
 

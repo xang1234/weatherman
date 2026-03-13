@@ -36,8 +36,7 @@ const HIGH_PATTERNS = [
   /apple m\d\d/i,                    // Apple M10+ (future-proof)
   /nvidia geforce (rtx|gtx 1[6-9]|gtx [2-9])/i, // NVIDIA GTX 1660+, RTX series
   /nvidia a\d{3,4}/i,               // NVIDIA datacenter (A100, etc.)
-  /radeon rx [5-9]\d{2,3}/i,        // AMD RX 5000+
-  /radeon rx \d{4}/i,               // AMD RX 7000+
+  /radeon rx \d{4}/i,               // AMD RX 5000+ (4-digit models: 5700, 6800, 7900)
   /radeon pro [wv]/i,               // AMD Pro workstation
 ]
 
@@ -49,7 +48,7 @@ const MEDIUM_PATTERNS = [
   /intel uhd [6-9]\d{2}/i,          // Intel UHD 630+
   /nvidia geforce gtx 1[0-5]/i,     // NVIDIA GTX 1050-1550
   /nvidia geforce mx/i,             // NVIDIA MX mobile
-  /radeon rx [34]\d{2}/i,           // AMD RX 400/500 series (older but capable)
+  /radeon rx [3-5]\d{2}/i,          // AMD RX 400/500 series (3-digit models: 480, 580, 590)
   /radeon vega/i,                    // AMD Vega integrated
   /mali-g[7-9]/i,                   // ARM Mali high-end mobile
   /adreno 6[3-9]\d/i,              // Qualcomm Adreno 630+

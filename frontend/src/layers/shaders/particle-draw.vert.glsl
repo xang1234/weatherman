@@ -1,9 +1,6 @@
 #version 300 es
 precision highp float;
 
-// Compile-time constant — avoids uniform int driver bugs on Safari/Metal
-#define STATE_SIZE 256
-
 // Particle state texture (RGBA32F): R=lon, G=lat, B=age, A=reserved
 uniform sampler2D u_stateTex;
 uniform mat4 u_matrix;     // MapLibre model-view-projection
@@ -12,9 +9,12 @@ uniform float u_pointSize;
 out float v_age;
 
 void main() {
-    // Convert gl_VertexID to state texture coordinate
-    int x = gl_VertexID % STATE_SIZE;
-    int y = gl_VertexID / STATE_SIZE;
+    // Convert gl_VertexID to state texture coordinate.
+    // Use textureSize() to get the actual state texture width (may be
+    // 128, 256, or 512 depending on GPU tier detection).
+    int stateSize = textureSize(u_stateTex, 0).x;
+    int x = gl_VertexID % stateSize;
+    int y = gl_VertexID / stateSize;
 
     vec4 state = texelFetch(u_stateTex, ivec2(x, y), 0);
     v_age = state.b;
