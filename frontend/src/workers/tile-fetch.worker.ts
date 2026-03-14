@@ -24,7 +24,7 @@ import type {
 
 // ── Configuration ───────────────────────────────────────────────
 
-let maxConcurrent = 6
+let maxConcurrent = 12
 
 // ── Queue & in-flight tracking ──────────────────────────────────
 

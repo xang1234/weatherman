@@ -301,7 +301,10 @@ export class WindParticleLayer implements CustomLayerInterface {
     }, zoom)
 
     // Pan prefetch: detect movement and prefetch one tile ring ahead
-    const centerLng = (mapBounds.getWest() + mapBounds.getEast()) / 2
+    let panEast = mapBounds.getEast()
+    const panWest = mapBounds.getWest()
+    if (panEast < panWest) panEast += 360
+    const centerLng = (panWest + panEast) / 2
     const centerLat = (mapBounds.getNorth() + mapBounds.getSouth()) / 2
     const panDir = this._panTracker.update(centerLng, centerLat)
     const prefetchCoords = panDir
@@ -407,8 +410,14 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform1f(this._uUpdateSeed, (now * 137.0) % 1000.0)
 
     const bounds = this._map.getBounds()
-    const vpMinLon = (bounds.getWest() + 180) / 360
-    const vpMaxLon = (bounds.getEast() + 180) / 360
+    // When crossing the antimeridian, east < west (e.g. west=170°, east=-170°).
+    // Adding 360° to east gives a contiguous range (e.g. vpMinLon=0.97, vpMaxLon=1.03)
+    // so the shader's out-of-bounds check works correctly.
+    let vpEast = bounds.getEast()
+    const vpWest = bounds.getWest()
+    if (vpEast < vpWest) vpEast += 360
+    const vpMinLon = (vpWest + 180) / 360
+    const vpMaxLon = (vpEast + 180) / 360
     const vpMinLat = this._latToMercatorY(bounds.getNorth())
     const vpMaxLat = this._latToMercatorY(bounds.getSouth())
 
@@ -823,19 +832,24 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (visibleCoords.length === 0) return null
 
     const zoom = visibleCoords[0].z
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    const n = 2 ** zoom
+    // Use wrap-aware rendering X for bounding box — this keeps the atlas
+    // compact even when the viewport crosses the antimeridian.
+    // e.g. tiles [x=254,wrap=0], [x=255,wrap=0], [x=0,wrap=1], [x=1,wrap=1]
+    // produce renderX [254, 255, 256, 257] → cols=4 (not 256).
+    let minRX = Infinity, maxRX = -Infinity, minY = Infinity, maxY = -Infinity
     for (const c of visibleCoords) {
-      if (c.x < minX) minX = c.x
-      if (c.x > maxX) maxX = c.x
+      const rx = c.x + c.wrap * n
+      if (rx < minRX) minRX = rx
+      if (rx > maxRX) maxRX = rx
       if (c.y < minY) minY = c.y
       if (c.y > maxY) maxY = c.y
     }
 
-    const cols = maxX - minX + 1
+    const cols = maxRX - minRX + 1
     const rows = maxY - minY + 1
 
-    // Guard: antimeridian wrapping or extreme zoom can produce a bounding box
-    // that exceeds GPU MAX_TEXTURE_SIZE. Fall back to no wind data.
+    // Guard: extreme zoom can produce a bounding box that exceeds GPU MAX_TEXTURE_SIZE.
     if (cols * TILE_SIZE > this._maxTextureSize || rows * TILE_SIZE > this._maxTextureSize) {
       return null
     }
@@ -847,9 +861,10 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     let hasAnyTile = false
 
-    // Pack T0 tiles
+    // Pack T0 tiles using wrap-aware column index
     for (const c of visibleCoords) {
-      const col = c.x - minX
+      const rx = c.x + c.wrap * n
+      const col = rx - minRX
       const row = c.y - minY
       const uTex = this._windUManager?.getTexture(c.z, c.x, c.y) ?? null
       const vTex = this._windVManager?.getTexture(c.z, c.x, c.y) ?? null
@@ -865,7 +880,8 @@ export class WindParticleLayer implements CustomLayerInterface {
     // Pack T1 tiles (if temporal blending active)
     if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
       for (const c of visibleCoords) {
-        const col = c.x - minX
+        const rx = c.x + c.wrap * n
+        const col = rx - minRX
         const row = c.y - minY
         const uT1 = this._windUT1Manager?.getTexture(c.z, c.x, c.y) ?? null
         const vT1 = this._windVT1Manager?.getTexture(c.z, c.x, c.y) ?? null
@@ -878,7 +894,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
 
-    return { cols, rows, originX: minX, originY: minY, zoom, hasAnyTile }
+    return { cols, rows, originX: minRX, originY: minY, zoom, hasAnyTile }
   }
 
   /** Ensure atlas textures are allocated at the required dimensions. */

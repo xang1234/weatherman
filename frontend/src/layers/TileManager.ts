@@ -36,11 +36,12 @@ interface TileEntry {
   lastAccess: number
 }
 
-/** Tile coordinate triplet. */
+/** Tile coordinate with world-copy tracking for antimeridian support. */
 export interface TileCoord {
   z: number
-  x: number
+  x: number  // canonical tile X [0, n-1] — used for fetching and cache lookup
   y: number
+  wrap: number  // world copy offset: 0 = primary, 1 = next copy east
 }
 
 export interface TileManagerOptions {
@@ -681,51 +682,53 @@ export function computePanPrefetchTiles(
 
   const n = 2 ** z
 
-  // Find bounding box of visible tiles
-  let xMin = Infinity, xMax = -Infinity
+  // Find bounding box using wrap-aware render-X to keep it compact
+  // at the antimeridian (same approach as WindParticleLayer._packAtlas).
+  let rxMin = Infinity, rxMax = -Infinity
   let yMin = Infinity, yMax = -Infinity
-  for (const { x, y } of visible) {
-    if (x < xMin) xMin = x
-    if (x > xMax) xMax = x
-    if (y < yMin) yMin = y
-    if (y > yMax) yMax = y
+  for (const c of visible) {
+    const rx = c.x + c.wrap * n
+    if (rx < rxMin) rxMin = rx
+    if (rx > rxMax) rxMax = rx
+    if (c.y < yMin) yMin = c.y
+    if (c.y > yMax) yMax = c.y
   }
 
   const visibleSet = new Set(visible.map(c => `${c.x},${c.y}`))
   const prefetch: TileCoord[] = []
 
-  const addIfNew = (x: number, y: number) => {
+  const addIfNew = (rx: number, y: number) => {
     if (y < 0 || y >= n) return // beyond poles
-    x = ((x % n) + n) % n // antimeridian wrap
+    const x = ((rx % n) + n) % n // canonical tile X
     const key = `${x},${y}`
     if (visibleSet.has(key)) return
     visibleSet.add(key) // prevent duplicates in prefetch set
-    prefetch.push({ z, x, y })
+    prefetch.push({ z, x, y, wrap: 0 })
   }
 
   // One column/row in the direction of movement
   if (direction.dx > 0) {
     // Panning east → prefetch east column
-    for (let y = yMin; y <= yMax; y++) addIfNew(xMax + 1, y)
+    for (let y = yMin; y <= yMax; y++) addIfNew(rxMax + 1, y)
   }
   if (direction.dx < 0) {
     // Panning west → prefetch west column
-    for (let y = yMin; y <= yMax; y++) addIfNew(xMin - 1, y)
+    for (let y = yMin; y <= yMax; y++) addIfNew(rxMin - 1, y)
   }
   if (direction.dy > 0) {
     // Panning north → lower tile-y → prefetch row above
-    for (let x = xMin; x <= xMax; x++) addIfNew(x, yMin - 1)
+    for (let rx = rxMin; rx <= rxMax; rx++) addIfNew(rx, yMin - 1)
   }
   if (direction.dy < 0) {
     // Panning south → higher tile-y → prefetch row below
-    for (let x = xMin; x <= xMax; x++) addIfNew(x, yMax + 1)
+    for (let rx = rxMin; rx <= rxMax; rx++) addIfNew(rx, yMax + 1)
   }
 
   // Diagonal corner tiles (if panning diagonally)
-  if (direction.dx > 0 && direction.dy > 0) addIfNew(xMax + 1, yMin - 1)
-  if (direction.dx > 0 && direction.dy < 0) addIfNew(xMax + 1, yMax + 1)
-  if (direction.dx < 0 && direction.dy > 0) addIfNew(xMin - 1, yMin - 1)
-  if (direction.dx < 0 && direction.dy < 0) addIfNew(xMin - 1, yMax + 1)
+  if (direction.dx > 0 && direction.dy > 0) addIfNew(rxMax + 1, yMin - 1)
+  if (direction.dx > 0 && direction.dy < 0) addIfNew(rxMax + 1, yMax + 1)
+  if (direction.dx < 0 && direction.dy > 0) addIfNew(rxMin - 1, yMin - 1)
+  if (direction.dx < 0 && direction.dy < 0) addIfNew(rxMin - 1, yMax + 1)
 
   return prefetch
 }
@@ -761,22 +764,23 @@ export function computeVisibleTiles(
   const northWest = lngLatToTile(bounds.west, bounds.north, z)
   const southEast = lngLatToTile(bounds.east, bounds.south, z)
   const n = 2 ** z
-  const xs: number[] = []
+  const xs: { x: number; wrap: number }[] = []
 
   if (northWest.x <= southEast.x) {
-    for (let x = northWest.x; x <= southEast.x; x++) xs.push(x)
+    // Normal: no wrapping
+    for (let x = northWest.x; x <= southEast.x; x++) xs.push({ x, wrap: 0 })
   } else {
-    // Antimeridian crossing
-    for (let x = northWest.x; x < n; x++) xs.push(x)
-    for (let x = 0; x <= southEast.x; x++) xs.push(x)
+    // Antimeridian crossing: east hemisphere tiles are primary, west hemisphere tiles are wrap=1
+    for (let x = northWest.x; x < n; x++) xs.push({ x, wrap: 0 })
+    for (let x = 0; x <= southEast.x; x++) xs.push({ x, wrap: 1 })
   }
 
   const tiles: TileCoord[] = []
   const yStart = Math.min(northWest.y, southEast.y)
   const yEnd = Math.max(northWest.y, southEast.y)
-  for (const x of xs) {
+  for (const { x, wrap } of xs) {
     for (let y = yStart; y <= yEnd; y++) {
-      tiles.push({ z, x, y })
+      tiles.push({ z, x, y, wrap })
     }
   }
   return tiles

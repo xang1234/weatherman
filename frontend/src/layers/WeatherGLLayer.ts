@@ -258,7 +258,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     // Pan prefetch: detect viewport movement and prefetch one tile ring
     // in the direction of movement to prevent blank edges during panning.
-    const centerLng = (bounds.getWest() + bounds.getEast()) / 2
+    let panEast = bounds.getEast()
+    const panWest = bounds.getWest()
+    if (panEast < panWest) panEast += 360
+    const centerLng = (panWest + panEast) / 2
     const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2
     const panDir = this._panTracker.update(centerLng, centerLat)
     const prefetchCoords = panDir
@@ -353,11 +356,6 @@ export class WeatherGLLayer implements CustomLayerInterface {
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number
-    const prevTexBindings: (WebGLTexture | null)[] = []
-    for (let i = 0; i < 5; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i)
-      prevTexBindings.push(gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null)
-    }
 
     // ── Phase 1: Render tiles to offscreen FBO ──────────────────
 
@@ -446,7 +444,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     for (const { coord, texT0, texT1, texV, texVT1 } of tilesToDraw) {
       // Per-tile uniforms: position this quad in mercator space
-      gl.uniform2f(this._uTileOffset, coord.x * scale, coord.y * scale)
+      // Account for world copy: wrap=1 shifts tile one world-width east
+      const renderX = coord.x + coord.wrap * n
+      gl.uniform2f(this._uTileOffset, renderX * scale, coord.y * scale)
       gl.uniform2f(this._uTileScale, scale, scale)
 
       // Bind U/scalar data tile texture to unit 0
@@ -518,13 +518,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     // Restore MapLibre's GL state (blend + texture bindings + active unit + program)
     if (prevBlend) {
+      gl.enable(gl.BLEND)
       gl.blendFuncSeparate(prevBlendSrc, prevBlendDst, prevBlendSrcA, prevBlendDstA)
     } else {
       gl.disable(gl.BLEND)
-    }
-    for (let i = 0; i < 5; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i)
-      gl.bindTexture(gl.TEXTURE_2D, prevTexBindings[i])
     }
     gl.activeTexture(prevActiveTexture)
     gl.useProgram(prevProgram)
