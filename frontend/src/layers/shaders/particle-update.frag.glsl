@@ -2,7 +2,7 @@
 precision highp float;
 
 // Previous frame's particle state texture (RGBA32F).
-// R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = reserved
+// R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = speed (m/s)
 uniform sampler2D u_stateTex;
 
 // Wind U/V data tiles (T0) — 16-bit encoded PNGs from TiTiler.
@@ -41,8 +41,16 @@ uniform float u_seed;
 // Viewport bounds in [0,1] mercator space for respawning
 uniform vec4 u_viewportBounds; // (minLon, minLat, maxLon, maxLat)
 
+// Tile UV remapping: converts mercator [0,1] position to tile-local UV.
+// tileUV = (mercatorPos - u_tileOffset) * u_tileScale
+uniform vec2 u_tileOffset; // (x/2^z, y/2^z) — tile origin in mercator space
+uniform float u_tileScale; // 2^z — tiles per axis at this zoom level
+
 in vec2 v_uv;
-out vec4 fragColor;
+
+// MRT outputs: location 0 = current state, location 1 = previous position
+layout(location = 0) out vec4 fragColor;
+layout(location = 1) out vec4 fragPrevColor;
 
 // ── Nodata sentinel ────────────────────────────────────────────────
 // Must be far below any valid physical wind value (-50 m/s).
@@ -84,15 +92,27 @@ float decodeWind(vec4 texel) {
 
 // Sample wind vector at a mercator position. Returns wind in m/s or vec2(0) if nodata.
 vec2 sampleWind(vec2 pos) {
-    // Particle positions are in mercator [0,1] which maps directly to tile UV
-    float u0 = decodeWind(texture(u_windU, pos));
-    float v0 = decodeWind(texture(u_windV, pos));
+    // Remap particle mercator [0,1] position to tile-local UV [0,1].
+    // At zoom 0 (tileScale=1, tileOffset=0) this is identity.
+    vec2 tileUV = (pos - u_tileOffset) * u_tileScale;
+
+    // Out-of-tile particles get no wind (they'll random-drift or respawn)
+    if (tileUV.x < 0.0 || tileUV.x > 1.0 || tileUV.y < 0.0 || tileUV.y > 1.0)
+        return vec2(0.0);
+
+    // Flip Y: PNG textures are uploaded with Y=0 at bottom (OpenGL convention)
+    // but mercator tiles have Y=0 at north (top). Without this flip, the wind
+    // field is sampled upside-down, causing incorrect flow directions.
+    tileUV.y = 1.0 - tileUV.y;
+
+    float u0 = decodeWind(texture(u_windU, tileUV));
+    float v0 = decodeWind(texture(u_windV, tileUV));
 
     if (isNodata(u0) || isNodata(v0)) return vec2(0.0);
 
     if (u_temporalMix > 0.0) {
-        float u1 = decodeWind(texture(u_windUT1, pos));
-        float v1 = decodeWind(texture(u_windVT1, pos));
+        float u1 = decodeWind(texture(u_windUT1, tileUV));
+        float v1 = decodeWind(texture(u_windVT1, tileUV));
         // If T1 is nodata, use T0 only
         if (!isNodata(u1) && !isNodata(v1)) {
             u0 = mix(u0, u1, u_temporalMix);
@@ -119,17 +139,22 @@ void main() {
     float lat = state.g;
     float age = state.b;
 
+    // Capture pre-advection position for streamline rendering
+    float prevLon = lon;
+    float prevLat = lat;
+
     // Advance age
     // Particles live ~4 seconds: age increments by dt/4.0 per frame
     float maxLife = 4.0;
     age += u_dt / maxLife;
 
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
+    float speed = 0.0;
 
     if (u_hasWindData == 1) {
         // Sample wind field at current particle position
         vec2 wind = sampleWind(vec2(lon, lat));
-        float speed = length(wind);
+        speed = length(wind);
 
         if (speed > 0.001) {
             // Advect by wind: convert m/s to mercator displacement
@@ -165,7 +190,14 @@ void main() {
         lon = mix(u_viewportBounds.x, u_viewportBounds.z, spawnRnd.x);
         lat = mix(u_viewportBounds.y, u_viewportBounds.w, spawnRnd.y);
         age = 0.0;
+        // On respawn: prev = current to suppress flash line, speed = 0
+        prevLon = lon;
+        prevLat = lat;
+        speed = 0.0;
     }
 
-    fragColor = vec4(lon, lat, age, 1.0);
+    // MRT output 0: current state (lon, lat, age, speed)
+    fragColor = vec4(lon, lat, age, speed);
+    // MRT output 1: previous position (prevLon, prevLat, speed, 0)
+    fragPrevColor = vec4(prevLon, prevLat, speed, 0.0);
 }

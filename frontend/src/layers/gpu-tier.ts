@@ -6,31 +6,31 @@
  * if the extension is unavailable (e.g., privacy-focused browsers).
  *
  * Tier → particle state-texture size (particles = size²):
- *   HIGH   → 512  (262,144 particles)
- *   MEDIUM → 256  (65,536 particles)
- *   LOW    → 128  (16,384 particles)
+ *   HIGH   → 80   (6,400 particles)
+ *   MEDIUM → 50   (2,500 particles)
+ *   LOW    → 26   (676 particles)
  */
 
 export type GpuTier = 'high' | 'medium' | 'low'
 
 export interface GpuTierResult {
   tier: GpuTier
-  /** State texture dimension (power of 2). Particle count = stateSize². */
+  /** State texture dimension. Particle count = stateSize². */
   stateSize: number
   /** Raw renderer string, or 'unknown' if extension unavailable. */
   renderer: string
 }
 
 const TIER_STATE_SIZES: Record<GpuTier, number> = {
-  high: 512,
-  medium: 256,
-  low: 128,
+  high: 80,
+  medium: 50,
+  low: 26,
 }
 
 // ── Renderer string patterns ─────────────────────────────────────────
 // Matched case-insensitively against UNMASKED_RENDERER_WEBGL.
 
-/** GPUs known to handle 512² particles at 60fps easily. */
+/** GPUs known to handle 160² particles at 60fps easily. */
 const HIGH_PATTERNS = [
   /apple m[2-9]/i,                   // Apple Silicon M2+
   /apple m\d\d/i,                    // Apple M10+ (future-proof)
@@ -40,7 +40,7 @@ const HIGH_PATTERNS = [
   /radeon pro [wv]/i,               // AMD Pro workstation
 ]
 
-/** GPUs where 256² is appropriate. */
+/** GPUs where 80² is appropriate. */
 const MEDIUM_PATTERNS = [
   /apple m1/i,                       // Apple M1 (still good, but not 512²)
   /apple gpu/i,                      // Generic Apple (A-series iPad/iPhone)
@@ -87,10 +87,10 @@ export function detectGpuTier(gl: WebGL2RenderingContext): GpuTierResult {
 }
 
 /**
- * Clamp a user-provided state size to a valid power-of-two in [64, 1024].
- * Returns the nearest power of 2.
+ * Clamp a user-provided state size to a valid range [16, 512].
+ * Returns the value rounded to the nearest multiple of 8.
  */
 export function clampStateSize(size: number): number {
-  const clamped = Math.max(64, Math.min(1024, size))
-  return Math.pow(2, Math.round(Math.log2(clamped)))
+  const clamped = Math.max(16, Math.min(512, size))
+  return Math.round(clamped / 8) * 8
 }

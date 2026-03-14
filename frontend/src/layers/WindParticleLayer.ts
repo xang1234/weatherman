@@ -51,17 +51,25 @@ import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
-const DEFAULT_STATE_SIZE = 256
-/** Trail fade factor per frame. 0.95^60 ≈ 0.046 → ~2 second trails at 60fps. */
-const TRAIL_FADE = 0.95
+const DEFAULT_STATE_SIZE = 50
+/** Trail fade factor per frame. 0.93^60 ≈ 0.013 → ~1.5s trails for broken drop effect. */
+const TRAIL_FADE = 0.93
 /**
- * Speed scale: converts m/s wind speed to mercator [0,1] displacement per second.
- * 1 m/s ≈ 1/40_000_000 of Earth circumference ≈ 2.5e-8 in mercator.
- * Multiplied by a visual amplification factor for perceptible particle motion.
+ * Target particle displacement in screen pixels per frame for a reference 10 m/s wind.
+ * speedScale = TARGET_DISP_PX / (REF_WIND * dt * worldSize)
+ * This produces zoom-independent apparent speed.
  */
-const SPEED_SCALE = 0.000003
+const TARGET_DISP_PX = 1.5
+/** Reference wind speed (m/s) for the target displacement calculation. */
+const REF_WIND_MPS = 10.0
 
-/** Number of texture units used in the update pass (state + 4 wind tiles). */
+/** Maximum expected wind speed (m/s) for normalizing speed → alpha in the draw shader. */
+const SPEED_MAX = 50.0
+
+/** Fixed point size in CSS pixels — zoom-independent. */
+const POINT_SIZE = 5.0
+
+/** Number of texture units touched across all passes (units 0-4; draw pass reuses 0-1). */
 const UPDATE_TEX_UNITS = 5
 
 /** Frames of frame-time history for the performance watchdog. */
@@ -82,7 +90,7 @@ export interface WindParticleLayerOptions {
   /**
    * Override particle state texture size (particles = stateSize²).
    * Must be a power of 2. If omitted, auto-detected from GPU capability.
-   * Valid range: 64-1024.
+   * Valid range: 16-512 (rounded to nearest multiple of 8).
    */
   stateSize?: number
 }
@@ -123,6 +131,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _updateProgram: GLProgram | null = null
   private _quad: QuadGeometry | null = null
   private _stateTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
+  private _prevStateTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
   private _stateFbos: [WebGLFramebuffer | null, WebGLFramebuffer | null] | null = null
   private _stateReadIndex = 0
 
@@ -141,6 +150,8 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _uUpdateDt: WebGLUniformLocation | null = null
   private _uUpdateSeed: WebGLUniformLocation | null = null
   private _uUpdateViewportBounds: WebGLUniformLocation | null = null
+  private _uUpdateTileOffset: WebGLUniformLocation | null = null
+  private _uUpdateTileScale: WebGLUniformLocation | null = null
 
   // ── Particle draw pass ──────────────────────────────────────────────
   private _drawProgram: GLProgram | null = null
@@ -150,6 +161,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _uDrawStateTex: WebGLUniformLocation | null = null
   private _uDrawMatrix: WebGLUniformLocation | null = null
   private _uDrawPointSize: WebGLUniformLocation | null = null
+  private _uDrawSpeedMax: WebGLUniformLocation | null = null
 
   // ── Trail composite pass ────────────────────────────────────────────
   private _compositeProgram: GLProgram | null = null
@@ -346,6 +358,9 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     if (!this._trailTextures || !this._trailFbos) return
 
+    // Compute worldSize once — used in both update (speed scale) and draw (matrix) passes.
+    const worldSize = 512 * Math.pow(2, this._map.getZoom())
+
     // ────────────────────────────────────────────────────────────────
     // Pass 1: State Update (ping-pong)
     // ────────────────────────────────────────────────────────────────
@@ -386,16 +401,44 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform1i(this._uUpdateIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
     gl.uniform1f(this._uUpdateValueMin, this._valueMin)
     gl.uniform1f(this._uUpdateValueMax, this._valueMax)
-    gl.uniform1f(this._uUpdateSpeedScale, SPEED_SCALE)
-    gl.uniform1f(this._uUpdateDt, dt)
+    // Zoom-adaptive speed scale: ensure particles move TARGET_DISP_PX per frame for REF_WIND_MPS.
+    // speedScale = TARGET_DISP_PX / (refWind * dt * worldSize)  [mercator units / (m/s · s)]
+    // The shader receives the same clamped dt used in the speedScale formula.
+    const safeDt = Math.max(dt, 0.004)
+    const speedScale = TARGET_DISP_PX / (REF_WIND_MPS * safeDt * worldSize)
+    gl.uniform1f(this._uUpdateSpeedScale, speedScale)
+    gl.uniform1f(this._uUpdateDt, safeDt)
     gl.uniform1f(this._uUpdateSeed, (now * 137.0) % 1000.0)
 
     const bounds = this._map.getBounds()
-    const minLon = (bounds.getWest() + 180) / 360
-    const maxLon = (bounds.getEast() + 180) / 360
-    const minLat = this._latToMercatorY(bounds.getNorth())
-    const maxLat = this._latToMercatorY(bounds.getSouth())
-    gl.uniform4f(this._uUpdateViewportBounds, minLon, minLat, maxLon, maxLat)
+    const vpMinLon = (bounds.getWest() + 180) / 360
+    const vpMaxLon = (bounds.getEast() + 180) / 360
+    const vpMinLat = this._latToMercatorY(bounds.getNorth())
+    const vpMaxLat = this._latToMercatorY(bounds.getSouth())
+
+    // Tile UV remapping + particle bounds constrained to tile coverage.
+    // Particles outside the wind tile get zero wind and swarm randomly,
+    // so we restrict spawning to the intersection of viewport and tile.
+    let tileMinLon = 0, tileMinLat = 0, tileMaxLon = 1, tileMaxLat = 1
+    if (centerCoord) {
+      const tileCount = Math.pow(2, centerCoord.z)
+      tileMinLon = centerCoord.x / tileCount
+      tileMinLat = centerCoord.y / tileCount
+      tileMaxLon = (centerCoord.x + 1) / tileCount
+      tileMaxLat = (centerCoord.y + 1) / tileCount
+      gl.uniform2f(this._uUpdateTileOffset, tileMinLon, tileMinLat)
+      gl.uniform1f(this._uUpdateTileScale, tileCount)
+    } else {
+      gl.uniform2f(this._uUpdateTileOffset, 0, 0)
+      gl.uniform1f(this._uUpdateTileScale, 1)
+    }
+
+    // Intersect viewport and tile bounds — particles spawn only where wind data exists
+    const effectiveMinLon = Math.max(vpMinLon, tileMinLon)
+    const effectiveMaxLon = Math.min(vpMaxLon, tileMaxLon)
+    const effectiveMinLat = Math.max(vpMinLat, tileMinLat)
+    const effectiveMaxLat = Math.min(vpMaxLat, tileMaxLat)
+    gl.uniform4f(this._uUpdateViewportBounds, effectiveMinLon, effectiveMinLat, effectiveMaxLon, effectiveMaxLat)
 
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
@@ -434,18 +477,19 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
 
-    // 2b: Draw particles from state texture
+    // 2b: Draw particles as GL_POINTS — trail fade shows movement direction
     gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[this._stateReadIndex])
+    gl.bindTexture(gl.TEXTURE_2D, this._stateTextures![this._stateReadIndex])
 
     gl.useProgram(this._drawProgram.program)
     gl.uniform1i(this._uDrawStateTex, 0)
+    gl.uniform1f(this._uDrawPointSize, POINT_SIZE)
+    gl.uniform1f(this._uDrawSpeedMax, SPEED_MAX)
 
     // MapLibre's modelViewProjectionMatrix transforms from world coordinates
     // [0, worldSize] to clip space. Our particles use mercator [0, 1], so we
     // right-multiply columns 0,1 by worldSize to convert the matrix.
     const mvp = options.modelViewProjectionMatrix
-    const worldSize = 512 * Math.pow(2, this._map.getZoom())
     const mercatorMatrix = new Float32Array(16)
     for (let i = 0; i < 4; i++) {
       mercatorMatrix[i]      = mvp[i]      * worldSize  // column 0 (x)
@@ -454,11 +498,6 @@ export class WindParticleLayer implements CustomLayerInterface {
       mercatorMatrix[12 + i] = mvp[12 + i]              // column 3 (translation)
     }
     gl.uniformMatrix4fv(this._uDrawMatrix, false, mercatorMatrix)
-
-    // Point size: scale with zoom so particles stay visually proportional
-    const mapZoom = this._map.getZoom()
-    const pointSize = Math.max(1.0, Math.min(4.0, mapZoom * 0.4))
-    gl.uniform1f(this._uDrawPointSize, pointSize)
 
     gl.bindVertexArray(this._drawVao)
     gl.drawArrays(gl.POINTS, 0, this._particleCount)
@@ -584,12 +623,22 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // ── Private ─────────────────────────────────────────────────────────
 
-  /** Pick the tile coordinate closest to the viewport center. */
+  /** Pick the tile coordinate that contains the viewport center. */
   private _pickCenterTile(coords: TileCoord[]): TileCoord | null {
     if (coords.length === 0) return null
     if (coords.length === 1) return coords[0]
-    // Return the middle tile from the sorted list
-    return coords[Math.floor(coords.length / 2)]
+
+    // Compute the actual viewport center in tile coordinates
+    const bounds = this._map!.getBounds()
+    const centerLon = ((bounds.getWest() + bounds.getEast()) / 2 + 180) / 360 // mercator X [0,1]
+    const centerLat = this._latToMercatorY((bounds.getNorth() + bounds.getSouth()) / 2) // mercator Y [0,1]
+    const z = coords[0].z
+    const tileCount = Math.pow(2, z)
+    const targetX = Math.floor(centerLon * tileCount)
+    const targetY = Math.floor(centerLat * tileCount)
+
+    // Find the tile matching the center, fall back to first tile
+    return coords.find(c => c.x === targetX && c.y === targetY) ?? coords[0]
   }
 
   /** Convert latitude to web mercator Y in [0,1]. */
@@ -644,26 +693,36 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateDt = gl.getUniformLocation(up, 'u_dt')
     this._uUpdateSeed = gl.getUniformLocation(up, 'u_seed')
     this._uUpdateViewportBounds = gl.getUniformLocation(up, 'u_viewportBounds')
+    this._uUpdateTileOffset = gl.getUniformLocation(up, 'u_tileOffset')
+    this._uUpdateTileScale = gl.getUniformLocation(up, 'u_tileScale')
 
     const dp = this._drawProgram.program
     this._uDrawStateTex = gl.getUniformLocation(dp, 'u_stateTex')
     this._uDrawMatrix = gl.getUniformLocation(dp, 'u_matrix')
     this._uDrawPointSize = gl.getUniformLocation(dp, 'u_pointSize')
+    this._uDrawSpeedMax = gl.getUniformLocation(dp, 'u_speedMax')
 
     const cp = this._compositeProgram.program
     this._uCompositeTexture = gl.getUniformLocation(cp, 'u_texture')
     this._uCompositeOpacity = gl.getUniformLocation(cp, 'u_opacity')
 
     // ── State textures (RGBA32F, stateSize × stateSize) ──
+    // Two state textures (ping-pong) plus two previous-position textures (MRT output 1)
     this._stateTextures = [null, null]
+    this._prevStateTextures = [null, null]
     this._stateFbos = [null, null]
 
     this._stateTextures[0] = this._createStateTexture(gl)
     this._stateTextures[1] = this._createStateTexture(gl)
+    this._prevStateTextures[0] = this._createStateTexture(gl)
+    this._prevStateTextures[1] = this._createStateTexture(gl)
     this._initializeParticles(gl, this._stateTextures[0])
     this._initializeParticles(gl, this._stateTextures[1])
-    this._stateFbos[0] = this._createFBO(gl, this._stateTextures[0])
-    this._stateFbos[1] = this._createFBO(gl, this._stateTextures[1])
+    this._initializeParticles(gl, this._prevStateTextures[0])
+    this._initializeParticles(gl, this._prevStateTextures[1])
+    // Create MRT FBOs: each writes to both state and prevState textures
+    this._stateFbos[0] = this._createMrtFBO(gl, this._stateTextures[0], this._prevStateTextures[0])
+    this._stateFbos[1] = this._createMrtFBO(gl, this._stateTextures[1], this._prevStateTextures[1])
     this._stateReadIndex = 0
 
     // Trail textures are created lazily on first render (need canvas size)
@@ -711,6 +770,26 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
       gl.deleteFramebuffer(fbo)
       throw new Error(`Framebuffer incomplete: 0x${status.toString(16)}`)
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    return fbo
+  }
+
+  /** Create an MRT FBO that renders to two textures (state + prevState). */
+  private _createMrtFBO(gl: WebGL2RenderingContext, stateTex: WebGLTexture, prevTex: WebGLTexture): WebGLFramebuffer {
+    const fbo = gl.createFramebuffer()
+    if (!fbo) throw new Error('Failed to create MRT framebuffer')
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, stateTex, 0)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, prevTex, 0)
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
+
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.deleteFramebuffer(fbo)
+      throw new Error(`MRT Framebuffer incomplete: 0x${status.toString(16)}`)
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -805,6 +884,12 @@ export class WindParticleLayer implements CustomLayerInterface {
         }
         this._stateTextures = null
       }
+      if (this._prevStateTextures) {
+        for (const tex of this._prevStateTextures) {
+          if (tex) gl.deleteTexture(tex)
+        }
+        this._prevStateTextures = null
+      }
 
       // Draw VAO
       if (this._drawVao) {
@@ -847,9 +932,12 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateDt = null
     this._uUpdateSeed = null
     this._uUpdateViewportBounds = null
+    this._uUpdateTileOffset = null
+    this._uUpdateTileScale = null
     this._uDrawStateTex = null
     this._uDrawMatrix = null
     this._uDrawPointSize = null
+    this._uDrawSpeedMax = null
     this._uCompositeTexture = null
     this._uCompositeOpacity = null
     this._gl = null
