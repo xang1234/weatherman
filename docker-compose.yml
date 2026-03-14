@@ -2,7 +2,7 @@ services:
   titiler:
     image: ghcr.io/developmentseed/titiler:0.18.5
     volumes:
-      - wx-data:/data:ro
+      - ./.data:/data:ro
     environment:
       TITILER_API_CORS_ORIGINS: "*"
       WEB_CONCURRENCY: "2"
@@ -19,14 +19,14 @@ services:
     build: .
     command: ["uv", "run", "python", "scripts/run_pipeline.py", "--data-dir", "/data", "--hours", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48"]
     volumes:
-      - wx-data:/data
+      - ./.data:/data
 
   backend:
     build: .
     ports:
       - "8000:8000"
     volumes:
-      - wx-data:/data:ro
+      - ./.data:/data:ro
     environment:
       WEATHERMAN_DATA_DIR: /data
       TITILER_COG_ROOT: /data
@@ -53,6 +53,3 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-
-volumes:
-  wx-data:
