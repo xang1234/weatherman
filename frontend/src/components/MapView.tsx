@@ -140,6 +140,13 @@ export function MapView() {
       windParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
 
       if (mix >= 1) {
+        // Gate advance on T1 tile readiness — if T1 tiles haven't loaded
+        // yet, hold at mix=1 and keep requesting frames until ready.
+        const t1Ready = windParticlesRef.current.isT1Ready?.() ?? true
+        if (!t1Ready) {
+          rafId = requestAnimationFrame(tick)
+          return
+        }
         // Step complete — advance the hour.
         // Swap T0↔T1 BEFORE reconfiguring T1 for the next-next hour.
         // This must be synchronous — if deferred to React effects,
@@ -184,6 +191,7 @@ export function MapView() {
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
     visible: resolvedLayerId === 'wind_speed',
+    isPlaying,
   })
 
   // Keep particle handle in a ref for the RAF loop

@@ -24,11 +24,14 @@ export interface UseWindParticlesOptions {
   forecastHour: number
   /** Whether the weather overlay is visible. */
   visible?: boolean
+  /** When true, skip the config effect to avoid nuking tile caches during playback. */
+  isPlaying?: boolean
 }
 
 export interface WindParticleHandle {
   setTemporalBlend?(forecastHourT1: number, mix: number): void
   advanceForecastHour?(newHour: number): void
+  isT1Ready?(): boolean
 }
 
 export function useWindParticles({
@@ -39,6 +42,7 @@ export function useWindParticles({
   runId,
   forecastHour,
   visible = true,
+  isPlaying = false,
 }: UseWindParticlesOptions): WindParticleHandle {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WindParticleLayer | null>(null)
@@ -87,15 +91,18 @@ export function useWindParticles({
     }
   }, [map, isLoaded, isWindLayer, visible, apiBase])
 
-  // Update wind config when dataset changes or layer is (re)created
+  // Update wind config when dataset changes or layer is (re)created.
+  // During playback, skip — the RAF loop drives temporal blending imperatively
+  // and calling setWindConfig would nuke the tile cache via TileManager.setLayer().
   useEffect(() => {
+    if (isPlaying) return
     const pl = layerRef.current
     if (!pl || !runId || !isWindLayer) return
 
     const ramp = COLOR_RAMPS['wind_speed']
     const max = ramp?.valueMax ?? 50
     pl.setWindConfig(model, runId, forecastHour, -max, max)
-  }, [model, runId, forecastHour, isWindLayer, isLoaded, generation])
+  }, [model, runId, forecastHour, isWindLayer, isLoaded, generation, isPlaying])
 
   // Return imperative handle for playback integration
   const handle: WindParticleHandle = {
@@ -104,6 +111,9 @@ export function useWindParticles({
     },
     advanceForecastHour(newHour: number) {
       layerRef.current?.advanceForecastHour(newHour)
+    },
+    isT1Ready() {
+      return layerRef.current?.isT1Ready() ?? false
     },
   }
 

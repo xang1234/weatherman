@@ -6,7 +6,8 @@
  *   Pass 1 — State Update (ping-pong)
  *     Read particle positions from state texture A, write updated positions
  *     to state texture B via a fullscreen-quad fragment shader, then swap.
- *     Particles are advected by sampling wind U/V data tiles.
+ *     Particles are advected by sampling wind U/V data from a tile atlas
+ *     that packs all visible tiles into a single texture per component.
  *
  *   Pass 2 — Trail Composite (ping-pong)
  *     Bind trail write FBO. Draw the previous trail texture at 95% opacity
@@ -69,14 +70,14 @@ const SPEED_MAX = 50.0
 /** Fixed point size in CSS pixels — zoom-independent. */
 const POINT_SIZE = 5.0
 
-/** Number of texture units touched across all passes (units 0-4; draw pass reuses 0-1). */
-const UPDATE_TEX_UNITS = 5
-
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
 
 /** Frame time threshold in ms — if rolling average exceeds this, log a warning. */
 const PERF_WARN_THRESHOLD_MS = 20
+
+/** Tile texture dimensions (standard web map tiles). */
+const TILE_SIZE = 256
 
 export interface WindParticleLayerOptions {
   /** Unique layer ID for MapLibre. */
@@ -105,6 +106,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _opacity: number
   private _apiBase: string
   private _tileFormat: TileFormat
+  private _maxTextureSize = 4096
 
   // ── Adaptive particle count ───────────────────────────────────────
   private _stateSize: number
@@ -131,7 +133,6 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _updateProgram: GLProgram | null = null
   private _quad: QuadGeometry | null = null
   private _stateTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
-  private _prevStateTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
   private _stateFbos: [WebGLFramebuffer | null, WebGLFramebuffer | null] | null = null
   private _stateReadIndex = 0
 
@@ -150,8 +151,11 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _uUpdateDt: WebGLUniformLocation | null = null
   private _uUpdateSeed: WebGLUniformLocation | null = null
   private _uUpdateViewportBounds: WebGLUniformLocation | null = null
-  private _uUpdateTileOffset: WebGLUniformLocation | null = null
-  private _uUpdateTileScale: WebGLUniformLocation | null = null
+  private _uUpdateAtlasOriginX: WebGLUniformLocation | null = null
+  private _uUpdateAtlasOriginY: WebGLUniformLocation | null = null
+  private _uUpdateAtlasZoom: WebGLUniformLocation | null = null
+  private _uUpdateAtlasCols: WebGLUniformLocation | null = null
+  private _uUpdateAtlasRows: WebGLUniformLocation | null = null
 
   // ── Particle draw pass ──────────────────────────────────────────────
   private _drawProgram: GLProgram | null = null
@@ -176,6 +180,16 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _trailReadIndex = 0
   private _trailWidth = 0
   private _trailHeight = 0
+
+  // ── Tile atlas ──────────────────────────────────────────────────────
+  private _atlasU: WebGLTexture | null = null
+  private _atlasV: WebGLTexture | null = null
+  private _atlasUT1: WebGLTexture | null = null
+  private _atlasVT1: WebGLTexture | null = null
+  private _atlasWidth = 0
+  private _atlasHeight = 0
+  private _copyFbo: WebGLFramebuffer | null = null
+  private _atlasFbo: WebGLFramebuffer | null = null
 
   // ── Pan prefetch ───────────────────────────────────────────────────
   private _panTracker = new PanVelocityTracker()
@@ -213,6 +227,8 @@ export class WindParticleLayer implements CustomLayerInterface {
       console.error('[WindParticleLayer] EXT_color_buffer_float not supported')
       return
     }
+
+    this._maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
 
     // ── Adaptive particle count: detect GPU tier ──
     if (this._stateSizeOverride != null) {
@@ -310,27 +326,6 @@ export class WindParticleLayer implements CustomLayerInterface {
       }
     }
 
-    // Find a wind tile that covers the viewport center for binding to the shader.
-    // Particles sample from this single tile — at low zoom this covers the whole
-    // visible area. At high zoom, particles near tile edges may sample nodata
-    // and fall back to random drift, which is acceptable.
-    const centerCoord = this._pickCenterTile(visibleCoords)
-    let windUTex: WebGLTexture | null = null
-    let windVTex: WebGLTexture | null = null
-    let windUT1Tex: WebGLTexture | null = null
-    let windVT1Tex: WebGLTexture | null = null
-
-    if (centerCoord && this._windConfigured) {
-      windUTex = this._windUManager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
-      windVTex = this._windVManager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
-      if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
-        windUT1Tex = this._windUT1Manager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
-        windVT1Tex = this._windVT1Manager?.getTexture(centerCoord.z, centerCoord.x, centerCoord.y) ?? null
-      }
-    }
-
-    const hasWindData = windUTex != null && windVTex != null
-
     // ── Save MapLibre GL state BEFORE any GL calls ──
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
@@ -342,12 +337,11 @@ export class WindParticleLayer implements CustomLayerInterface {
     const prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA) as number
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
 
-    // Save texture bindings for all units we touch
-    const prevTexBindings: (WebGLTexture | null)[] = []
-    for (let i = 0; i < UPDATE_TEX_UNITS; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i)
-      prevTexBindings.push(gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null)
-    }
+    // ── Pack visible tiles into atlas textures ──
+    const atlas = this._windConfigured
+      ? this._packAtlas(gl, visibleCoords)
+      : null
+    const hasWindData = atlas?.hasAnyTile ?? false
 
     // ── Resize trail textures if canvas size changed ──
     const canvasW = gl.drawingBufferWidth
@@ -378,25 +372,27 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[stateRead])
     gl.uniform1i(this._uUpdateStateTex, 0)
 
-    // Bind wind textures to units 1-4
+    // Bind atlas textures to units 1-4
     gl.activeTexture(gl.TEXTURE1)
-    gl.bindTexture(gl.TEXTURE_2D, windUTex)
+    gl.bindTexture(gl.TEXTURE_2D, atlas ? this._atlasU : null)
     gl.uniform1i(this._uUpdateWindU, 1)
 
     gl.activeTexture(gl.TEXTURE2)
-    gl.bindTexture(gl.TEXTURE_2D, windVTex)
+    gl.bindTexture(gl.TEXTURE_2D, atlas ? this._atlasV : null)
     gl.uniform1i(this._uUpdateWindV, 2)
 
+    const hasT1 = this._forecastHourT1 >= 0 && this._temporalMix > 0
+
     gl.activeTexture(gl.TEXTURE3)
-    gl.bindTexture(gl.TEXTURE_2D, windUT1Tex)
+    gl.bindTexture(gl.TEXTURE_2D, atlas && hasT1 ? this._atlasUT1 : null)
     gl.uniform1i(this._uUpdateWindUT1, 3)
 
     gl.activeTexture(gl.TEXTURE4)
-    gl.bindTexture(gl.TEXTURE_2D, windVT1Tex)
+    gl.bindTexture(gl.TEXTURE_2D, atlas && hasT1 ? this._atlasVT1 : null)
     gl.uniform1i(this._uUpdateWindVT1, 4)
 
     // Set uniforms
-    gl.uniform1f(this._uUpdateTemporalMix, hasWindData && windUT1Tex && windVT1Tex ? this._temporalMix : 0)
+    gl.uniform1f(this._uUpdateTemporalMix, hasWindData && hasT1 ? this._temporalMix : 0)
     gl.uniform1i(this._uUpdateHasWindData, hasWindData ? 1 : 0)
     gl.uniform1i(this._uUpdateIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
     gl.uniform1f(this._uUpdateValueMin, this._valueMin)
@@ -416,38 +412,29 @@ export class WindParticleLayer implements CustomLayerInterface {
     const vpMinLat = this._latToMercatorY(bounds.getNorth())
     const vpMaxLat = this._latToMercatorY(bounds.getSouth())
 
-    // Tile UV remapping + particle bounds constrained to tile coverage.
-    // Particles outside the wind tile get zero wind and swarm randomly,
-    // so we restrict spawning to the intersection of viewport and tile.
-    let tileMinLon = 0, tileMinLat = 0, tileMaxLon = 1, tileMaxLat = 1
-    if (centerCoord) {
-      const tileCount = Math.pow(2, centerCoord.z)
-      tileMinLon = centerCoord.x / tileCount
-      tileMinLat = centerCoord.y / tileCount
-      tileMaxLon = (centerCoord.x + 1) / tileCount
-      tileMaxLat = (centerCoord.y + 1) / tileCount
-      gl.uniform2f(this._uUpdateTileOffset, tileMinLon, tileMinLat)
-      gl.uniform1f(this._uUpdateTileScale, tileCount)
-    } else {
-      gl.uniform2f(this._uUpdateTileOffset, 0, 0)
-      gl.uniform1f(this._uUpdateTileScale, 1)
-    }
+    // Particles spawn across full viewport — atlas covers all visible tiles
+    gl.uniform4f(this._uUpdateViewportBounds, vpMinLon, vpMinLat, vpMaxLon, vpMaxLat)
 
-    // Intersect viewport and tile bounds — particles spawn only where wind data exists
-    const effectiveMinLon = Math.max(vpMinLon, tileMinLon)
-    const effectiveMaxLon = Math.min(vpMaxLon, tileMaxLon)
-    const effectiveMinLat = Math.max(vpMinLat, tileMinLat)
-    const effectiveMaxLat = Math.min(vpMaxLat, tileMaxLat)
-    gl.uniform4f(this._uUpdateViewportBounds, effectiveMinLon, effectiveMinLat, effectiveMaxLon, effectiveMaxLat)
+    // Atlas uniforms
+    if (atlas) {
+      gl.uniform1f(this._uUpdateAtlasOriginX, atlas.originX)
+      gl.uniform1f(this._uUpdateAtlasOriginY, atlas.originY)
+      gl.uniform1f(this._uUpdateAtlasZoom, Math.pow(2, atlas.zoom))
+      gl.uniform1f(this._uUpdateAtlasCols, atlas.cols)
+      gl.uniform1f(this._uUpdateAtlasRows, atlas.rows)
+    } else {
+      gl.uniform1f(this._uUpdateAtlasOriginX, 0)
+      gl.uniform1f(this._uUpdateAtlasOriginY, 0)
+      gl.uniform1f(this._uUpdateAtlasZoom, 1)
+      gl.uniform1f(this._uUpdateAtlasCols, 1)
+      gl.uniform1f(this._uUpdateAtlasRows, 1)
+    }
 
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
 
     this._stateReadIndex = stateWrite
-
-    // Ensure state texture write is complete before Pass 2b reads it.
-    gl.flush()
 
     // ────────────────────────────────────────────────────────────────
     // Pass 2: Trail Composite (ping-pong)
@@ -527,10 +514,6 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindVertexArray(null)
 
     // ── Restore MapLibre GL state ──
-    for (let i = 0; i < UPDATE_TEX_UNITS; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i)
-      gl.bindTexture(gl.TEXTURE_2D, prevTexBindings[i])
-    }
     gl.activeTexture(prevActiveTexture)
     if (prevBlend) {
       gl.enable(gl.BLEND)
@@ -540,8 +523,10 @@ export class WindParticleLayer implements CustomLayerInterface {
     }
     gl.useProgram(prevProgram)
 
-    // Request next frame for continuous animation
-    this._map.triggerRepaint()
+    // Request next frame only when animating (wind data active or mid-transition)
+    if (hasWindData || this._temporalMix > 0) {
+      this._map.triggerRepaint()
+    }
   }
 
   onRemove(
@@ -588,11 +573,29 @@ export class WindParticleLayer implements CustomLayerInterface {
       this._windVT1Manager.cacheSize > 0 &&
       this._windVT1Manager.currentForecastHour === newHour
     ) {
+      // T1 tiles are ready — swap T0 ↔ T1 for seamless transition
       ;[this._windUManager, this._windUT1Manager] = [this._windUT1Manager, this._windUManager]
       ;[this._windVManager, this._windVT1Manager] = [this._windVT1Manager, this._windVManager]
+    } else {
+      // T1 tiles not ready — reconfigure T0 for the new hour (starts fresh fetch)
+      console.debug(
+        `[WindParticleLayer] advanceForecastHour: T1 tiles not ready for hour ${newHour}, reconfiguring T0`
+      )
+      if (this._model && this._runId) {
+        this._windUManager?.setLayer(this._model, this._runId, 'wind_u', newHour)
+        this._windVManager?.setLayer(this._model, this._runId, 'wind_v', newHour)
+      }
     }
     this._temporalMix = 0
     this._map?.triggerRepaint()
+  }
+
+  /** Check if T1 tiles have at least partial data for seamless playback advance. */
+  isT1Ready(): boolean {
+    return (
+      (this._windUT1Manager?.cacheSize ?? 0) > 0 &&
+      (this._windVT1Manager?.cacheSize ?? 0) > 0
+    )
   }
 
   /** Get the current "read" state texture. */
@@ -622,24 +625,6 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   // ── Private ─────────────────────────────────────────────────────────
-
-  /** Pick the tile coordinate that contains the viewport center. */
-  private _pickCenterTile(coords: TileCoord[]): TileCoord | null {
-    if (coords.length === 0) return null
-    if (coords.length === 1) return coords[0]
-
-    // Compute the actual viewport center in tile coordinates
-    const bounds = this._map!.getBounds()
-    const centerLon = ((bounds.getWest() + bounds.getEast()) / 2 + 180) / 360 // mercator X [0,1]
-    const centerLat = this._latToMercatorY((bounds.getNorth() + bounds.getSouth()) / 2) // mercator Y [0,1]
-    const z = coords[0].z
-    const tileCount = Math.pow(2, z)
-    const targetX = Math.floor(centerLon * tileCount)
-    const targetY = Math.floor(centerLat * tileCount)
-
-    // Find the tile matching the center, fall back to first tile
-    return coords.find(c => c.x === targetX && c.y === targetY) ?? coords[0]
-  }
 
   /** Convert latitude to web mercator Y in [0,1]. */
   private _latToMercatorY(lat: number): number {
@@ -693,8 +678,11 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateDt = gl.getUniformLocation(up, 'u_dt')
     this._uUpdateSeed = gl.getUniformLocation(up, 'u_seed')
     this._uUpdateViewportBounds = gl.getUniformLocation(up, 'u_viewportBounds')
-    this._uUpdateTileOffset = gl.getUniformLocation(up, 'u_tileOffset')
-    this._uUpdateTileScale = gl.getUniformLocation(up, 'u_tileScale')
+    this._uUpdateAtlasOriginX = gl.getUniformLocation(up, 'u_atlasOriginX')
+    this._uUpdateAtlasOriginY = gl.getUniformLocation(up, 'u_atlasOriginY')
+    this._uUpdateAtlasZoom = gl.getUniformLocation(up, 'u_atlasZoom')
+    this._uUpdateAtlasCols = gl.getUniformLocation(up, 'u_atlasCols')
+    this._uUpdateAtlasRows = gl.getUniformLocation(up, 'u_atlasRows')
 
     const dp = this._drawProgram.program
     this._uDrawStateTex = gl.getUniformLocation(dp, 'u_stateTex')
@@ -707,25 +695,24 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uCompositeOpacity = gl.getUniformLocation(cp, 'u_opacity')
 
     // ── State textures (RGBA32F, stateSize × stateSize) ──
-    // Two state textures (ping-pong) plus two previous-position textures (MRT output 1)
     this._stateTextures = [null, null]
-    this._prevStateTextures = [null, null]
     this._stateFbos = [null, null]
 
     this._stateTextures[0] = this._createStateTexture(gl)
     this._stateTextures[1] = this._createStateTexture(gl)
-    this._prevStateTextures[0] = this._createStateTexture(gl)
-    this._prevStateTextures[1] = this._createStateTexture(gl)
     this._initializeParticles(gl, this._stateTextures[0])
     this._initializeParticles(gl, this._stateTextures[1])
-    this._initializeParticles(gl, this._prevStateTextures[0])
-    this._initializeParticles(gl, this._prevStateTextures[1])
-    // Create MRT FBOs: each writes to both state and prevState textures
-    this._stateFbos[0] = this._createMrtFBO(gl, this._stateTextures[0], this._prevStateTextures[0])
-    this._stateFbos[1] = this._createMrtFBO(gl, this._stateTextures[1], this._prevStateTextures[1])
+    this._stateFbos[0] = this._createFBO(gl, this._stateTextures[0])
+    this._stateFbos[1] = this._createFBO(gl, this._stateTextures[1])
     this._stateReadIndex = 0
 
     // Trail textures are created lazily on first render (need canvas size)
+
+    // ── Scratch FBOs for atlas tile copy ──
+    this._copyFbo = gl.createFramebuffer()
+    if (!this._copyFbo) throw new Error('Failed to create copy FBO')
+    this._atlasFbo = gl.createFramebuffer()
+    if (!this._atlasFbo) throw new Error('Failed to create atlas FBO')
   }
 
   /** Create an RGBA32F texture at stateSize × stateSize. */
@@ -770,26 +757,6 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
       gl.deleteFramebuffer(fbo)
       throw new Error(`Framebuffer incomplete: 0x${status.toString(16)}`)
-    }
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-    return fbo
-  }
-
-  /** Create an MRT FBO that renders to two textures (state + prevState). */
-  private _createMrtFBO(gl: WebGL2RenderingContext, stateTex: WebGLTexture, prevTex: WebGLTexture): WebGLFramebuffer {
-    const fbo = gl.createFramebuffer()
-    if (!fbo) throw new Error('Failed to create MRT framebuffer')
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, stateTex, 0)
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, prevTex, 0)
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1])
-
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
-    if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      gl.deleteFramebuffer(fbo)
-      throw new Error(`MRT Framebuffer incomplete: 0x${status.toString(16)}`)
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -843,6 +810,169 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._trailReadIndex = 0
   }
 
+  // ── Tile Atlas ─────────────────────────────────────────────────────
+
+  /**
+   * Pack all visible tile textures into atlas textures for GPU sampling.
+   * Returns the atlas layout for setting shader uniforms.
+   */
+  private _packAtlas(
+    gl: WebGL2RenderingContext,
+    visibleCoords: TileCoord[],
+  ): { cols: number; rows: number; originX: number; originY: number; zoom: number; hasAnyTile: boolean } | null {
+    if (visibleCoords.length === 0) return null
+
+    const zoom = visibleCoords[0].z
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const c of visibleCoords) {
+      if (c.x < minX) minX = c.x
+      if (c.x > maxX) maxX = c.x
+      if (c.y < minY) minY = c.y
+      if (c.y > maxY) maxY = c.y
+    }
+
+    const cols = maxX - minX + 1
+    const rows = maxY - minY + 1
+
+    // Guard: antimeridian wrapping or extreme zoom can produce a bounding box
+    // that exceeds GPU MAX_TEXTURE_SIZE. Fall back to no wind data.
+    if (cols * TILE_SIZE > this._maxTextureSize || rows * TILE_SIZE > this._maxTextureSize) {
+      return null
+    }
+
+    this._ensureAtlas(gl, cols, rows)
+
+    // Clear atlas textures to nodata before packing
+    this._clearAtlas(gl)
+
+    let hasAnyTile = false
+
+    // Pack T0 tiles
+    for (const c of visibleCoords) {
+      const col = c.x - minX
+      const row = c.y - minY
+      const uTex = this._windUManager?.getTexture(c.z, c.x, c.y) ?? null
+      const vTex = this._windVManager?.getTexture(c.z, c.x, c.y) ?? null
+      if (uTex && this._atlasU) {
+        this._copyTileToAtlas(gl, uTex, this._atlasU, col, row)
+        hasAnyTile = true
+      }
+      if (vTex && this._atlasV) {
+        this._copyTileToAtlas(gl, vTex, this._atlasV, col, row)
+      }
+    }
+
+    // Pack T1 tiles (if temporal blending active)
+    if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
+      for (const c of visibleCoords) {
+        const col = c.x - minX
+        const row = c.y - minY
+        const uT1 = this._windUT1Manager?.getTexture(c.z, c.x, c.y) ?? null
+        const vT1 = this._windVT1Manager?.getTexture(c.z, c.x, c.y) ?? null
+        if (uT1 && this._atlasUT1) this._copyTileToAtlas(gl, uT1, this._atlasUT1, col, row)
+        if (vT1 && this._atlasVT1) this._copyTileToAtlas(gl, vT1, this._atlasVT1, col, row)
+      }
+    }
+
+    // Clean up framebuffer bindings
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
+
+    return { cols, rows, originX: minX, originY: minY, zoom, hasAnyTile }
+  }
+
+  /** Ensure atlas textures are allocated at the required dimensions. */
+  private _ensureAtlas(gl: WebGL2RenderingContext, cols: number, rows: number): void {
+    const w = cols * TILE_SIZE
+    const h = rows * TILE_SIZE
+    if (w === this._atlasWidth && h === this._atlasHeight) return
+
+    this._deleteAtlasTextures(gl)
+
+    this._atlasWidth = w
+    this._atlasHeight = h
+
+    this._atlasU = this._createAtlasTexture(gl, w, h)
+    this._atlasV = this._createAtlasTexture(gl, w, h)
+    this._atlasUT1 = this._createAtlasTexture(gl, w, h)
+    this._atlasVT1 = this._createAtlasTexture(gl, w, h)
+  }
+
+  /** Create a single atlas texture with the appropriate format. */
+  private _createAtlasTexture(gl: WebGL2RenderingContext, w: number, h: number): WebGLTexture {
+    const tex = gl.createTexture()
+    if (!tex) throw new Error('Failed to create atlas texture')
+
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    if (this._tileFormat === 'f16') {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, w, h, 0, gl.RED, gl.HALF_FLOAT, null)
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+    return tex
+  }
+
+  /** Clear all atlas textures to nodata values. */
+  private _clearAtlas(gl: WebGL2RenderingContext): void {
+    const atlases = [this._atlasU, this._atlasV, this._atlasUT1, this._atlasVT1]
+    // For PNG: B > 0.5 signals nodata. For F16: R < -9000 signals nodata.
+    // Use clearBufferfv for portability — clearColor may clamp to [0,1] on
+    // some implementations (Safari/mobile), which would write 0 instead of
+    // -9999 for F16, causing unloaded atlas cells to be treated as 0 m/s wind.
+    const clearValue = this._tileFormat === 'f16'
+      ? new Float32Array([-9999, 0, 0, 0])
+      : new Float32Array([0, 0, 1, 0])
+    for (const atlas of atlases) {
+      if (!atlas) continue
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._atlasFbo)
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, atlas, 0)
+      gl.viewport(0, 0, this._atlasWidth, this._atlasHeight)
+      gl.clearBufferfv(gl.COLOR, 0, clearValue)
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  }
+
+  /** Copy a single tile texture into the atlas at the given grid position. */
+  private _copyTileToAtlas(
+    gl: WebGL2RenderingContext,
+    src: WebGLTexture,
+    dst: WebGLTexture,
+    col: number,
+    row: number,
+  ): void {
+    const dx = col * TILE_SIZE
+    const dy = row * TILE_SIZE
+
+    // Source: bind tile texture to scratch READ FBO
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._copyFbo)
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0)
+
+    // Dest: bind atlas texture to scratch DRAW FBO
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._atlasFbo)
+    gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dst, 0)
+
+    gl.blitFramebuffer(
+      0, 0, TILE_SIZE, TILE_SIZE,
+      dx, dy, dx + TILE_SIZE, dy + TILE_SIZE,
+      gl.COLOR_BUFFER_BIT, gl.NEAREST,
+    )
+  }
+
+  /** Delete atlas textures (called on resize or cleanup). */
+  private _deleteAtlasTextures(gl: WebGL2RenderingContext): void {
+    if (this._atlasU) { gl.deleteTexture(this._atlasU); this._atlasU = null }
+    if (this._atlasV) { gl.deleteTexture(this._atlasV); this._atlasV = null }
+    if (this._atlasUT1) { gl.deleteTexture(this._atlasUT1); this._atlasUT1 = null }
+    if (this._atlasVT1) { gl.deleteTexture(this._atlasVT1); this._atlasVT1 = null }
+    this._atlasWidth = 0
+    this._atlasHeight = 0
+  }
+
   /** Free all GL resources. */
   private _cleanup(): void {
     // Destroy tile managers
@@ -884,12 +1014,11 @@ export class WindParticleLayer implements CustomLayerInterface {
         }
         this._stateTextures = null
       }
-      if (this._prevStateTextures) {
-        for (const tex of this._prevStateTextures) {
-          if (tex) gl.deleteTexture(tex)
-        }
-        this._prevStateTextures = null
-      }
+
+      // Atlas resources
+      this._deleteAtlasTextures(gl)
+      if (this._copyFbo) { gl.deleteFramebuffer(this._copyFbo); this._copyFbo = null }
+      if (this._atlasFbo) { gl.deleteFramebuffer(this._atlasFbo); this._atlasFbo = null }
 
       // Draw VAO
       if (this._drawVao) {
@@ -932,8 +1061,11 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateDt = null
     this._uUpdateSeed = null
     this._uUpdateViewportBounds = null
-    this._uUpdateTileOffset = null
-    this._uUpdateTileScale = null
+    this._uUpdateAtlasOriginX = null
+    this._uUpdateAtlasOriginY = null
+    this._uUpdateAtlasZoom = null
+    this._uUpdateAtlasCols = null
+    this._uUpdateAtlasRows = null
     this._uDrawStateTex = null
     this._uDrawMatrix = null
     this._uDrawPointSize = null
