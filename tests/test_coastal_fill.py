@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from weatherman.processing.coastal_fill import coastal_fill
+from weatherman.processing.coastal_fill import coastal_fill, smooth_grid
 
 
 class TestCoastalFill:
@@ -88,3 +88,41 @@ class TestCoastalFill:
         result = coastal_fill(data, iterations=1)
         assert np.isnan(data[0, 0])  # original unchanged
         assert not np.isnan(result[0, 0])  # result filled
+
+
+class TestSmoothGrid:
+    def test_uniform_data_unchanged(self):
+        """Uniform array is a fixed point of the Gaussian kernel."""
+        data = np.full((5, 5), 7.0, dtype=np.float32)
+        result = smooth_grid(data, passes=3)
+        np.testing.assert_array_almost_equal(result, data)
+
+    def test_nan_cells_preserved(self):
+        """NaN cells remain NaN after smoothing."""
+        data = np.ones((5, 5), dtype=np.float32)
+        data[2, 2] = np.nan
+        result = smooth_grid(data, passes=3)
+        assert np.isnan(result[2, 2])
+
+    def test_valid_cells_smoothed_toward_neighbors(self):
+        """A high outlier surrounded by low values should decrease."""
+        data = np.ones((5, 5), dtype=np.float32)
+        data[2, 2] = 100.0
+        result = smooth_grid(data, passes=1)
+        # Center should be pulled toward 1.0 (still > 1.0 but < 100.0)
+        assert 1.0 < result[2, 2] < 100.0
+
+    def test_zero_passes_returns_copy(self):
+        """Zero passes returns an identical but distinct array."""
+        data = np.arange(9, dtype=np.float32).reshape(3, 3)
+        result = smooth_grid(data, passes=0)
+        np.testing.assert_array_equal(result, data)
+
+    def test_returns_new_array(self):
+        """Result is a new array — original is not mutated."""
+        data = np.ones((3, 3), dtype=np.float32)
+        data[1, 1] = 50.0
+        original = data.copy()
+        result = smooth_grid(data, passes=2)
+        np.testing.assert_array_equal(data, original)
+        assert result is not data

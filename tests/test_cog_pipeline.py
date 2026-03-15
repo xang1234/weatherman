@@ -193,13 +193,13 @@ class TestGrib2ToCog:
         with rasterio.open(output) as ds:
             assert ds.overviews(1) == DEFAULT_OVERVIEW_LEVELS
 
-    def test_ocean_only_uses_nearest_resampling(self, tmp_path: Path):
-        """Ocean-only COGs must use nearest resampling to avoid NaN propagation.
+    def test_ocean_only_sets_nodata_and_resampling(self, tmp_path: Path):
+        """Ocean-only COGs set NaN as nodata and use average resampling.
 
-        When `ocean_only=True`, coastal fill extends data into NaN land cells,
-        but some deep-land cells remain NaN. Using `average` resampling for
-        overviews would blend filled cells with remaining NaN cells, propagating
-        NaN into overview pixels and reopening gaps at low zoom levels.
+        When `ocean_only=True`, sentinels are converted to NaN, coastal fill
+        extends data into NaN land cells, and the COG is written with nodata=NaN.
+        Average resampling is used for overviews because coastal fill ensures
+        enough valid cells exist to avoid significant NaN bleed.
         """
         path = tmp_path / "ocean.grib2"
         width, height = 72, 37
@@ -220,6 +220,7 @@ class TestGrib2ToCog:
         with rasterio.open(output) as ds:
             tags = ds.tags(ns="rio_overview")
             assert tags.get("resampling") == "average"
+            assert ds.nodata is not None and np.isnan(ds.nodata)
 
     def test_non_ocean_uses_average_resampling(self, tmp_path: Path):
         """Non-ocean COGs should default to average resampling."""
@@ -240,6 +241,60 @@ class TestGrib2ToCog:
         with rasterio.open(output) as ds:
             tags = ds.tags(ns="rio_overview")
             assert tags.get("resampling") == "average"
+
+    def test_sentinel_values_converted_to_nan(self, tmp_path: Path):
+        """9999.0 sentinel values must be masked to NaN, not treated as data."""
+        path = tmp_path / "sentinel.grib2"
+        width, height = 72, 37
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        data = np.full((height, width), 2.5, dtype=np.float32)
+        # Upper-left quadrant = sentinel (simulates GFS-Wave land mask)
+        data[:18, :36] = 9999.0
+
+        with rasterio.open(
+            path, "w", driver="GTiff", dtype="float32", count=1,
+            width=width, height=height, crs="EPSG:4326", transform=transform,
+            nodata=9999.0,
+        ) as dst:
+            dst.write(data, 1)
+
+        output = tmp_path / "out.tif"
+        grib2_to_cog(path, output, ocean_only=True)
+
+        with rasterio.open(output) as ds:
+            result = ds.read(1)
+            # No 9999.0 values should survive
+            assert not np.any(result == 9999.0), "Sentinel 9999.0 leaked into COG"
+            # Valid ocean cells should still be finite
+            valid = np.isfinite(result)
+            assert valid.any(), "All cells are NaN — ocean data was lost"
+
+    def test_ocean_only_fills_near_sentinel_boundary(self, tmp_path: Path):
+        """Coastal fill should extend data into the sentinel→NaN boundary."""
+        path = tmp_path / "boundary.grib2"
+        width, height = 72, 37
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        data = np.full((height, width), 3.0, dtype=np.float32)
+        # Left half = sentinel (land)
+        data[:, :36] = 9999.0
+
+        with rasterio.open(
+            path, "w", driver="GTiff", dtype="float32", count=1,
+            width=width, height=height, crs="EPSG:4326", transform=transform,
+            nodata=9999.0,
+        ) as dst:
+            dst.write(data, 1)
+
+        output = tmp_path / "out.tif"
+        # 16 iterations of coastal fill should extend data well into land
+        grib2_to_cog(path, output, ocean_only=True)
+
+        with rasterio.open(output) as ds:
+            result = ds.read(1)
+            # Cells just left of the boundary should be filled (not NaN)
+            boundary_col = 35  # last sentinel column
+            filled_at_boundary = np.isfinite(result[:, boundary_col]).sum()
+            assert filled_at_boundary > 0, "Coastal fill did not extend into land"
 
     def test_input_without_crs_gets_gfs_transform(self, tmp_path: Path):
         """GRIB2 files may lack CRS metadata — pipeline applies GFS transform."""
@@ -504,6 +559,31 @@ class TestWindSpeedToCog:
         config = OverviewConfig.for_continuous(extended=True)
         result = wind_speed_to_cog(ugrd, vgrd, output, overview_config=config)
         assert result.overview_levels == EXTENDED_OVERVIEW_LEVELS
+
+    def test_sentinel_in_wind_components_becomes_nan(self, tmp_path: Path):
+        """Wind speed at sentinel cells must be NaN, not sqrt(9999²+v²)."""
+        width, height = 72, 37
+        u_data = np.full((height, width), 5.0, dtype=np.float32)
+        v_data = np.full((height, width), 5.0, dtype=np.float32)
+        # One cell in U has the sentinel value
+        u_data[10, 20] = 9999.0
+
+        ugrd = tmp_path / "ugrd.grib2"
+        vgrd = tmp_path / "vgrd.grib2"
+        _make_wind_component(ugrd, u_data, width, height)
+        _make_wind_component(vgrd, v_data, width, height)
+
+        output = tmp_path / "out.tif"
+        wind_speed_to_cog(ugrd, vgrd, output)
+
+        with rasterio.open(output) as ds:
+            result = ds.read(1)
+            # The sentinel cell should be NaN, not a huge wind speed
+            assert np.isnan(result[10, 20]), (
+                f"Expected NaN at sentinel cell, got {result[10, 20]}"
+            )
+            # Nodata should be set in the output
+            assert ds.nodata is not None
 
     def test_without_crs_gets_gfs_transform(self, tmp_path: Path):
         """GRIB2 files without CRS should still produce EPSG:4326 COGs."""

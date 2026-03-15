@@ -89,6 +89,34 @@ GFS_025_WIDTH = 1440
 GFS_025_HEIGHT = 721
 
 
+def _read_band_as_float32(
+    src: rasterio.DatasetReader,
+    band: int = 1,
+    *,
+    fallback_nodata: float | None = 9999.0,
+) -> np.ndarray:
+    """Read a raster band as float32, converting nodata sentinels to NaN.
+
+    Uses rasterio's masked read to honour the file's declared nodata value.
+    Additionally, if *fallback_nodata* is set, any cell equal to that value
+    is masked unconditionally — this is idempotent (NaN cells can never match)
+    and guards against GRIB2 files where rasterio declares nodata but doesn't
+    mask all matching cells.  The default fallback (9999.0) matches the
+    GFS-Wave GRIB2 land sentinel; it is safe for atmospheric variables
+    whose physical range never reaches 9999.
+
+    Returns:
+        2-D float32 ndarray with nodata cells set to NaN.
+    """
+    masked = src.read(band, masked=True)
+    data = masked.filled(np.nan).astype(np.float32)
+
+    if fallback_nodata is not None:
+        data[data == np.float32(fallback_nodata)] = np.nan
+
+    return data
+
+
 @dataclass(frozen=True)
 class COGResult:
     """Result of a GRIB2 → COG conversion."""
@@ -139,7 +167,7 @@ def grib2_to_cog(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(grib2_path) as src:
-        data = src.read(1).astype(np.float32)
+        data = _read_band_as_float32(src)
         src_crs = src.crs
 
         # Determine output dimensions and transform
@@ -230,8 +258,8 @@ def wind_speed_to_cog(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(ugrd_path) as u_src, rasterio.open(vgrd_path) as v_src:
-        u_data = u_src.read(1).astype(np.float32)
-        v_data = v_src.read(1).astype(np.float32)
+        u_data = _read_band_as_float32(u_src)
+        v_data = _read_band_as_float32(v_src)
 
         if u_data.shape != v_data.shape:
             raise ValueError(
@@ -252,6 +280,7 @@ def wind_speed_to_cog(
             transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
 
     wind_speed = np.sqrt(u_data**2 + v_data**2)
+    has_nodata = np.isnan(wind_speed).any()
 
     _write_cog(
         data=wind_speed,
@@ -261,6 +290,7 @@ def wind_speed_to_cog(
         transform=transform,
         overview_levels=overview_config.levels,
         resampling=overview_config.resampling,
+        nodata=np.nan if has_nodata else None,
     )
 
     size = output_path.stat().st_size
