@@ -168,7 +168,7 @@ def grib2_to_cog(
         height=height,
         transform=transform,
         overview_levels=overview_levels,
-        resampling=Resampling.nearest if ocean_only else resampling,
+        resampling=resampling,
         nodata=np.nan if ocean_only else None,
     )
 

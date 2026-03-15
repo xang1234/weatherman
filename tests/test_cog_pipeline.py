@@ -219,7 +219,7 @@ class TestGrib2ToCog:
 
         with rasterio.open(output) as ds:
             tags = ds.tags(ns="rio_overview")
-            assert tags.get("resampling") == "nearest"
+            assert tags.get("resampling") == "average"
 
     def test_non_ocean_uses_average_resampling(self, tmp_path: Path):
         """Non-ocean COGs should default to average resampling."""
