@@ -157,9 +157,10 @@ def grib2_to_cog(
             transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
 
     if ocean_only:
-        from weatherman.processing.coastal_fill import coastal_fill
+        from weatherman.processing.coastal_fill import coastal_fill, smooth_grid
 
-        data = coastal_fill(data)
+        data = coastal_fill(data, iterations=16)
+        data = smooth_grid(data, passes=3)
 
     _write_cog(
         data=data,

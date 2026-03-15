@@ -63,3 +63,53 @@ def coastal_fill(data: np.ndarray, iterations: int = 3) -> np.ndarray:
         result[fill_mask] = neighbor_sum[fill_mask] / neighbor_cnt[fill_mask]
 
     return result
+
+
+# 3×3 approximate Gaussian kernel (σ≈0.85).
+# Weights: center=4, cardinal=2, diagonal=1  →  total=16.
+_GAUSS_KERNEL: list[tuple[int, int, float]] = [
+    (-1, -1, 1), (-1, 0, 2), (-1, 1, 1),
+    ( 0, -1, 2), ( 0, 0, 4), ( 0, 1, 2),
+    ( 1, -1, 1), ( 1, 0, 2), ( 1, 1, 1),
+]
+
+
+def smooth_grid(data: np.ndarray, passes: int = 3) -> np.ndarray:
+    """NaN-aware Gaussian spatial smooth.
+
+    Each pass applies a 3×3 weighted kernel (σ≈0.85), skipping NaN
+    cells in both sum and weight accumulation so land masks are
+    preserved.  3 passes compound to effective σ≈1.5 cells (≈42 km on
+    a 0.25° grid), which eliminates visible grid-block boundaries at
+    z3–z5 without washing out synoptic features.
+
+    Args:
+        data: 2D float32 array; NaN marks missing/land cells.
+        passes: Number of smoothing iterations (default 3).
+
+    Returns:
+        Smoothed copy of *data*.  Cells that were NaN remain NaN.
+    """
+    result = data.copy()
+    nan_mask = np.isnan(result)
+
+    for _ in range(passes):
+        filled = np.where(nan_mask, 0.0, result)
+        valid = (~nan_mask).astype(np.float32)
+
+        fp = np.pad(filled, 1, mode="constant", constant_values=0.0)
+        vp = np.pad(valid, 1, mode="constant", constant_values=0.0)
+
+        w_sum = np.zeros_like(result)
+        w_cnt = np.zeros_like(result)
+        for di, dj, w in _GAUSS_KERNEL:
+            w_sum += w * fp[1 + di : fp.shape[0] - 1 + di,
+                            1 + dj : fp.shape[1] - 1 + dj]
+            w_cnt += w * vp[1 + di : vp.shape[0] - 1 + di,
+                            1 + dj : vp.shape[1] - 1 + dj]
+
+        # Only update cells that are valid (non-NaN) and have neighbors.
+        update = ~nan_mask & (w_cnt > 0)
+        result[update] = w_sum[update] / w_cnt[update]
+
+    return result
