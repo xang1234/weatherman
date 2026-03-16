@@ -95,15 +95,16 @@ const CLOUD_COVER_STOPS: ColorStop[] = [
 ]
 
 const WAVE_HEIGHT_STOPS: ColorStop[] = [
-  { position: 0.00, color: [30, 50, 200] },     // blue (calm, 0 m)
-  { position: 0.10, color: [0, 130, 220] },     // bright blue (~1.5 m)
-  { position: 0.20, color: [0, 190, 180] },     // cyan (~3 m)
-  { position: 0.33, color: [0, 200, 80] },      // green (~5 m)
-  { position: 0.47, color: [220, 220, 0] },     // yellow (~7 m)
-  { position: 0.60, color: [255, 160, 0] },     // orange (~9 m)
-  { position: 0.73, color: [230, 30, 15] },     // red (~11 m)
-  { position: 0.87, color: [180, 0, 0] },       // deep red (~13 m)
-  { position: 1.00, color: [130, 0, 80] },      // purple (15 m, extreme)
+  { position: 0.00, color: [20, 60, 180] },     // deep blue (0 m, calm)
+  { position: 0.07, color: [30, 100, 220] },    // blue (~1 m)
+  { position: 0.13, color: [50, 140, 235] },    // light blue (~2 m)
+  { position: 0.20, color: [200, 60, 30] },     // red onset (~3 m)
+  { position: 0.33, color: [220, 30, 15] },     // vivid red (~5 m)
+  { position: 0.47, color: [190, 0, 0] },       // deep red (~7 m)
+  { position: 0.60, color: [170, 0, 50] },      // red-purple (~9 m)
+  { position: 0.73, color: [150, 0, 100] },     // purple (~11 m)
+  { position: 0.87, color: [120, 0, 140] },     // deep purple (~13 m)
+  { position: 1.00, color: [90, 0, 160] },      // violet (15 m, extreme)
 ]
 
 const WAVE_PERIOD_STOPS: ColorStop[] = [
