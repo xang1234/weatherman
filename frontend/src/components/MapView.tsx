@@ -10,6 +10,7 @@ import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
 import { useVesselTrack } from '@/hooks/useVesselTrack'
 import { useWindParticles, type WindParticleHandle } from '@/hooks/useWindParticles'
+import { useWaveParticles, type WaveParticleHandle } from '@/hooks/useWaveParticles'
 import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
@@ -138,11 +139,14 @@ export function MapView() {
 
       handleRef.current.setTemporalBlend?.(hours[nextIdx], mix)
       windParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
+      waveParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
 
       if (mix >= 1) {
         // Gate advance on T1 tile readiness — if T1 tiles haven't loaded
         // yet, hold at mix=1 and keep requesting frames until ready.
-        const t1Ready = windParticlesRef.current.isT1Ready?.() ?? true
+        const windT1Ready = windParticlesRef.current.isT1Ready?.() ?? true
+        const waveT1Ready = waveParticlesRef.current.isT1Ready?.() ?? true
+        const t1Ready = windT1Ready && waveT1Ready
         if (!t1Ready) {
           rafId = requestAnimationFrame(tick)
           return
@@ -154,12 +158,16 @@ export function MapView() {
         playbackIdxRef.current = nextIdx
         handleRef.current.advanceForecastHour?.(hours[nextIdx])
         windParticlesRef.current.advanceForecastHour?.(hours[nextIdx])
+        waveParticlesRef.current.advanceForecastHour?.(hours[nextIdx])
         setSelectedForecastHour(hours[nextIdx])
         startTime = performance.now()
         handleRef.current.setTemporalBlend?.(
           hours[(nextIdx + 1) % hours.length], 0,
         )
         windParticlesRef.current.setTemporalBlend?.(
+          hours[(nextIdx + 1) % hours.length], 0,
+        )
+        waveParticlesRef.current.setTemporalBlend?.(
           hours[(nextIdx + 1) % hours.length], 0,
         )
       }
@@ -171,6 +179,8 @@ export function MapView() {
     return () => {
       cancelAnimationFrame(rafId)
       handleRef.current.setTemporalBlend?.(-1, 0) // snap clean on pause
+      windParticlesRef.current.setTemporalBlend?.(-1, 0)
+      waveParticlesRef.current.setTemporalBlend?.(-1, 0)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying])
@@ -194,9 +204,23 @@ export function MapView() {
     isPlaying,
   })
 
-  // Keep particle handle in a ref for the RAF loop
+  // Keep particle handles in refs for the RAF loop
   const windParticlesRef = useRef<WindParticleHandle>(windParticles)
   windParticlesRef.current = windParticles
+
+  const waveParticles = useWaveParticles({
+    map,
+    isLoaded,
+    layer: resolvedLayerId ?? '',
+    model: 'gfs',
+    runId: runId ?? '',
+    forecastHour: forecastHour ?? 0,
+    visible: resolvedLayerId === 'wave_height',
+    isPlaying,
+  })
+
+  const waveParticlesRef = useRef<WaveParticleHandle>(waveParticles)
+  waveParticlesRef.current = waveParticles
 
   useVesselPopup({ map, isLoaded })
   useVesselTrack({ map, isLoaded, snapshotDate: aisDate })
