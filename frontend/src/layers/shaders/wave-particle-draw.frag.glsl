@@ -38,11 +38,11 @@ void main() {
 
     // Zero-speed slots are invalid/calm and should disappear entirely.
     float speedNorm = clamp(v_speed, 0.0, 1.0);
-    float speedAlpha = smoothstep(0.0, 0.01, speedNorm) * mix(0.15, 1.0, speedNorm);
+    float speedAlpha = smoothstep(0.0, 0.01, speedNorm) * mix(0.25, 1.0, speedNorm);
 
     // Lifecycle fade: smooth fade-in at birth, fade-out approaching death
-    float fadeIn = smoothstep(0.0, 0.05, v_age);
-    float fadeOut = 1.0 - smoothstep(0.70, 1.0, v_age);
+    float fadeIn = smoothstep(0.0, 0.15, v_age);
+    float fadeOut = 1.0 - smoothstep(0.75, 0.98, v_age);
     float lifecycle = fadeIn * fadeOut;
 
     float alpha = shape * speedAlpha * lifecycle;

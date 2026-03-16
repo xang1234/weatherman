@@ -30,5 +30,6 @@ void main() {
 
     // Project mercator [0,1] to clip space via worldSize-scaled matrix
     gl_Position = u_matrix * vec4(state.r, state.g, 0.0, 1.0);
-    gl_PointSize = u_pointSize;
+    float sizeScale = mix(0.7, 1.3, v_speed);
+    gl_PointSize = u_pointSize * sizeScale;
 }

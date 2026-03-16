@@ -176,8 +176,8 @@ void main() {
     );
     vec2 jitter = hash2(cellId) - 0.5;
 
-    float anchorLon = u_gridOriginX + (col + 0.5 + jitter.x * 0.35) * u_gridSpacing;
-    float anchorLat = u_gridOriginY + (row + 0.5 + jitter.y * 0.35) * u_gridSpacing;
+    float anchorLon = u_gridOriginX + (col + 0.5 + jitter.x * 0.6) * u_gridSpacing;
+    float anchorLat = u_gridOriginY + (row + 0.5 + jitter.y * 0.6) * u_gridSpacing;
     vec2 anchorPos = vec2(anchorLon, anchorLat);
 
     float waveHeight = sampleScalar(
@@ -211,23 +211,36 @@ void main() {
         0.0,
         1.0
     );
-    float phaseRate = mix(0.06, 0.18, periodNorm);
+
+    // Faster phase rates with per-particle variation
+    float phaseRate = mix(0.12, 0.35, periodNorm);
+    float rateJitter = mix(0.85, 1.15, hash(cellId + vec2(53.7, 11.9)));
+    phaseRate *= rateJitter;
+
     float phaseSeed = hash(cellId + vec2(19.7, 53.1));
     float phase = fract(u_time * phaseRate + phaseSeed);
-    float phaseOffset = (phase - 0.5) * 2.0;
-    float travel = u_phaseAmplitude * mix(0.45, 1.0, periodNorm);
 
+    // Forward travel with Hermite ease-in-out (no symmetric back-and-forth)
+    float eased = phase * phase * (3.0 - 2.0 * phase);
+    float ampJitter = mix(0.7, 1.3, hash(cellId + vec2(41.3, 97.2)));
+    float travel = u_phaseAmplitude * mix(0.45, 1.0, periodNorm) * ampJitter;
+
+    // Perpendicular wobble for organic feel
+    float wobbleFreq = mix(1.5, 3.0, hash(cellId + vec2(73.1, 29.3)));
+    float wobble = sin(phase * wobbleFreq * 6.2832) * 0.15 * travel;
+
+    // Combine forward travel + wobble before single clamp (avoids edge bunching)
     float lon = clamp(
-        anchorLon + direction.x * travel * phaseOffset,
+        anchorLon + direction.x * travel * eased + (-direction.y) * wobble,
         u_viewportBounds.x,
         u_viewportBounds.z
     );
     float lat = clamp(
-        anchorLat - direction.y * travel * phaseOffset,
+        anchorLat - direction.y * travel * eased - direction.x * wobble,
         u_viewportBounds.y,
         u_viewportBounds.w
     );
 
     float waveDirDeg = mod(degrees(atan(direction.x, direction.y)) + 360.0, 360.0);
-    fragColor = vec4(lon, lat, 0.5, packHeightDir(waveHeight, waveDirDeg));
+    fragColor = vec4(lon, lat, phase, packHeightDir(waveHeight, waveDirDeg));
 }
