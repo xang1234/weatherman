@@ -2,7 +2,8 @@
 precision highp float;
 
 // Previous frame's particle state texture (RGBA32F).
-// R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = wave height (m)
+// R = longitude [0,1], G = latitude [0,1], B = age [0,1],
+// A = packed(height, propagation direction): floor(h*100) + dir/360
 uniform sampler2D u_stateTex;
 
 // Wave height atlas textures (T0/T1) — all visible tiles packed into one texture.
@@ -101,16 +102,16 @@ float circularMix(float a, float b, float t) {
 // ── Wave field sampling ─────────────────────────────────────────────
 
 // Sample wave vector at a mercator position using the tile atlas.
-// Returns vec3(u, v, height) where u/v are Cartesian velocity components
-// derived from polar (height, direction) decomposition.
-vec3 sampleWave(vec2 pos) {
+// Returns vec4(u, v, height, propagationDirDeg) where u/v are Cartesian
+// velocity components and propagationDirDeg is the direction waves travel TO.
+vec4 sampleWave(vec2 pos) {
     // Convert mercator [0,1] position to atlas-local tile position.
     vec2 tilePos = pos * u_atlasZoom - vec2(u_atlasOriginX, u_atlasOriginY);
 
     // Out-of-atlas guard: particles outside visible tile range get no data
     if (tilePos.x < 0.0 || tilePos.x >= u_atlasCols ||
         tilePos.y < 0.0 || tilePos.y >= u_atlasRows)
-        return vec3(0.0);
+        return vec4(0.0);
 
     // Atlas UV: fractional position within the packed atlas texture
     vec2 atlasUV = tilePos / vec2(u_atlasCols, u_atlasRows);
@@ -118,7 +119,7 @@ vec3 sampleWave(vec2 pos) {
     float h0 = decodeTile(texture(u_waveHeight, atlasUV));
     float d0 = decodeTile(texture(u_waveDirection, atlasUV));
 
-    if (isNodata(h0) || isNodata(d0)) return vec3(0.0);
+    if (isNodata(h0) || isNodata(d0)) return vec4(0.0);
 
     // Denormalize PNG values to physical units
     if (u_isFloat16 == 0) {
@@ -149,7 +150,19 @@ vec3 sampleWave(vec2 pos) {
     float u = -h0 * sin(dir_rad);
     float v = -h0 * cos(dir_rad);
 
-    return vec3(u, v, h0);
+    // Propagation direction = "from" direction + 180°
+    float propDirDeg = mod(d0 + 180.0, 360.0);
+
+    return vec4(u, v, h0, propDirDeg);
+}
+
+// ── Pack height + direction into a single float ─────────────────────
+// Integer part: height * 100 (0–1500 for 0–15m)
+// Fractional part: direction / 360 (0.0–0.999...)
+float packHeightDir(float height, float dirDeg) {
+    float h = floor(clamp(height, 0.0, 15.0) * 100.0);
+    float d = mod(dirDeg, 360.0) / 360.0;
+    return h + d;
 }
 
 // ── Main update ─────────────────────────────────────────────────────
@@ -168,11 +181,19 @@ void main() {
 
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
     float waveHeight = 0.0;
+    float waveDirDeg = 0.0;
 
     if (u_hasWaveData == 1) {
         // Sample wave field at current particle position
-        vec3 wave = sampleWave(vec2(lon, lat));
+        vec4 wave = sampleWave(vec2(lon, lat));
         waveHeight = wave.z;
+        waveDirDeg = wave.w;
+
+        // Rotate wave velocity by small random angle to break convergence streaks
+        float jitterAngle = (hash(seedOffset + vec2(73.7, 13.1)) - 0.5) * 0.35; // ±10°
+        float ca = cos(jitterAngle);
+        float sa = sin(jitterAngle);
+        wave = vec4(ca * wave.x - sa * wave.y, sa * wave.x + ca * wave.y, wave.z, wave.w);
 
         if (waveHeight > 0.001) {
             // Advect by wave velocity: convert to mercator displacement
@@ -181,13 +202,13 @@ void main() {
 
             // Add slight random jitter for visual richness (1% of displacement)
             vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
-            lon += rnd.x * waveHeight * u_speedScale * u_dt * 0.01;
-            lat -= rnd.y * waveHeight * u_speedScale * u_dt * 0.01;
+            lon += rnd.x * waveHeight * u_speedScale * u_dt * 0.08;
+            lat -= rnd.y * waveHeight * u_speedScale * u_dt * 0.08;
         } else {
-            // No wave data at this location (land or calm) — gentle random drift
-            vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
-            lon += rnd.x * 0.0002;
-            lat += rnd.y * 0.0002;
+            // No wave data at this position (land or calm) — force respawn next frame.
+            // Use 0.99 instead of 1.0 to avoid triggering the respawn block in the
+            // same frame (which would create a per-frame respawn loop for land particles).
+            age = 0.99;
         }
     } else {
         // No wave data bound — random walk fallback
@@ -208,8 +229,9 @@ void main() {
         lat = mix(u_viewportBounds.y, u_viewportBounds.w, spawnRnd.y);
         age = 0.0;
         waveHeight = 0.0;
+        waveDirDeg = 0.0;
     }
 
-    // Store wave height in alpha for the draw shader's alpha normalization
-    fragColor = vec4(lon, lat, age, waveHeight);
+    // Pack height + propagation direction into A channel
+    fragColor = vec4(lon, lat, age, packHeightDir(waveHeight, waveDirDeg));
 }

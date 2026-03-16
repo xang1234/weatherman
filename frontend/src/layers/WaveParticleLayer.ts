@@ -19,7 +19,7 @@ import type {
 
 import updateVertSource from './shaders/particle-update.vert.glsl?raw'
 import updateFragSource from './shaders/wave-particle-update.frag.glsl?raw'
-import drawVertSource from './shaders/particle-draw.vert.glsl?raw'
+import drawVertSource from './shaders/wave-particle-draw.vert.glsl?raw'
 import drawFragSource from './shaders/wave-particle-draw.frag.glsl?raw'
 import trailFragSource from './shaders/trail-composite.frag.glsl?raw'
 import {
@@ -43,14 +43,14 @@ import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
 const DEFAULT_STATE_SIZE = 50
-/** Trail fade factor per frame. 0.96^60 ≈ 0.085 → ~3s visible trails for slow, flowing wave aesthetic. */
-const TRAIL_FADE = 0.96
+/** Trail fade factor per frame. 0.80^60 ≈ 0 → sub-second fade so dashes appear crisp without comet-tails. */
+const TRAIL_FADE = 0.80
 /**
  * Target particle displacement in screen pixels per frame for a reference 3m wave.
  * Slower than wind (1.5px) to convey the heavier, periodic nature of ocean swells.
  * At 0.8px: 3m wave drifts smoothly; 15m storm wave races at 4px/frame.
  */
-const TARGET_DISP_PX = 0.8
+const TARGET_DISP_PX = 0.27
 /** Reference wave height (m) for the target displacement calculation. */
 const REF_WAVE_HEIGHT_M = 3.0
 
@@ -58,7 +58,7 @@ const REF_WAVE_HEIGHT_M = 3.0
 const SPEED_MAX = 15.0
 
 /** Fixed point size in CSS pixels — slightly larger than wind (5.0) for wave visual. */
-const POINT_SIZE = 6.0
+const POINT_SIZE = 18.0
 
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
@@ -226,10 +226,10 @@ export class WaveParticleLayer implements CustomLayerInterface {
     } else {
       const tier = detectGpuTier(gl)
       this._gpuTier = tier.tier
-      this._stateSize = tier.stateSize
+      this._stateSize = clampStateSize(Math.round(tier.stateSize * 1.3))
       console.info(
         `[WaveParticleLayer] GPU: "${tier.renderer}" → tier=${tier.tier}, ` +
-        `stateSize=${tier.stateSize} (${tier.stateSize ** 2} particles)`
+        `stateSize=${this._stateSize} (${this._stateSize ** 2} particles)`
       )
     }
     this._particleCount = this._stateSize * this._stateSize

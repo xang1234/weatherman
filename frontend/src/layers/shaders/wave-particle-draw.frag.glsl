@@ -3,25 +3,49 @@ precision highp float;
 
 in float v_age;
 in float v_speed;
+in float v_direction; // propagation direction in radians
 out vec4 fragColor;
 
-void main() {
-    // Circular point with soft edge using gl_PointCoord [0,1]
-    vec2 ctr = gl_PointCoord - 0.5;
-    float dist = length(ctr) * 2.0; // 0 at center, 1 at edge
-    float circle = 1.0 - smoothstep(0.6, 1.0, dist);
+// SDF rounded rectangle centered at origin.
+// halfSize = (halfWidth, halfHeight), r = corner radius.
+float sdRoundedRect(vec2 p, vec2 halfSize, float r) {
+    vec2 d = abs(p) - halfSize + r;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
 
-    // Speed-dependent brightness: faster waves = brighter.
-    // Floor at 0.15 (not 0.5 like wind) so calm seas (< 1m) are nearly invisible
-    // while storm seas (8-15m) are fully bright.
+void main() {
+    // Map gl_PointCoord [0,1] to centered [-0.5, 0.5]
+    vec2 p = gl_PointCoord - 0.5;
+
+    // Rotate so local X aligns with wave crest (perpendicular to propagation).
+    // Propagation is along v_direction, so crest is at v_direction + 90°.
+    // We rotate by -v_direction to align propagation with local Y axis,
+    // making local X the crest axis.
+    float c = cos(-v_direction);
+    float s = sin(-v_direction);
+    vec2 rotated = vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+
+    // SDF dash: wide along crest (X), thin along propagation (Y)
+    float halfWidth = 0.42;   // crest axis — ~84% of point size
+    float halfHeight = 0.07;  // propagation axis — thin dash
+    float radius = 0.04;      // rounded corners
+
+    float d = sdRoundedRect(rotated, vec2(halfWidth, halfHeight), radius);
+
+    // Anti-aliased edge (1px feather in normalized point coords)
+    float aa = fwidth(d);
+    float shape = 1.0 - smoothstep(-aa, aa, d);
+
+    // Speed-dependent brightness: calm seas nearly invisible, storm seas bright
     float speedAlpha = mix(0.15, 1.0, clamp(v_speed, 0.0, 1.0));
 
-    // Fade out as particle ages (age 0→1 over lifespan)
-    float ageFade = 1.0 - v_age;
+    // Lifecycle fade: smooth fade-in at birth, fade-out approaching death
+    float fadeIn = smoothstep(0.0, 0.05, v_age);
+    float fadeOut = 1.0 - smoothstep(0.70, 1.0, v_age);
+    float lifecycle = fadeIn * fadeOut;
 
-    float alpha = circle * speedAlpha * ageFade;
+    float alpha = shape * speedAlpha * lifecycle;
 
-    // Blue-tinted wave particle with premultiplied alpha
-    vec3 waveColor = vec3(0.7, 0.85, 1.0);
-    fragColor = vec4(waveColor * alpha, alpha);
+    // White color with premultiplied alpha
+    fragColor = vec4(alpha, alpha, alpha, alpha);
 }

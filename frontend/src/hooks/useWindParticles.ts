@@ -113,7 +113,7 @@ export function useWindParticles({
       layerRef.current?.advanceForecastHour(newHour)
     },
     isT1Ready() {
-      return layerRef.current?.isT1Ready() ?? false
+      return layerRef.current?.isT1Ready() ?? true
     },
   }
 
