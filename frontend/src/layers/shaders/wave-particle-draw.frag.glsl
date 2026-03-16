@@ -36,8 +36,9 @@ void main() {
     float aa = fwidth(d);
     float shape = 1.0 - smoothstep(-aa, aa, d);
 
-    // Speed-dependent brightness: calm seas nearly invisible, storm seas bright
-    float speedAlpha = mix(0.15, 1.0, clamp(v_speed, 0.0, 1.0));
+    // Zero-speed slots are invalid/calm and should disappear entirely.
+    float speedNorm = clamp(v_speed, 0.0, 1.0);
+    float speedAlpha = smoothstep(0.0, 0.01, speedNorm) * mix(0.15, 1.0, speedNorm);
 
     // Lifecycle fade: smooth fade-in at birth, fade-out approaching death
     float fadeIn = smoothstep(0.0, 0.05, v_age);
