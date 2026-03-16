@@ -203,17 +203,18 @@ CLOUD_COVER = WeatherColormap(
     stops=tuple(CLOUD_COVER_STOPS),
 )
 
-# Wave height: blue-cyan-green-yellow-orange-red-purple
+# Wave height: blue→red→purple (red onset at 3m for maritime alert visibility)
 WAVE_HEIGHT_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.00, (30, 50, 200)),    # blue (calm, 0 m)
-    (0.10, (0, 130, 220)),    # bright blue (~1.5 m)
-    (0.20, (0, 190, 180)),    # cyan (~3 m)
-    (0.33, (0, 200, 80)),     # green (~5 m)
-    (0.47, (220, 220, 0)),    # yellow (~7 m)
-    (0.60, (255, 160, 0)),    # orange (~9 m)
-    (0.73, (230, 30, 15)),    # red (~11 m)
-    (0.87, (180, 0, 0)),      # deep red (~13 m)
-    (1.00, (130, 0, 80)),     # purple (15 m, extreme)
+    (0.00, (20, 60, 180)),     # deep blue (0 m, calm)
+    (0.07, (30, 100, 220)),    # blue (~1 m)
+    (0.13, (50, 140, 235)),    # light blue (~2 m)
+    (0.20, (200, 60, 30)),     # red onset (~3 m)
+    (0.33, (220, 30, 15)),     # vivid red (~5 m)
+    (0.47, (190, 0, 0)),       # deep red (~7 m)
+    (0.60, (170, 0, 50)),      # red-purple (~9 m)
+    (0.73, (150, 0, 100)),     # purple (~11 m)
+    (0.87, (120, 0, 140)),     # deep purple (~13 m)
+    (1.00, (90, 0, 160)),      # violet (15 m, extreme)
 ]
 
 WAVE_HEIGHT = WeatherColormap(
