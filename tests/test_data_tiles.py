@@ -11,10 +11,12 @@ import pytest
 import rasterio
 import rasterio.transform
 from PIL import Image
+from rasterio.enums import Resampling
 
 from weatherman.processing.data_tiles import (
     MAX_DATA_TILE_ZOOM,
     _WORLD_EXTENT,
+    data_tile_resampling_for_layer,
     generate_all_data_tiles,
     generate_data_tile,
     tile_bounds_3857,
@@ -87,6 +89,10 @@ class TestTileBounds3857:
 
 
 class TestGenerateDataTile:
+    def test_wave_direction_uses_nearest_resampling(self):
+        assert data_tile_resampling_for_layer("wave_direction") == Resampling.nearest
+        assert data_tile_resampling_for_layer("temperature") == Resampling.bilinear
+
     def test_roundtrip_accuracy(self):
         """Synthetic COG → tile → decode should preserve values within 0.1%."""
         rng = np.random.default_rng(42)

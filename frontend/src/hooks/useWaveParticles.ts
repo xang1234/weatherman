@@ -1,10 +1,10 @@
 /**
- * React hook for the GPU wave-particle animation layer.
+ * React hook for the GPU wave animation layer.
  *
- * Creates a WaveParticleLayer (MapLibre custom layer) that renders
- * GPU-advected particles using wave height + direction data tiles.
- * Particles flow in the wave propagation direction with speed
- * proportional to significant wave height.
+ * Creates a WaveParticleLayer (MapLibre custom layer) that renders a
+ * stateless, world-anchored dash field from wave height, period, and
+ * direction-vector data tiles. This avoids the density-clumping artifact
+ * from the previous long-lived tracer model.
  *
  * Only active when the current weather layer is wave_height.
  */

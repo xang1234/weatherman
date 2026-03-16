@@ -268,6 +268,30 @@ WAVE_DIRECTION = WeatherColormap(
     stops=tuple(WAVE_DIRECTION_STOPS),
 )
 
+WAVE_VECTOR_STOPS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (30, 80, 200)),
+    (0.50, (240, 240, 240)),
+    (1.00, (200, 60, 30)),
+]
+
+WAVE_DIR_U = WeatherColormap(
+    name="wave_dir_u",
+    unit="unitless",
+    value_min=-1.0,
+    value_max=1.0,
+    colormap=_interpolate_colors(WAVE_VECTOR_STOPS),
+    stops=tuple(WAVE_VECTOR_STOPS),
+)
+
+WAVE_DIR_V = WeatherColormap(
+    name="wave_dir_v",
+    unit="unitless",
+    value_min=-1.0,
+    value_max=1.0,
+    colormap=_interpolate_colors(WAVE_VECTOR_STOPS),
+    stops=tuple(WAVE_VECTOR_STOPS),
+)
+
 
 # Wind U/V components (Cartesian): for data-encoded tiles only.
 # These use the same value range but have no visible colormap —
@@ -303,6 +327,8 @@ COLORMAPS: dict[str, WeatherColormap] = {
     "wave_height": WAVE_HEIGHT,
     "wave_period": WAVE_PERIOD,
     "wave_direction": WAVE_DIRECTION,
+    "wave_dir_u": WAVE_DIR_U,
+    "wave_dir_v": WAVE_DIR_V,
 }
 
 

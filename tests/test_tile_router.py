@@ -24,6 +24,7 @@ from weatherman.tiling.router import (
     init_tile_service,
     router,
     shutdown_tile_service,
+    tile_resampling_for_layer,
 )
 
 # -- Fixtures --
@@ -147,6 +148,18 @@ class TestTileServiceTileJson:
         assert exc_info.value.status_code == 400
         assert "Unknown layer" in str(exc_info.value.detail)
 
+    def test_build_tilejson_uses_nearest_for_wave_direction(self):
+        svc = TileService(STORAGE, TITILER_URL, _catalog_loader)
+        cog_uri = "s3://wx-data/models/gfs/runs/20260306T12Z/cogs/wave_direction/000.tif"
+        result = svc.build_tilejson("wave_direction", cog_uri)
+        assert "resampling=nearest" in result["tiles"][0]
+
+
+class TestTileResampling:
+    def test_wave_direction_uses_nearest(self):
+        assert tile_resampling_for_layer("wave_direction") == "nearest"
+        assert tile_resampling_for_layer("temperature") == "bilinear"
+
 
 class TestInitTileService:
     def test_double_init_raises(self):
@@ -190,6 +203,18 @@ class TestTileEndpoint:
         # Verify the TiTiler URL was called (not a 'latest' passthrough)
         call_url = mock_get.call_args.args[0]
         assert "cog/tiles/WebMercatorQuad/1/2/3.png" in call_url
+
+    def test_wave_direction_tile_uses_nearest_resampling(self, client):
+        fake_png = b"\x89PNG\r\n\x1a\nfake"
+        mock_response = httpx.Response(200, content=fake_png)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=mock_response
+        ) as mock_get:
+            resp = client.get("/tiles/gfs/20260306T12Z/wave_direction/0/1/2/3.png")
+
+        assert resp.status_code == 200
+        assert mock_get.call_args.kwargs["params"]["resampling"] == "nearest"
 
     def test_tile_published_run_has_immutable_cache(self, client):
         """Published run tiles get immutable caching headers."""

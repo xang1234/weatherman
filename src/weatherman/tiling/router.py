@@ -31,6 +31,15 @@ router = APIRouter(prefix="/tiles", tags=["tiles"])
 # The app provides a function that loads a RunCatalog for a given model name.
 CatalogLoader = Callable[[str], RunCatalog]
 
+_NEAREST_TILE_LAYERS = frozenset({"wave_direction"})
+
+
+def tile_resampling_for_layer(layer: str) -> str:
+    """Return TiTiler/GDAL resampling mode for the requested layer."""
+    if layer in _NEAREST_TILE_LAYERS:
+        return "nearest"
+    return "bilinear"
+
 
 class TileService:
     """Resolves tile requests to TiTiler proxy calls.
@@ -117,7 +126,7 @@ class TileService:
             "url": cog_uri,
             "rescale": colormap.rescale_range(),
             "colormap": colormap.to_json(),
-            "resampling": "bilinear",
+            "resampling": tile_resampling_for_layer(layer),
         }
 
         titiler_path = f"{self._titiler_url}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png"
@@ -207,7 +216,7 @@ class TileService:
         # Request raw float32 data from TiTiler as numpy-compatible format
         params: dict[str, str] = {
             "url": cog_uri,
-            "resampling": "bilinear",
+            "resampling": tile_resampling_for_layer(layer),
         }
 
         titiler_path = (
@@ -287,7 +296,7 @@ class TileService:
         # Request raw float32 data from TiTiler
         params: dict[str, str] = {
             "url": cog_uri,
-            "resampling": "bilinear",
+            "resampling": tile_resampling_for_layer(layer),
         }
 
         titiler_path = (
@@ -367,7 +376,7 @@ class TileService:
             qs = urlencode({
                 "url": cog_uri,
                 "rescale": colormap.rescale_range(),
-                "resampling": "bilinear",
+                "resampling": tile_resampling_for_layer(layer),
             })
             cmap_encoded = quote(colormap.to_json(), safe="")
             tile_url = (

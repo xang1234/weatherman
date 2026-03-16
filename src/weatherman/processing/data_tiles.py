@@ -25,6 +25,8 @@ MAX_DATA_TILE_ZOOM = 5
 # Full extent of EPSG:3857 in meters
 _WORLD_EXTENT = 20037508.342789244
 
+_NEAREST_DATA_TILE_LAYERS = frozenset({"wave_direction"})
+
 
 def tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     """Convert z/x/y tile coordinates to EPSG:3857 meter bounds.
@@ -44,6 +46,13 @@ def tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float
     return (west, south, east, north)
 
 
+def data_tile_resampling_for_layer(layer: str) -> Resampling:
+    """Return the raster resampling strategy for a layer's data tiles."""
+    if layer in _NEAREST_DATA_TILE_LAYERS:
+        return Resampling.nearest
+    return Resampling.bilinear
+
+
 def generate_data_tile(
     cog_path: str,
     z: int,
@@ -52,6 +61,7 @@ def generate_data_tile(
     value_min: float,
     value_max: float,
     tile_size: int = 256,
+    resampling: Resampling = Resampling.bilinear,
 ) -> bytes:
     """Generate a single data-encoded RGBA PNG tile from a COG.
 
@@ -60,14 +70,14 @@ def generate_data_tile(
     to RGBA PNG.
     """
     with rasterio.open(cog_path) as src:
-        with WarpedVRT(src, crs="EPSG:3857", resampling=Resampling.bilinear) as vrt:
+        with WarpedVRT(src, crs="EPSG:3857", resampling=resampling) as vrt:
             bounds = tile_bounds_3857(z, x, y)
             window = from_bounds(*bounds, transform=vrt.transform)
             data = vrt.read(
                 1,
                 window=window,
                 out_shape=(tile_size, tile_size),
-                resampling=Resampling.bilinear,
+                resampling=resampling,
             ).astype(np.float32)
 
             rgba = encode_float_to_rgba(data, value_min, value_max, nodata=vrt.nodata)
@@ -80,6 +90,7 @@ def generate_all_data_tiles(
     value_max: float,
     max_zoom: int = MAX_DATA_TILE_ZOOM,
     tile_size: int = 256,
+    resampling: Resampling = Resampling.bilinear,
 ) -> Iterator[tuple[int, int, int, bytes]]:
     """Generate data tiles for z0 through max_zoom from a single COG.
 
@@ -88,7 +99,7 @@ def generate_all_data_tiles(
     automatically based on the requested resolution.
     """
     with rasterio.open(cog_path) as src:
-        with WarpedVRT(src, crs="EPSG:3857", resampling=Resampling.bilinear) as vrt:
+        with WarpedVRT(src, crs="EPSG:3857", resampling=resampling) as vrt:
             nodata = vrt.nodata
             for z in range(max_zoom + 1):
                 n_tiles = 2**z
@@ -100,7 +111,7 @@ def generate_all_data_tiles(
                             1,
                             window=window,
                             out_shape=(tile_size, tile_size),
-                            resampling=Resampling.bilinear,
+                            resampling=resampling,
                         ).astype(np.float32)
 
                         rgba = encode_float_to_rgba(

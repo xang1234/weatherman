@@ -22,6 +22,7 @@ from weatherman.processing.cog import (
     OverviewConfig,
     grib2_to_cog,
     validate_cog,
+    wave_direction_to_uv_cogs,
     wind_speed_to_cog,
 )
 
@@ -241,6 +242,33 @@ class TestGrib2ToCog:
         with rasterio.open(output) as ds:
             tags = ds.tags(ns="rio_overview")
             assert tags.get("resampling") == "average"
+
+    def test_direction_cog_can_force_nearest_resampling(self, tmp_path: Path):
+        """Raw wave-direction COGs must keep wrapped angles on a nearest path."""
+        path = tmp_path / "direction.grib2"
+        width, height = 72, 37
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        data = np.full((height, width), 350.0, dtype=np.float32)
+
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            dtype="float32",
+            count=1,
+            width=width,
+            height=height,
+            crs="EPSG:4326",
+            transform=transform,
+        ) as dst:
+            dst.write(data, 1)
+
+        output = tmp_path / "direction_cog.tif"
+        grib2_to_cog(path, output, resampling=Resampling.nearest)
+
+        with rasterio.open(output) as ds:
+            tags = ds.tags(ns="rio_overview")
+            assert tags.get("resampling") == "nearest"
 
     def test_sentinel_values_converted_to_nan(self, tmp_path: Path):
         """9999.0 sentinel values must be masked to NaN, not treated as data."""
@@ -603,6 +631,51 @@ class TestWindSpeedToCog:
         assert result.crs == TARGET_CRS
         with rasterio.open(output) as ds:
             assert ds.crs.to_epsg() == 4326
+
+
+class TestWaveDirectionToUVCogs:
+    def test_wraparound_downsamples_without_false_180_degree_average(
+        self,
+        tmp_path: Path,
+    ):
+        """350° next to 10° should stay near north after downsampling."""
+        direction_path = tmp_path / "direction.grib2"
+        transform = from_bounds(*GFS_GLOBAL_BOUNDS, 2, 2)
+        direction = np.array(
+            [[350.0, 10.0],
+             [350.0, 10.0]],
+            dtype=np.float32,
+        )
+
+        with rasterio.open(
+            direction_path,
+            "w",
+            driver="GTiff",
+            dtype="float32",
+            count=1,
+            width=2,
+            height=2,
+            crs="EPSG:4326",
+            transform=transform,
+        ) as dst:
+            dst.write(direction, 1)
+
+        u_output = tmp_path / "wave_dir_u.tif"
+        v_output = tmp_path / "wave_dir_v.tif"
+        wave_direction_to_uv_cogs(
+            direction_path,
+            u_output,
+            v_output,
+            overview_config=OverviewConfig(levels=[2], resampling=Resampling.average),
+            ocean_only=False,
+        )
+
+        with rasterio.open(u_output) as u_ds, rasterio.open(v_output) as v_ds:
+            u_avg = float(u_ds.read(1, out_shape=(1, 1), resampling=Resampling.average)[0, 0])
+            v_avg = float(v_ds.read(1, out_shape=(1, 1), resampling=Resampling.average)[0, 0])
+
+        reconstructed = (np.degrees(np.arctan2(-u_avg, -v_avg)) + 360.0) % 360.0
+        assert min(reconstructed, 360.0 - reconstructed) < 5.0
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlalchemy as sa
+from rasterio.enums import Resampling
 
 from weatherman.events.emissions import emit_run_published
 from weatherman.ingest.gfs import (
@@ -38,8 +39,16 @@ from weatherman.ingest.gfs import (
     download_gfs_cycle,
     latest_available_cycle,
 )
-from weatherman.processing.cog import grib2_to_cog, wind_speed_to_cog
-from weatherman.processing.data_tiles import generate_all_data_tiles
+from weatherman.processing.cog import (
+    OverviewConfig,
+    grib2_to_cog,
+    wave_direction_to_uv_cogs,
+    wind_speed_to_cog,
+)
+from weatherman.processing.data_tiles import (
+    data_tile_resampling_for_layer,
+    generate_all_data_tiles,
+)
 from weatherman.storage.catalog import RunCatalog, RunStatus
 from weatherman.storage.lifecycle import DuplicateRun, RunLifecycle, RunState
 from weatherman.storage.manifest import (
@@ -67,13 +76,6 @@ logger = logging.getLogger("pipeline")
 PIPELINE_VARIABLES = {
     k: DEFAULT_SEARCH_PATTERNS[k]
     for k in ("tmp_2m", "ugrd_10m", "vgrd_10m", "apcp_sfc")
-}
-
-# Wave variables from GFS-Wave (WW3) — ocean-only with NaN over land
-WAVE_GRIB_TO_LAYER = {
-    "htsgw_sfc": "wave_height",
-    "perpw_sfc": "wave_period",
-    "dirpw_sfc": "wave_direction",
 }
 
 # Layer definitions matching colormaps.py
@@ -262,15 +264,51 @@ def step_generate_cogs(
             generated_layers.add("precipitation")
             logger.info("  precipitation/f%03d", fhour)
 
-        # Wave variables (ocean-only: htsgw_sfc → wave_height, etc.)
-        for grib_var, layer_id in WAVE_GRIB_TO_LAYER.items():
-            grib_path = grib2_dir / "grib2" / grib_var / f"f{fhour:03d}.grib2"
-            if grib_path.exists():
-                cog_path = data_dir / layout.staging_cog_path(run_id, layer_id, fhour)
-                grib2_to_cog(grib_path, cog_path, ocean_only=True)
-                total += 1
-                generated_layers.add(layer_id)
-                logger.info("  %s/f%03d", layer_id, fhour)
+        # Wave height and period are continuous ocean-only fields.
+        wave_height_grib = grib2_dir / "grib2" / "htsgw_sfc" / f"f{fhour:03d}.grib2"
+        if wave_height_grib.exists():
+            cog_path = data_dir / layout.staging_cog_path(run_id, "wave_height", fhour)
+            grib2_to_cog(wave_height_grib, cog_path, ocean_only=True)
+            total += 1
+            generated_layers.add("wave_height")
+            logger.info("  wave_height/f%03d", fhour)
+
+        wave_period_grib = grib2_dir / "grib2" / "perpw_sfc" / f"f{fhour:03d}.grib2"
+        if wave_period_grib.exists():
+            cog_path = data_dir / layout.staging_cog_path(run_id, "wave_period", fhour)
+            grib2_to_cog(wave_period_grib, cog_path, ocean_only=True)
+            total += 1
+            generated_layers.add("wave_period")
+            logger.info("  wave_period/f%03d", fhour)
+
+        # Raw wave direction is circular data: keep it on a nearest-only path
+        # so 350°/10° does not collapse toward 180° during overview/tile reads.
+        wave_dir_grib = grib2_dir / "grib2" / "dirpw_sfc" / f"f{fhour:03d}.grib2"
+        if wave_dir_grib.exists():
+            dir_cog = data_dir / layout.staging_cog_path(run_id, "wave_direction", fhour)
+            grib2_to_cog(
+                wave_dir_grib,
+                dir_cog,
+                ocean_only=False,
+                resampling=Resampling.nearest,
+            )
+            total += 1
+            generated_layers.add("wave_direction")
+            logger.info("  wave_direction/f%03d", fhour)
+
+            # Internal Cartesian propagation components for the wave renderer.
+            dir_u_cog = data_dir / layout.staging_cog_path(run_id, "wave_dir_u", fhour)
+            dir_v_cog = data_dir / layout.staging_cog_path(run_id, "wave_dir_v", fhour)
+            wave_direction_to_uv_cogs(
+                wave_dir_grib,
+                dir_u_cog,
+                dir_v_cog,
+                overview_config=OverviewConfig.for_continuous(),
+            )
+            total += 2
+            generated_layers.update({"wave_dir_u", "wave_dir_v"})
+            logger.info("  wave_dir_u/f%03d", fhour)
+            logger.info("  wave_dir_v/f%03d", fhour)
 
     logger.info("Generated %d COGs for layers: %s", total, sorted(generated_layers))
     return generated_layers
@@ -318,7 +356,12 @@ def step_generate_data_tiles(
                 continue
 
             count = 0
-            tiles = generate_all_data_tiles(str(cog_path), vmin, vmax)
+            tiles = generate_all_data_tiles(
+                str(cog_path),
+                vmin,
+                vmax,
+                resampling=data_tile_resampling_for_layer(layer),
+            )
             try:
                 for z, x, y, png_bytes in tiles:
                     tile_key = layout.staging_data_tile_path(

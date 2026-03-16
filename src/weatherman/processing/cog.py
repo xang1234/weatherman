@@ -314,6 +314,123 @@ def wind_speed_to_cog(
     )
 
 
+def wave_direction_to_uv_cogs(
+    direction_path: Path,
+    u_output_path: Path,
+    v_output_path: Path,
+    *,
+    overview_config: OverviewConfig | None = None,
+    ocean_only: bool = True,
+) -> tuple[COGResult, COGResult]:
+    """Convert wave direction degrees into Cartesian propagation components.
+
+    GFS-Wave ``DIRPW`` stores the direction waves come from.  The particle
+    renderer wants a propagation vector, so the derived components match the
+    existing shader convention:
+
+    ``u = -sin(theta)``, ``v = -cos(theta)``
+
+    Args:
+        direction_path: Path to the raw wave direction GRIB2/GeoTIFF.
+        u_output_path: Output path for the east-west propagation component COG.
+        v_output_path: Output path for the north-south propagation component COG.
+        overview_config: Overview configuration for the component COGs.
+        ocean_only: Whether to coastal-fill and smooth the component grids.
+
+    Returns:
+        Tuple of ``(u_result, v_result)``.
+    """
+    if not direction_path.exists():
+        raise FileNotFoundError(f"Wave direction GRIB2 file not found: {direction_path}")
+
+    if overview_config is None:
+        overview_config = OverviewConfig.for_continuous()
+
+    u_output_path.parent.mkdir(parents=True, exist_ok=True)
+    v_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(direction_path) as src:
+        direction = _read_band_as_float32(src)
+        height, width = direction.shape
+
+        src_crs = src.crs
+        if src_crs and src_crs.to_epsg() == 4326:
+            transform = src.transform
+        else:
+            logger.info(
+                "Source CRS is %s, applying known GFS 0.25° EPSG:4326 transform",
+                src_crs,
+            )
+            transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+
+    theta = np.deg2rad(direction)
+    u_data = np.full_like(direction, np.nan, dtype=np.float32)
+    v_data = np.full_like(direction, np.nan, dtype=np.float32)
+    valid = ~np.isnan(direction)
+    u_data[valid] = -np.sin(theta[valid]).astype(np.float32)
+    v_data[valid] = -np.cos(theta[valid]).astype(np.float32)
+
+    if ocean_only:
+        from weatherman.processing.coastal_fill import coastal_fill, smooth_grid
+
+        u_data = coastal_fill(u_data, iterations=16)
+        u_data = smooth_grid(u_data, passes=3)
+        v_data = coastal_fill(v_data, iterations=16)
+        v_data = smooth_grid(v_data, passes=3)
+
+        magnitude = np.sqrt(u_data**2 + v_data**2)
+        nonzero = magnitude > np.float32(1e-6)
+        u_data[nonzero] = u_data[nonzero] / magnitude[nonzero]
+        v_data[nonzero] = v_data[nonzero] / magnitude[nonzero]
+        u_data[~nonzero] = np.nan
+        v_data[~nonzero] = np.nan
+
+    _write_cog(
+        data=u_data,
+        output_path=u_output_path,
+        width=width,
+        height=height,
+        transform=transform,
+        overview_levels=overview_config.levels,
+        resampling=overview_config.resampling,
+        nodata=np.nan,
+    )
+    _write_cog(
+        data=v_data,
+        output_path=v_output_path,
+        width=width,
+        height=height,
+        transform=transform,
+        overview_levels=overview_config.levels,
+        resampling=overview_config.resampling,
+        nodata=np.nan,
+    )
+
+    u_size = u_output_path.stat().st_size
+    v_size = v_output_path.stat().st_size
+
+    return (
+        COGResult(
+            input_path=direction_path,
+            output_path=u_output_path,
+            size_bytes=u_size,
+            width=width,
+            height=height,
+            crs=TARGET_CRS,
+            overview_levels=overview_config.levels,
+        ),
+        COGResult(
+            input_path=direction_path,
+            output_path=v_output_path,
+            size_bytes=v_size,
+            width=width,
+            height=height,
+            crs=TARGET_CRS,
+            overview_levels=overview_config.levels,
+        ),
+    )
+
+
 def _write_cog(
     *,
     data: np.ndarray,
