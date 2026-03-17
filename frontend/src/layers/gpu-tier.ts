@@ -6,9 +6,9 @@
  * if the extension is unavailable (e.g., privacy-focused browsers).
  *
  * Tier → particle state-texture size (particles = size²):
- *   HIGH   → 80   (6,400 particles)
- *   MEDIUM → 50   (2,500 particles)
- *   LOW    → 26   (676 particles)
+ *   HIGH   → 136  (18,496 particles)
+ *   MEDIUM → 88   (7,744 particles)
+ *   LOW    → 48   (2,304 particles)
  */
 
 export type GpuTier = 'high' | 'medium' | 'low'
@@ -22,15 +22,15 @@ export interface GpuTierResult {
 }
 
 const TIER_STATE_SIZES: Record<GpuTier, number> = {
-  high: 80,
-  medium: 50,
-  low: 26,
+  high: 136,
+  medium: 88,
+  low: 48,
 }
 
 // ── Renderer string patterns ─────────────────────────────────────────
 // Matched case-insensitively against UNMASKED_RENDERER_WEBGL.
 
-/** GPUs known to handle 160² particles at 60fps easily. */
+/** GPUs known to handle high particle counts at 60fps easily. */
 const HIGH_PATTERNS = [
   /apple m[2-9]/i,                   // Apple Silicon M2+
   /apple m\d\d/i,                    // Apple M10+ (future-proof)

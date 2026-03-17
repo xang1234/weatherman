@@ -38,8 +38,8 @@ import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 
 const DEFAULT_STATE_SIZE = 50
-const TRAIL_FADE = 0.92
-const GRID_SPACING_PX = 24.0
+const TRAIL_FADE = 0.55
+const GRID_SPACING_PX = 14.0
 const PHASE_AMPLITUDE_PX = 22.0
 const SPEED_MAX = 15.0
 const POINT_SIZE = 14.0
@@ -202,7 +202,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
     } else {
       const tier = detectGpuTier(gl)
       this._gpuTier = tier.tier
-      this._stateSize = clampStateSize(Math.round(tier.stateSize * 0.5))
+      this._stateSize = clampStateSize(Math.round(tier.stateSize * 0.85))
       console.info(
         `[WaveParticleLayer] GPU: "${tier.renderer}" → tier=${tier.tier}, ` +
         `stateSize=${this._stateSize} (${this._stateSize ** 2} dash slots)`

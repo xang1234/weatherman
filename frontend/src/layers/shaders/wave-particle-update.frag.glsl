@@ -213,7 +213,7 @@ void main() {
     );
 
     // Faster phase rates with per-particle variation
-    float phaseRate = mix(0.12, 0.35, periodNorm);
+    float phaseRate = mix(0.24, 0.70, periodNorm);
     float rateJitter = mix(0.85, 1.15, hash(cellId + vec2(53.7, 11.9)));
     phaseRate *= rateJitter;
 
@@ -225,21 +225,29 @@ void main() {
     float ampJitter = mix(0.7, 1.3, hash(cellId + vec2(41.3, 97.2)));
     float travel = u_phaseAmplitude * mix(0.45, 1.0, periodNorm) * ampJitter;
 
-    // Perpendicular wobble for organic feel
-    float wobbleFreq = mix(1.5, 3.0, hash(cellId + vec2(73.1, 29.3)));
-    float wobble = sin(phase * wobbleFreq * 6.2832) * 0.15 * travel;
-
-    // Combine forward travel + wobble before single clamp (avoids edge bunching)
     float lon = clamp(
-        anchorLon + direction.x * travel * eased + (-direction.y) * wobble,
+        anchorLon + direction.x * travel * eased,
         u_viewportBounds.x,
         u_viewportBounds.z
     );
     float lat = clamp(
-        anchorLat - direction.y * travel * eased - direction.x * wobble,
+        anchorLat - direction.y * travel * eased,
         u_viewportBounds.y,
         u_viewportBounds.w
     );
+
+    // Hide particle if displaced position is over land (NODATA in wave height)
+    vec2 displacedPos = vec2(lon, lat);
+    vec2 checkUV;
+    if (!atlasLookup(displacedPos, checkUV)) {
+        fragColor = vec4(lon, lat, phase, 0.0);
+        return;
+    }
+    float landCheck = decodeTile(texture(u_waveHeight, checkUV));
+    if (isNodata(landCheck)) {
+        fragColor = vec4(lon, lat, phase, 0.0);
+        return;
+    }
 
     float waveDirDeg = mod(degrees(atan(direction.x, direction.y)) + 360.0, 360.0);
     fragColor = vec4(lon, lat, phase, packHeightDir(waveHeight, waveDirDeg));
