@@ -30,8 +30,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import sqlalchemy as sa
-from rasterio.enums import Resampling
-
 from weatherman.events.emissions import emit_run_published
 from weatherman.ingest.gfs import (
     DEFAULT_SEARCH_PATTERNS,
@@ -72,10 +70,9 @@ logger = logging.getLogger("pipeline")
 # Only download variables we can render (have colormaps defined):
 #   temperature   ← tmp_2m
 #   wind_speed    ← ugrd_10m + vgrd_10m
-#   precipitation ← apcp_sfc
 PIPELINE_VARIABLES = {
     k: DEFAULT_SEARCH_PATTERNS[k]
-    for k in ("tmp_2m", "ugrd_10m", "vgrd_10m", "apcp_sfc")
+    for k in ("tmp_2m", "ugrd_10m", "vgrd_10m")
 }
 
 # Layer definitions matching colormaps.py
@@ -95,32 +92,11 @@ LAYER_CONFIGS = [
         value_range=ValueRange(min=0.0, max=50.0),
     ),
     LayerConfig(
-        id="precipitation",
-        display_name="Total Precipitation",
-        unit="kg/m^2",
-        palette_name="precipitation",
-        value_range=ValueRange(min=0.0, max=250.0),
-    ),
-    LayerConfig(
         id="wave_height",
         display_name="Significant Wave Height",
         unit="m",
         palette_name="wave_height",
         value_range=ValueRange(min=0.0, max=15.0),
-    ),
-    LayerConfig(
-        id="wave_period",
-        display_name="Peak Wave Period",
-        unit="s",
-        palette_name="wave_period",
-        value_range=ValueRange(min=0.0, max=25.0),
-    ),
-    LayerConfig(
-        id="wave_direction",
-        display_name="Peak Wave Direction",
-        unit="°",
-        palette_name="wave_direction",
-        value_range=ValueRange(min=0.0, max=360.0),
     ),
 ]
 
@@ -255,15 +231,6 @@ def step_generate_cogs(
             generated_layers.add("wind_v")
             logger.info("  wind_v/f%03d", fhour)
 
-        # Precipitation (direct: apcp_sfc → precipitation)
-        apcp_grib = grib2_dir / "grib2" / "apcp_sfc" / f"f{fhour:03d}.grib2"
-        if apcp_grib.exists():
-            cog_path = data_dir / layout.staging_cog_path(run_id, "precipitation", fhour)
-            grib2_to_cog(apcp_grib, cog_path)
-            total += 1
-            generated_layers.add("precipitation")
-            logger.info("  precipitation/f%03d", fhour)
-
         # Wave height and period are continuous ocean-only fields.
         wave_height_grib = grib2_dir / "grib2" / "htsgw_sfc" / f"f{fhour:03d}.grib2"
         if wave_height_grib.exists():
@@ -281,22 +248,11 @@ def step_generate_cogs(
             generated_layers.add("wave_period")
             logger.info("  wave_period/f%03d", fhour)
 
-        # Raw wave direction is circular data: keep it on a nearest-only path
-        # so 350°/10° does not collapse toward 180° during overview/tile reads.
+        # Wave direction → Cartesian U/V components for the wave particle renderer.
+        # No standalone scalar COG — circular data (degrees) is only consumed
+        # as decomposed U/V by the GPU pipeline.
         wave_dir_grib = grib2_dir / "grib2" / "dirpw_sfc" / f"f{fhour:03d}.grib2"
         if wave_dir_grib.exists():
-            dir_cog = data_dir / layout.staging_cog_path(run_id, "wave_direction", fhour)
-            grib2_to_cog(
-                wave_dir_grib,
-                dir_cog,
-                ocean_only=False,
-                resampling=Resampling.nearest,
-            )
-            total += 1
-            generated_layers.add("wave_direction")
-            logger.info("  wave_direction/f%03d", fhour)
-
-            # Internal Cartesian propagation components for the wave renderer.
             dir_u_cog = data_dir / layout.staging_cog_path(run_id, "wave_dir_u", fhour)
             dir_v_cog = data_dir / layout.staging_cog_path(run_id, "wave_dir_v", fhour)
             wave_direction_to_uv_cogs(
@@ -337,7 +293,7 @@ def step_generate_data_tiles(
     # Skip wind_u/wind_v: the WebGL vector pipeline fetches these on-demand
     # via TiTiler fallback. Pre-generating doubles tile count and memory usage
     # for layers that are never displayed directly (only used as GPU inputs).
-    skip_data_tiles = {"wind_u", "wind_v"}
+    skip_data_tiles = {"wind_u", "wind_v", "wave_period", "wave_dir_u", "wave_dir_v"}
 
     for layer in sorted(generated_layers):
         if layer in skip_data_tiles:

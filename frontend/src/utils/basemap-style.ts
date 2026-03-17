@@ -30,7 +30,7 @@ const WEATHER_FILL_OPACITY = 0.3
 const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
 
 /** Weather layers that only have data over ocean — need opaque earth mask. */
-const OCEAN_ONLY_LAYERS = new Set(['wave_height', 'wave_period', 'wave_direction'])
+const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
 
 /**
  * Light basemap style optimized for weather overlay readability.

@@ -7,7 +7,7 @@
  * and colorizes them using a 1D color ramp lookup texture.
  *
  * Supports two rendering modes:
- *   - Scalar: single data tile per cell (temperature, precipitation)
+ *   - Scalar: single data tile per cell (temperature, wave_height)
  *   - Vector: U/V component tile pairs per cell (wind). Interpolates
  *     Cartesian components then reconstructs speed for color ramp lookup.
  *
@@ -53,7 +53,7 @@ import { getTileFetchClient } from '@/workers/TileFetchClient'
 const VECTOR_LAYERS = new Set(['wind_speed'])
 
 /** Layers that only have data over ocean — enables shader coastal fallback. */
-const OCEAN_ONLY_LAYERS = new Set(['wave_height', 'wave_period', 'wave_direction'])
+const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
 
 export interface WeatherGLLayerOptions {
   /** Unique layer ID for MapLibre. */
