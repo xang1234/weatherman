@@ -1,6 +1,7 @@
 services:
   titiler:
     image: ghcr.io/developmentseed/titiler:0.18.5
+    platform: linux/amd64
     volumes:
       - ./.data:/data:ro
     environment:
