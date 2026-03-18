@@ -85,15 +85,18 @@ def _herbie_for_hour(
     *,
     model: str = "gfs",
     product: str = "pgrb2.0p25",
+    member: str | int | None = None,
 ) -> Herbie:
     """Create a Herbie instance for a specific forecast hour."""
     cycle_dt = run_id.as_datetime
-    return Herbie(
-        cycle_dt.strftime("%Y-%m-%d %H:%M"),
+    kwargs: dict[str, object] = dict(
         model=model,
         product=product,
         fxx=forecast_hour,
     )
+    if member is not None:
+        kwargs["member"] = member
+    return Herbie(cycle_dt.strftime("%Y-%m-%d %H:%M"), **kwargs)
 
 
 def download_variable(
@@ -105,6 +108,7 @@ def download_variable(
     *,
     model: str = "gfs",
     product: str = "pgrb2.0p25",
+    member: str | int | None = None,
 ) -> DownloadResult:
     """Download a single GFS/GFS-Wave variable for one forecast hour.
 
@@ -119,6 +123,7 @@ def download_variable(
         staging_dir: Local directory to stage downloaded files.
         model: Herbie model name (default: "gfs").
         product: Herbie product name (default: "pgrb2.0p25").
+        member: Herbie ensemble member (default: None — deterministic).
 
     Returns:
         DownloadResult with the local path and file size.
@@ -148,7 +153,7 @@ def download_variable(
             size_bytes=size,
         )
 
-    h = _herbie_for_hour(run_id, forecast_hour, model=model, product=product)
+    h = _herbie_for_hour(run_id, forecast_hour, model=model, product=product, member=member)
 
     logger.info(
         "Downloading %s fxx=%03d for %s",
@@ -193,6 +198,7 @@ def download_gfs_cycle(
     variables: dict[str, str] | None = None,
     model: str = "gfs",
     product: str = "pgrb2.0p25",
+    member: str | int | None = None,
 ) -> CycleDownloadResult:
     """Download all required variables for a model cycle.
 
@@ -207,6 +213,7 @@ def download_gfs_cycle(
         variables: Dict of {name: herbie_search_pattern} (default: atmo GFS set).
         model: Herbie model name (default: "gfs").
         product: Herbie product name (default: "pgrb2.0p25").
+        member: Herbie ensemble member (default: None — deterministic).
 
     Returns:
         CycleDownloadResult with per-file results and any errors.
@@ -220,7 +227,7 @@ def download_gfs_cycle(
     if cycle_hour not in GFS_CYCLE_HOURS:
         raise ValueError(
             f"Run {run_id} has cycle hour {cycle_hour}, "
-            f"but GFS only runs at {GFS_CYCLE_HOURS}"
+            f"but {model} only runs at {GFS_CYCLE_HOURS}"
         )
 
     # Ensure staging directory matches the canonical layout
@@ -248,6 +255,7 @@ def download_gfs_cycle(
                     staging_dir=run_staging,
                     model=model,
                     product=product,
+                    member=member,
                 )
                 result.downloads.append(dl)
             except Exception as exc:
@@ -256,7 +264,8 @@ def download_gfs_cycle(
                 result.errors.append(msg)
 
     logger.info(
-        "GFS download complete for %s: %d ok, %d errors, %.1f MB total",
+        "%s download complete for %s: %d ok, %d errors, %.1f MB total",
+        model,
         run_id,
         result.success_count,
         result.error_count,
@@ -266,25 +275,38 @@ def download_gfs_cycle(
     return result
 
 
-def check_cycle_available(run_id: RunID) -> bool:
-    """Check if a GFS cycle's data is available on any source.
+def check_cycle_available(
+    run_id: RunID,
+    *,
+    model: str = "gfs",
+    product: str = "pgrb2.0p25",
+    member: str | int | None = None,
+) -> bool:
+    """Check if a model cycle's data is available on any source.
 
     Probes forecast hour 0 to see if the cycle has been published.
     """
     try:
-        h = _herbie_for_hour(run_id, forecast_hour=0)
+        h = _herbie_for_hour(
+            run_id, forecast_hour=0, model=model, product=product, member=member,
+        )
         # Herbie's inventory fetches the .idx file; if it exists, data is available
         inv = h.inventory()
         return len(inv) > 0
     except Exception:
-        logger.debug("Cycle %s not yet available", run_id)
+        logger.debug("Cycle %s not yet available (model=%s)", run_id, model)
         return False
 
 
-def latest_available_cycle() -> RunID | None:
-    """Find the most recent GFS cycle that has data available.
+def latest_available_cycle(
+    *,
+    model: str = "gfs",
+    product: str = "pgrb2.0p25",
+    member: str | int | None = None,
+) -> RunID | None:
+    """Find the most recent cycle that has data available.
 
-    Generates the last 5 distinct GFS cycles in reverse chronological
+    Generates the last 5 distinct cycles in reverse chronological
     order and returns the first one that has data.
     """
     from datetime import timedelta, timezone
@@ -303,9 +325,9 @@ def latest_available_cycle() -> RunID | None:
         if run_id.value in seen:
             continue
         seen.add(run_id.value)
-        if check_cycle_available(run_id):
-            logger.info("Latest available cycle: %s", run_id)
+        if check_cycle_available(run_id, model=model, product=product, member=member):
+            logger.info("Latest available %s cycle: %s", model, run_id)
             return run_id
 
-    logger.warning("No available GFS cycle found in last 24 hours")
+    logger.warning("No available %s cycle found in last 24 hours", model)
     return None

@@ -15,6 +15,7 @@ import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
 import { LayerPanel } from '@/components/LayerPanel'
+import { ModelSelector, type ModelId } from '@/components/ModelSelector'
 import { WeatherInspector } from '@/components/WeatherInspector'
 import type { LayerConfig } from '@/types/manifest'
 
@@ -32,9 +33,10 @@ function forecastHourFromUrl(forecastHours: number[]): number | null {
 export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null)
   const { map, isLoaded } = useMap({ container: containerRef })
+  const [model, setModel] = useState<ModelId>('gfs')
   const sse = useSSE()
   const latestAISDate = useLatestAISDate()
-  const dataAge = useDataAge({ model: 'gfs', version: sse.weatherVersion })
+  const dataAge = useDataAge({ model, version: sse.weatherVersion })
   const opacity = 0.7
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
   const [selectedForecastHour, setSelectedForecastHour] = useState<number | null>(() =>
@@ -43,7 +45,7 @@ export function MapView() {
   const [isPlaying, setIsPlaying] = useState(false)
 
   const runId = dataAge?.runId ?? null
-  const manifest = useManifest({ model: 'gfs', runId })
+  const manifest = useManifest({ model, runId })
 
   // Auto-select first layer when manifest loads (or if active layer is no longer available)
   const layers = manifest?.layers ?? EMPTY_LAYERS
@@ -93,7 +95,7 @@ export function MapView() {
     map,
     isLoaded,
     layer: resolvedLayerId ?? '',
-    model: 'gfs',
+    model,
     runId,
     forecastHour: forecastHour ?? 0,
     opacity,
@@ -197,7 +199,7 @@ export function MapView() {
     map,
     isLoaded,
     layer: resolvedLayerId ?? '',
-    model: 'gfs',
+    model,
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
     visible: resolvedLayerId === 'wind_speed',
@@ -212,7 +214,7 @@ export function MapView() {
     map,
     isLoaded,
     layer: resolvedLayerId ?? '',
-    model: 'gfs',
+    model,
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
     visible: resolvedLayerId === 'wave_height',
@@ -227,13 +229,14 @@ export function MapView() {
   const inspector = useWeatherInspector({
     map,
     isLoaded,
-    model: 'gfs',
+    model,
     runId,
   })
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      <ModelSelector model={model} onChange={setModel} />
       {dataAge && <DataAgeIndicator state={dataAge} />}
       <WeatherInspector inspector={inspector} forecastHour={forecastHour} />
       {layers.length > 0 && (

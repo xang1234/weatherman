@@ -28,6 +28,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypedDict
 
 import sqlalchemy as sa
 from weatherman.events.emissions import emit_run_published
@@ -103,13 +104,54 @@ LAYER_CONFIGS = [
 PROCESSING_VERSION = "local-dev"
 
 
+class ModelConfig(TypedDict):
+    atmo_model: str
+    atmo_product: str
+    atmo_member: str | int | None
+    wave_model: str
+    wave_product: str
+    wave_member: str | int | None
+    resolution_km: float
+
+
+# Model configurations for supported NWP sources.
+# Each entry maps to the Herbie constructor arguments needed for
+# both the atmospheric and wave download passes.
+MODEL_CONFIGS: dict[str, ModelConfig] = {
+    "gfs": {
+        "atmo_model": "gfs",
+        "atmo_product": "pgrb2.0p25",
+        "atmo_member": None,
+        "wave_model": "gfs_wave",
+        "wave_product": "global.0p25",
+        "wave_member": None,
+        "resolution_km": 25.0,
+    },
+    "gefs": {
+        "atmo_model": "gefs",
+        "atmo_product": "atmos.25",
+        "atmo_member": "mean",
+        "wave_model": "gefs",
+        "wave_product": "wave",
+        "wave_member": "mean",
+        "resolution_km": 25.0,
+    },
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GFS weather pipeline — download, process, publish locally.",
+        description="Weather pipeline — download, process, publish locally.",
+    )
+    parser.add_argument(
+        "--model",
+        choices=list(MODEL_CONFIGS),
+        default="gfs",
+        help="NWP model to run (default: gfs).",
     )
     parser.add_argument(
         "--run-id",
-        help="GFS cycle to fetch (e.g. 20260308T00Z). Default: latest available.",
+        help="Model cycle to fetch (e.g. 20260308T00Z). Default: latest available.",
     )
     parser.add_argument(
         "--hours",
@@ -133,10 +175,13 @@ def step_download(
     run_id: RunID,
     forecast_hours: list[int],
     staging_dir: Path,
+    *,
+    model_config: ModelConfig,
 ) -> Path:
-    """Download GFS GRIB2 files. Returns the run staging directory."""
+    """Download GRIB2 files for the configured model. Returns the run staging directory."""
     logger.info(
-        "Step 1/5: Downloading GFS GRIB2 for %s (hours: %s)",
+        "Step 1/5: Downloading %s GRIB2 for %s (hours: %s)",
+        model_config["atmo_model"],
         run_id,
         forecast_hours,
     )
@@ -145,6 +190,9 @@ def step_download(
         staging_dir=staging_dir,
         forecast_hours=forecast_hours,
         variables=PIPELINE_VARIABLES,
+        model=model_config["atmo_model"],
+        product=model_config["atmo_product"],
+        member=model_config["atmo_member"],
     )
     logger.info(
         "Download complete: %d files (%.1f MB), %d errors",
@@ -158,17 +206,18 @@ def step_download(
 
     # download_gfs_cycle writes to staging_dir/<run_id>/grib2/...
 
-    # GFS-Wave (WW3) download — separate model, same cycle/hours.
+    # Wave download — separate model/product, same cycle/hours.
     # Wave data may not be available for all cycles; log and continue.
-    logger.info("Downloading GFS-Wave (WW3) data for %s", run_id)
+    logger.info("Downloading wave data (%s) for %s", model_config["wave_model"], run_id)
     try:
         wave_result = download_gfs_cycle(
             run_id=run_id,
             staging_dir=staging_dir,
             forecast_hours=forecast_hours,
             variables=DEFAULT_WAVE_SEARCH_PATTERNS,
-            model="gfs_wave",
-            product="global.0p25",
+            model=model_config["wave_model"],
+            product=model_config["wave_product"],
+            member=model_config["wave_member"],
         )
         logger.info(
             "Wave download: %d files (%.1f MB), %d errors",
@@ -177,7 +226,7 @@ def step_download(
             wave_result.error_count,
         )
     except Exception as exc:
-        logger.warning("GFS-Wave download failed (non-fatal): %s", exc)
+        logger.warning("Wave download failed (non-fatal): %s", exc)
 
     return staging_dir / str(run_id)
 
@@ -341,6 +390,9 @@ def step_write_manifest(
     store: LocalObjectStore,
     layout: StorageLayout,
     generated_layers: set[str],
+    *,
+    model: str = "gfs",
+    resolution_km: float = 25.0,
 ) -> None:
     """Write the UI manifest for the frontend.
 
@@ -352,10 +404,10 @@ def step_write_manifest(
         logger.warning("No layers generated — skipping manifest write")
         return
     config = ManifestConfig(
-        model="gfs",
+        model=model,
         run_id=run_id,
         published_at=datetime.now(timezone.utc),
-        resolution_km=25.0,
+        resolution_km=resolution_km,
         layers=active_layers,
         forecast_hours=forecast_hours,
     )
@@ -385,6 +437,8 @@ def step_publish_run(
     store: LocalObjectStore,
     layout: StorageLayout,
     data_dir: Path,
+    *,
+    model: str = "gfs",
 ) -> None:
     """Publish staged artifacts via the canonical publish helper."""
     logger.info("Step 5/5: Publishing staged artifacts")
@@ -392,7 +446,7 @@ def step_publish_run(
     if store.exists(catalog_path):
         catalog = RunCatalog.from_json(store.read_bytes(catalog_path).decode("utf-8"))
     else:
-        catalog = RunCatalog.new("gfs")
+        catalog = RunCatalog.new(model)
 
     lifecycle = _lifecycle_for_data_dir(data_dir)
 
@@ -406,7 +460,7 @@ def step_publish_run(
         return
 
     try:
-        lifecycle.register("gfs", run_id, PROCESSING_VERSION)
+        lifecycle.register(model, run_id, PROCESSING_VERSION)
     except DuplicateRun:
         logger.info(
             "Lifecycle already exists for %s/%s; reusing existing row",
@@ -415,7 +469,7 @@ def step_publish_run(
     for state in (RunState.INGESTING, RunState.STAGED, RunState.VALIDATED):
         try:
             lifecycle.transition(
-                "gfs",
+                model,
                 run_id,
                 PROCESSING_VERSION,
                 state,
@@ -443,6 +497,8 @@ def step_publish_run(
 
 def main() -> None:
     args = parse_args()
+    model = args.model
+    model_config = MODEL_CONFIGS[model]
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -453,17 +509,21 @@ def main() -> None:
         run_id = RunID(args.run_id)
         logger.info("Using specified run: %s", run_id)
     else:
-        logger.info("Finding latest available GFS cycle...")
-        run_id = latest_available_cycle()
+        logger.info("Finding latest available %s cycle...", model)
+        run_id = latest_available_cycle(
+            model=model_config["atmo_model"],
+            product=model_config["atmo_product"],
+            member=model_config["atmo_member"],
+        )
         if run_id is None:
             logger.error(
-                "No available GFS cycle found. Try specifying --run-id."
+                "No available %s cycle found. Try specifying --run-id.", model,
             )
             sys.exit(1)
         logger.info("Latest available: %s", run_id)
 
     store = LocalObjectStore(data_dir)
-    layout = StorageLayout("gfs")
+    layout = StorageLayout(model)
 
     # Skip pipeline if this run is already published
     catalog_path = layout.catalog_path
@@ -480,9 +540,9 @@ def main() -> None:
 
     # Store GRIB2 files persistently so they survive container restarts.
     # Individual files are cache-checked in download_variable().
-    grib2_base = data_dir / "models" / "gfs" / "grib2"
+    grib2_base = data_dir / "models" / model / "grib2"
     grib2_base.mkdir(parents=True, exist_ok=True)
-    grib2_dir = step_download(run_id, forecast_hours, grib2_base)
+    grib2_dir = step_download(run_id, forecast_hours, grib2_base, model_config=model_config)
     generated_layers = step_generate_cogs(
         run_id, forecast_hours, grib2_dir, data_dir, layout,
     )
@@ -490,13 +550,16 @@ def main() -> None:
     step_generate_data_tiles(
         run_id, forecast_hours, data_dir, store, layout, generated_layers,
     )
-    step_write_manifest(run_id, forecast_hours, store, layout, generated_layers)
-    step_publish_run(run_id, store, layout, data_dir)
+    step_write_manifest(
+        run_id, forecast_hours, store, layout, generated_layers,
+        model=model, resolution_km=model_config["resolution_km"],
+    )
+    step_publish_run(run_id, store, layout, data_dir, model=model)
 
     logger.info("")
     logger.info("=" * 60)
-    logger.info("Pipeline complete: %s", run_id)
-    logger.info("  COGs:     %s/models/gfs/runs/%s/cogs/", data_dir, run_id)
+    logger.info("Pipeline complete (%s): %s", model, run_id)
+    logger.info("  COGs:     %s/models/%s/runs/%s/cogs/", data_dir, model, run_id)
     logger.info("  Manifest: %s/%s", data_dir, layout.manifest_path(run_id))
     logger.info("  Catalog:  %s/%s", data_dir, layout.catalog_path)
     logger.info("")
