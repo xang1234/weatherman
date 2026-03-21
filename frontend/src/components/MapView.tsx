@@ -11,11 +11,15 @@ import { useVesselPopup } from '@/hooks/useVesselPopup'
 import { useVesselTrack } from '@/hooks/useVesselTrack'
 import { useWindParticles, type WindParticleHandle } from '@/hooks/useWindParticles'
 import { useWaveParticles, type WaveParticleHandle } from '@/hooks/useWaveParticles'
+import { useVoyageRoute } from '@/hooks/useVoyageRoute'
+import { useVoyageCorridor } from '@/hooks/useVoyageCorridor'
 import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
 import { LayerPanel } from '@/components/LayerPanel'
 import { ModelSelector, type ModelId } from '@/components/ModelSelector'
+import { VoyageDrawButton } from '@/components/VoyageDrawButton'
+import { VoyageWeatherPanel } from '@/components/VoyageWeatherPanel'
 import { WeatherInspector } from '@/components/WeatherInspector'
 import type { LayerConfig } from '@/types/manifest'
 
@@ -226,11 +230,18 @@ export function MapView() {
 
   useVesselPopup({ map, isLoaded })
   useVesselTrack({ map, isLoaded, snapshotDate: aisDate })
+  const voyageRoute = useVoyageRoute({ map, isLoaded })
+  const voyageCorridor = useVoyageCorridor({
+    lineString: voyageRoute.lineString,
+    model,
+    runId,
+  })
   const inspector = useWeatherInspector({
     map,
     isLoaded,
     model,
     runId,
+    disabled: voyageRoute.isDrawing,
   })
 
   return (
@@ -239,6 +250,16 @@ export function MapView() {
       <ModelSelector model={model} onChange={setModel} />
       {dataAge && <DataAgeIndicator state={dataAge} />}
       <WeatherInspector inspector={inspector} forecastHour={forecastHour} />
+      <VoyageDrawButton route={voyageRoute} />
+      {voyageRoute.lineString && (
+        <VoyageWeatherPanel
+          corridor={voyageCorridor}
+          route={voyageRoute}
+          forecastHour={forecastHour}
+          layers={layers}
+          onClose={voyageRoute.clearRoute}
+        />
+      )}
       {layers.length > 0 && (
         <LayerPanel
           layers={layers}

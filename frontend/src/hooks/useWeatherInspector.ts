@@ -19,6 +19,8 @@ export interface UseWeatherInspectorOptions {
   isLoaded: boolean
   model: string
   runId: string | null
+  /** When true, click handling is suppressed (e.g., during route drawing). */
+  disabled?: boolean
 }
 
 export function useWeatherInspector({
@@ -26,6 +28,7 @@ export function useWeatherInspector({
   isLoaded,
   model,
   runId,
+  disabled = false,
 }: UseWeatherInspectorOptions): WeatherInspectorState {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const [point, setPoint] = useState<{ lon: number; lat: number } | null>(null)
@@ -34,6 +37,8 @@ export function useWeatherInspector({
   const [error, setError] = useState<string | null>(null)
   const [selectedVariable, setSelectedVariable] = useState<string | null>(null)
   const requestIdRef = useRef(0)
+  const disabledRef = useRef(disabled)
+  disabledRef.current = disabled
 
   useEffect(() => {
     if (!point || !runId) return
@@ -82,6 +87,7 @@ export function useWeatherInspector({
     const activeMap = m
 
     function onClick(e: maplibregl.MapMouseEvent) {
+      if (disabledRef.current) return
       const layers = AIS_LAYERS.filter((layerId) => activeMap.getLayer(layerId))
       const vesselFeatures = layers.length > 0
         ? activeMap.queryRenderedFeatures(e.point, { layers })
