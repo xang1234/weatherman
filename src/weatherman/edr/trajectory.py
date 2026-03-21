@@ -44,7 +44,7 @@ class TrajectoryRequest(BaseModel):
         ..., description="Array of [lon, lat] pairs", min_length=2,
     )
     num_samples: int = Field(
-        default=40, ge=2, le=200,
+        default=20, ge=2, le=200,
         description="Number of equidistant sample points along the route",
     )
     speed_knots: float | None = Field(
@@ -95,6 +95,19 @@ def _sample_trajectory(
     n_times = len(time_coords)
     n_samples = len(samples)
 
+    # Compute spatial bounding box of all sample grid indices for slab reads.
+    # This reads one small slab per time step instead of per-column reads,
+    # reducing chunk I/O from O(samples × times) to O(times).
+    all_j = [p.j0 for p in plans] + [p.j1 for p in plans]
+    all_i = [p.i0 for p in plans] + [p.i1 for p in plans]
+    j_min, j_max = min(all_j), max(all_j)
+    i_min, i_max = min(all_i), max(all_i)
+
+    # Detect antimeridian crossing (i indices wrap around the array)
+    i_span = i_max - i_min
+    n_lon = len(lon_coords)
+    use_slab = i_span < n_lon // 2  # if span > half the globe, fall back to column reads
+
     ranges: dict[str, Any] = {}
     parameters: dict[str, Any] = {}
 
@@ -112,13 +125,29 @@ def _sample_trajectory(
 
         values = np.full((n_samples, n_times), np.nan, dtype=np.float32)
 
-        for s_idx, plan in enumerate(plans):
-            v00 = np.asarray(arr[:, plan.j0, plan.i0])
-            v01 = np.asarray(arr[:, plan.j0, plan.i1])
-            v10 = np.asarray(arr[:, plan.j1, plan.i0])
-            v11 = np.asarray(arr[:, plan.j1, plan.i1])
-            blended = v00 * plan.w00 + v01 * plan.w01 + v10 * plan.w10 + v11 * plan.w11
-            values[s_idx, :] = blended
+        if use_slab:
+            # Single read: all time steps × spatial bounding box (~few MB)
+            cube = np.asarray(arr[:, j_min:j_max + 1, i_min:i_max + 1])
+            for s_idx, plan in enumerate(plans):
+                j0r, j1r = plan.j0 - j_min, plan.j1 - j_min
+                i0r, i1r = plan.i0 - i_min, plan.i1 - i_min
+                blended = (
+                    cube[:, j0r, i0r] * plan.w00
+                    + cube[:, j0r, i1r] * plan.w01
+                    + cube[:, j1r, i0r] * plan.w10
+                    + cube[:, j1r, i1r] * plan.w11
+                )
+                values[s_idx, :] = blended
+        else:
+            for s_idx, plan in enumerate(plans):
+                v00 = np.asarray(arr[:, plan.j0, plan.i0])
+                v01 = np.asarray(arr[:, plan.j0, plan.i1])
+                v10 = np.asarray(arr[:, plan.j1, plan.i0])
+                v11 = np.asarray(arr[:, plan.j1, plan.i1])
+                values[s_idx, :] = (
+                    v00 * plan.w00 + v01 * plan.w01
+                    + v10 * plan.w10 + v11 * plan.w11
+                )
 
         values_list = [
             [None if np.isnan(v) else round(float(v), 4) for v in row]
@@ -170,7 +199,7 @@ def _sample_trajectory(
     "/collections/{model}/instances/{run_id}/trajectory",
     summary="EDR trajectory query — weather along a route",
 )
-async def edr_trajectory(
+def edr_trajectory(
     model: str,
     run_id: str,
     body: TrajectoryRequest = Body(...),
