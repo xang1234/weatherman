@@ -370,6 +370,21 @@ class EDRService:
         layout = StorageLayout(model)
         return layout.zarr_path(run_id)
 
+    def open_zarr_store(self, model: str, run_id: RunID) -> zarr.Group:
+        """Open the Zarr store for a given model run.
+
+        Raises HTTPException 404 if the store doesn't exist.
+        """
+        path = self.zarr_path(model, run_id)
+        try:
+            return self._zarr_opener(path)
+        except Exception as exc:
+            logger.error("Failed to open Zarr store at %s: %s", path, exc)
+            raise HTTPException(
+                status_code=404,
+                detail=f"Zarr store not found for {model}/{run_id}",
+            ) from exc
+
     def query_position(
         self,
         model: str,

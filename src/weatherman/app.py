@@ -47,6 +47,7 @@ from weatherman.edr.position import (
     shutdown_edr_service,
 )
 from weatherman.edr.position import router as edr_router
+from weatherman.edr.trajectory import router as trajectory_router
 from weatherman.events.router import (
     init_event_bus,
     shutdown_event_bus,
@@ -312,7 +313,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
     app.add_middleware(PrometheusMiddleware)
@@ -325,6 +326,7 @@ def create_app(
     app.include_router(ais_tile_router)
     app.include_router(ais_query_router)
     app.include_router(edr_router)
+    app.include_router(trajectory_router)
     app.include_router(events_router)
 
     # Metrics endpoint (plain Starlette route, not a router)
