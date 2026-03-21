@@ -44,6 +44,7 @@ from weatherman.processing.cog import (
     wave_direction_to_uv_cogs,
     wind_speed_to_cog,
 )
+from weatherman.processing.zarr_writer import grib2_dir_to_zarr
 from weatherman.processing.data_tiles import (
     data_tile_resampling_for_layer,
     generate_all_data_tiles,
@@ -162,6 +163,12 @@ def parse_args() -> argparse.Namespace:
         "--data-dir",
         default=".data",
         help="Local data directory (default: .data/).",
+    )
+    parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=2,
+        help="Max runs to keep per model (default: 2 = current + 1 previous).",
     )
     return parser.parse_args()
 
@@ -384,6 +391,21 @@ def step_generate_data_tiles(
     return total
 
 
+def step_generate_zarr(
+    run_id: RunID,
+    forecast_hours: list[int],
+    grib2_dir: Path,
+    data_dir: Path,
+    layout: StorageLayout,
+) -> None:
+    """Generate a Zarr store from GRIB2 files for EDR point/trajectory queries."""
+    logger.info("Generating Zarr store for EDR queries")
+    zarr_path = data_dir / layout.staging_zarr_path(run_id)
+    grib2_vars_dir = grib2_dir / "grib2" if (grib2_dir / "grib2").is_dir() else grib2_dir
+    written = grib2_dir_to_zarr(grib2_vars_dir, zarr_path, forecast_hours)
+    logger.info("  Zarr: %s (%d variables)", zarr_path, len(written))
+
+
 def step_write_manifest(
     run_id: RunID,
     forecast_hours: list[int],
@@ -490,6 +512,44 @@ def step_publish_run(
     logger.info("  Current run: %s", catalog.current_run_id)
 
 
+def step_cleanup_old_runs(
+    catalog: RunCatalog,
+    store: LocalObjectStore,
+    layout: StorageLayout,
+    *,
+    max_runs: int,
+) -> None:
+    """Expire and delete old runs, keeping only max_runs most recent."""
+    superseded = sorted(
+        catalog.superseded_runs(),
+        key=lambda e: e.superseded_at or e.published_at,
+        reverse=True,
+    )
+
+    # Keep max_runs - 1 superseded (1 slot is for the current published run)
+    keep = max(max_runs - 1, 0)
+    to_expire = superseded[keep:]
+
+    if not to_expire:
+        logger.info("Cleanup: nothing to expire (max_runs=%d)", max_runs)
+        return
+
+    for entry in to_expire:
+        logger.info("Cleanup: expiring %s", entry.run_id)
+        catalog.expire_run(entry.run_id)
+
+        run_prefix = layout.run_prefix(entry.run_id)
+        store.delete(run_prefix)
+        logger.info("  Deleted %s", run_prefix)
+
+        grib2_prefix = f"{layout.model_prefix}/grib2/{entry.run_id}"
+        store.delete(grib2_prefix)
+        logger.info("  Deleted %s", grib2_prefix)
+
+    store.write_bytes(layout.catalog_path, catalog.to_json().encode("utf-8"))
+    logger.info("Cleanup: expired %d run(s), kept %d", len(to_expire), keep + 1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -536,6 +596,10 @@ def main() -> None:
                 run_id,
                 entry.status.value,
             )
+            # Still clean up old runs even when skipping download
+            step_cleanup_old_runs(
+                catalog, store, layout, max_runs=args.max_runs,
+            )
             sys.exit(0)
 
     # Store GRIB2 files persistently so they survive container restarts.
@@ -547,6 +611,7 @@ def main() -> None:
         run_id, forecast_hours, grib2_dir, data_dir, layout,
     )
 
+    step_generate_zarr(run_id, forecast_hours, grib2_dir, data_dir, layout)
     step_generate_data_tiles(
         run_id, forecast_hours, data_dir, store, layout, generated_layers,
     )
@@ -555,6 +620,12 @@ def main() -> None:
         model=model, resolution_km=model_config["resolution_km"],
     )
     step_publish_run(run_id, store, layout, data_dir, model=model)
+    published_catalog = RunCatalog.from_json(
+        store.read_bytes(layout.catalog_path).decode("utf-8"),
+    )
+    step_cleanup_old_runs(
+        published_catalog, store, layout, max_runs=args.max_runs,
+    )
 
     logger.info("")
     logger.info("=" * 60)

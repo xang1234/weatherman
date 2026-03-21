@@ -18,7 +18,13 @@ services:
 
   pipeline:
     build: .
-    command: ["uv", "run", "python", "scripts/run_pipeline.py", "--data-dir", "/data", "--hours", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48"]
+    command: ["uv", "run", "python", "scripts/run_pipeline.py", "--data-dir", "/data", "--hours", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48", "--max-runs", "2"]
+    volumes:
+      - ./.data:/data
+
+  pipeline-gefs:
+    build: .
+    command: ["uv", "run", "python", "scripts/run_pipeline.py", "--model", "gefs", "--data-dir", "/data", "--hours", "0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48", "--max-runs", "2"]
     volumes:
       - ./.data:/data
 
@@ -39,6 +45,8 @@ services:
       titiler:
         condition: service_healthy
       pipeline:
+        condition: service_completed_successfully
+      pipeline-gefs:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
