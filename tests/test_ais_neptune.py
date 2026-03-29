@@ -212,10 +212,23 @@ def test_refresh_neptune_day_builds_snapshot_and_emits_event(monkeypatch) -> Non
 
 
 def test_run_neptune_live_ingest_promotes_and_refreshes(monkeypatch, tmp_path: Path) -> None:
+    sentinel = object()
+
     class FakeParquetSink:
         def __init__(self, landing_dir, source):
             self.landing_dir = landing_dir
             self.source = source
+            self.writes: list[dict[str, object]] = []
+            self.flushes = 0
+
+        async def write(self, messages):
+            self.writes.extend(messages)
+
+        async def flush(self):
+            self.flushes += 1
+
+        async def close(self):
+            return None
 
     class FakeStreamConfig:
         def __init__(self, **kwargs):
@@ -224,16 +237,31 @@ def test_run_neptune_live_ingest_promotes_and_refreshes(monkeypatch, tmp_path: P
     class FakeNeptuneStream:
         def __init__(self, *, config):
             self.config = config
+            self.stats = SimpleNamespace(messages_delivered=0)
+            self._message_queue = asyncio.Queue()
 
         async def __aenter__(self):
+            self.is_running = True
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
+            self.is_running = False
+            await self._message_queue.put(sentinel)
             return None
 
-        async def run(self, sink, *, max_messages=None):
-            assert sink.source == "aisstream"
-            assert max_messages == 25
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            message = await self._message_queue.get()
+            if message is sentinel:
+                raise StopAsyncIteration
+            return message
+
+        async def ingest(self, message):
+            self.stats.messages_delivered += 1
+            await self._message_queue.put(message)
+            return True
 
     promotions = [
         SimpleNamespace(date="2025-12-25", record_count=3, shard_files=["part-0000.parquet"]),
@@ -242,9 +270,23 @@ def test_run_neptune_live_ingest_promotes_and_refreshes(monkeypatch, tmp_path: P
     refresh_calls: list[tuple[date, tuple[str, ...], bool]] = []
 
     def fake_import():
+        async def fake_run_with_reconnect(stream, connect_fn, *, max_retries=None):
+            assert max_retries is None
+            await connect_fn()
+
         return FakeNeptuneStream, FakeStreamConfig, FakeParquetSink, (
             lambda landing_dir, store_root, source, cleanup=False: promotions
-        )
+        ), fake_run_with_reconnect
+
+    def fake_connect_and_stream(stream, *, api_key, bbox):
+        assert api_key == ""
+        assert bbox is None
+
+        async def _inject():
+            for mmsi in range(25):
+                await stream.ingest({"mmsi": mmsi, "timestamp": f"2025-12-25T00:00:{mmsi:02d}"})
+
+        return _inject()
 
     def fake_refresh_neptune_day(*, load_date, tenant_id, con, config, emit_event, download):
         refresh_calls.append((load_date, config.sources, download))
@@ -257,6 +299,10 @@ def test_run_neptune_live_ingest_promotes_and_refreshes(monkeypatch, tmp_path: P
         )
 
     monkeypatch.setattr("weatherman.ais.neptune._import_neptune_streaming", fake_import)
+    monkeypatch.setattr(
+        "weatherman.ais.neptune._import_neptune_stream_source",
+        lambda source: fake_connect_and_stream,
+    )
     monkeypatch.setattr("weatherman.ais.refresh.refresh_neptune_day", fake_refresh_neptune_day)
 
     result = run_neptune_live_ingest(
@@ -283,3 +329,115 @@ def test_run_neptune_live_ingest_promotes_and_refreshes(monkeypatch, tmp_path: P
         (date(2025, 12, 25), ("aisstream",), False),
         (date(2025, 12, 26), ("aisstream",), False),
     ]
+
+
+def test_run_neptune_live_ingest_refreshes_before_stream_exit(monkeypatch, tmp_path: Path) -> None:
+    sentinel = object()
+    events: list[str] = []
+
+    class FakeParquetSink:
+        def __init__(self, landing_dir, source):
+            self.landing_dir = landing_dir
+            self.source = source
+            self.messages: list[dict[str, object]] = []
+
+        async def write(self, messages):
+            self.messages.extend(messages)
+
+        async def flush(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class FakeStreamConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeNeptuneStream:
+        def __init__(self, *, config):
+            self.config = config
+            self.stats = SimpleNamespace(messages_delivered=0)
+            self._message_queue = asyncio.Queue()
+
+        async def __aenter__(self):
+            self.is_running = True
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.is_running = False
+            await self._message_queue.put(sentinel)
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            message = await self._message_queue.get()
+            if message is sentinel:
+                raise StopAsyncIteration
+            return message
+
+        async def ingest(self, message):
+            self.stats.messages_delivered += 1
+            await self._message_queue.put(message)
+            return True
+
+    promotions = [SimpleNamespace(date="2025-12-25", record_count=1, shard_files=["part-0000.parquet"])]
+    promoted = False
+
+    def fake_import():
+        async def fake_run_with_reconnect(stream, connect_fn, *, max_retries=None):
+            await connect_fn()
+
+        def fake_promote(landing_dir, store_root, source, cleanup=False):
+            nonlocal promoted
+            if promoted:
+                return []
+            promoted = True
+            events.append("promote")
+            return promotions
+
+        return FakeNeptuneStream, FakeStreamConfig, FakeParquetSink, fake_promote, fake_run_with_reconnect
+
+    async def fake_connect_and_stream(stream, *, api_key, bbox):
+        events.append("connect_start")
+        await stream.ingest({"mmsi": 123456789, "timestamp": "2025-12-25T00:00:00"})
+        events.append("sleeping")
+        await asyncio.sleep(0.02)
+        events.append("connect_end")
+
+    def fake_refresh_neptune_day(*, load_date, tenant_id, con, config, emit_event, download):
+        events.append("refresh")
+        return AISRefreshResult(
+            snapshot_date=load_date,
+            tenant_id=tenant_id,
+            rows_loaded=1,
+            vessels_visible=1,
+            event_emitted=emit_event,
+        )
+
+    monkeypatch.setattr("weatherman.ais.neptune._import_neptune_streaming", fake_import)
+    monkeypatch.setattr(
+        "weatherman.ais.neptune._import_neptune_stream_source",
+        lambda source: fake_connect_and_stream,
+    )
+    monkeypatch.setattr("weatherman.ais.refresh.refresh_neptune_day", fake_refresh_neptune_day)
+
+    result = run_neptune_live_ingest(
+        live_config=NeptuneLiveConfig(
+            source="aisstream",
+            landing_dir=tmp_path / "landing",
+            flush_interval_s=0.001,
+        ),
+        archival_config=NeptuneConfig(
+            store_root=tmp_path / "store",
+            sources=("noaa",),
+        ),
+        db_path=tmp_path / "live.daemon.duckdb",
+        tenant_id="default",
+        emit_event=True,
+    )
+
+    assert result.dates_refreshed == (date(2025, 12, 25),)
+    assert events.index("refresh") < events.index("connect_end")

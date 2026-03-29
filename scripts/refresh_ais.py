@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -26,13 +27,16 @@ logging.basicConfig(
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh one AIS day into DuckDB.")
-    parser.add_argument("snapshot_date", help="AIS date in YYYY-MM-DD format")
     parser.add_argument(
-        "parquet_path",
-        nargs="?",
-        help="Glob path to the day's Parquet files (required for backend=legacy_parquet)",
+        "inputs",
+        nargs="+",
+        help=(
+            "For backend=legacy_parquet: parquet_path snapshot_date "
+            "(also accepts snapshot_date parquet_path). "
+            "For backend=neptune: snapshot_date."
+        ),
     )
     parser.add_argument("--db-path", default="ais.duckdb", help="DuckDB path")
     parser.add_argument("--tenant-id", default="default", help="Tenant identifier")
@@ -76,7 +80,39 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force Neptune to re-download raw data even if cached",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _looks_like_iso_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_inputs(
+    *,
+    backend: AISBackend,
+    inputs: Sequence[str],
+) -> tuple[date, str | None]:
+    if backend == AISBackend.LEGACY_PARQUET:
+        if len(inputs) != 2:
+            raise ValueError(
+                "backend=legacy_parquet requires both parquet_path and snapshot_date"
+            )
+        first, second = inputs
+        if _looks_like_iso_date(first) and not _looks_like_iso_date(second):
+            return date.fromisoformat(first), second
+        if _looks_like_iso_date(second):
+            return date.fromisoformat(second), first
+        raise ValueError(
+            "backend=legacy_parquet requires one parquet_path and one snapshot_date"
+        )
+
+    if len(inputs) != 1:
+        raise ValueError("backend=neptune requires exactly one snapshot_date argument")
+    return date.fromisoformat(inputs[0]), None
 
 
 def _build_neptune_config(args: argparse.Namespace) -> NeptuneConfig:
@@ -121,12 +157,8 @@ def _build_neptune_config(args: argparse.Namespace) -> NeptuneConfig:
 
 def main() -> None:
     args = parse_args()
-    snapshot_date = date.fromisoformat(args.snapshot_date)
     backend = AISBackend(args.backend)
-
-    if backend == AISBackend.LEGACY_PARQUET and not args.parquet_path:
-        print("AIS refresh failed: parquet_path is required for backend=legacy_parquet", file=sys.stderr)
-        sys.exit(2)
+    snapshot_date, parquet_path = resolve_inputs(backend=backend, inputs=args.inputs)
 
     db = AISDatabase(args.db_path)
     try:
@@ -137,7 +169,7 @@ def main() -> None:
             tenant_id=args.tenant_id,
             con=con,
             emit_event=args.emit_event,
-            parquet_path=args.parquet_path,
+            parquet_path=parquet_path,
             neptune_config=_build_neptune_config(args) if backend == AISBackend.NEPTUNE else None,
         )
     except Exception as exc:

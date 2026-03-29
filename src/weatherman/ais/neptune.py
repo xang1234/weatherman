@@ -8,9 +8,12 @@ snapshot, tile, and track APIs can remain unchanged.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import json
 import logging
 import os
+from importlib import import_module
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -164,69 +167,130 @@ def run_neptune_live_ingest(
     emit_event: bool = True,
 ) -> NeptuneLiveResult:
     """Run one Neptune live ingest cycle and bridge promoted dates into DuckDB."""
-    NeptuneStream, StreamConfig, ParquetSink, promote_landing = _import_neptune_streaming()
-
-    async def _consume() -> None:
-        sink = ParquetSink(live_config.landing_dir, source=live_config.source)
-        config = StreamConfig(
-            source=live_config.source,
-            api_key=live_config.api_key,
-            bbox=live_config.bbox,
-            mmsi=list(live_config.mmsi) if live_config.mmsi else None,
-            flush_interval_s=live_config.flush_interval_s,
-        )
-        async with NeptuneStream(config=config) as stream:
-            await stream.run(
-                sink=sink,
-                max_messages=live_config.max_messages,
-            )
-
-    asyncio.run(_consume())
-
-    promotions = promote_landing(
-        live_config.landing_dir,
-        archival_config.store_root,
-        live_config.source,
-        cleanup=live_config.cleanup,
+    NeptuneStream, StreamConfig, ParquetSink, promote_landing, run_with_reconnect = (
+        _import_neptune_streaming()
     )
-    refreshed_dates = tuple(
-        sorted(date.fromisoformat(result.date) for result in promotions)
-    )
-
-    if not refreshed_dates:
-        return NeptuneLiveResult(
-            source=live_config.source,
-            dates_refreshed=(),
-            records_promoted=0,
-            shard_files=0,
-        )
-
+    connect_and_stream = _import_neptune_stream_source(live_config.source)
     from weatherman.ais.db import AISDatabase
     from weatherman.ais.refresh import refresh_neptune_day
 
+    refreshed_dates: set[date] = set()
+    records_promoted = 0
+    shard_files = 0
     db = AISDatabase(db_path)
     try:
         con = db.connect()
-        for refresh_date in refreshed_dates:
-            refresh_neptune_day(
-                load_date=refresh_date,
-                tenant_id=tenant_id,
-                con=con,
-                config=replace(
-                    archival_config,
-                    sources=(live_config.source,),
-                ),
-                emit_event=emit_event,
-                download=False,
+
+        def _promote_and_refresh() -> None:
+            nonlocal records_promoted, shard_files
+            promotions = promote_landing(
+                live_config.landing_dir,
+                archival_config.store_root,
+                live_config.source,
+                cleanup=live_config.cleanup,
             )
+            for result in promotions:
+                refresh_date = date.fromisoformat(result.date)
+                refreshed_dates.add(refresh_date)
+                records_promoted += result.record_count
+                shard_files += len(result.shard_files)
+                refresh_neptune_day(
+                    load_date=refresh_date,
+                    tenant_id=tenant_id,
+                    con=con,
+                    config=replace(
+                        archival_config,
+                        sources=(live_config.source,),
+                    ),
+                    emit_event=emit_event,
+                    download=False,
+                )
+
+        async def _consume() -> None:
+            sink = ParquetSink(live_config.landing_dir, source=live_config.source)
+            config = StreamConfig(
+                source=live_config.source,
+                api_key=live_config.api_key,
+                bbox=live_config.bbox,
+                mmsi=list(live_config.mmsi) if live_config.mmsi else None,
+                flush_interval_s=live_config.flush_interval_s,
+            )
+
+            async with NeptuneStream(config=config) as stream:
+                producer_task = asyncio.create_task(
+                    run_with_reconnect(
+                        stream,
+                        _build_stream_connect_fn(
+                            connect_and_stream=connect_and_stream,
+                            stream=stream,
+                            live_config=live_config,
+                        ),
+                    )
+                )
+                batch: list[dict[str, object]] = []
+                batch_size = 100
+                loop = asyncio.get_running_loop()
+                last_promotion_at = loop.time()
+                stream_iter = stream.__aiter__()
+
+                try:
+                    while True:
+                        timeout = max(
+                            0.0,
+                            float(live_config.flush_interval_s) - (loop.time() - last_promotion_at),
+                        )
+                        try:
+                            message = await asyncio.wait_for(
+                                stream_iter.__anext__(),
+                                timeout=timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            if batch:
+                                await sink.write(batch)
+                                batch = []
+                            await sink.flush()
+                            _promote_and_refresh()
+                            last_promotion_at = loop.time()
+                            if producer_task.done():
+                                producer_task.result()
+                                if getattr(stream, "_message_queue").empty():
+                                    break
+                            continue
+                        except StopAsyncIteration:
+                            break
+
+                        batch.append(message)
+                        if len(batch) >= batch_size:
+                            await sink.write(batch)
+                            batch = []
+
+                        if (
+                            live_config.max_messages is not None
+                            and stream.stats.messages_delivered >= live_config.max_messages
+                        ):
+                            break
+                finally:
+                    if batch:
+                        await sink.write(batch)
+                    await sink.flush()
+                    _promote_and_refresh()
+
+                if producer_task.done():
+                    producer_task.result()
+                else:
+                    producer_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await producer_task
+
+        asyncio.run(_consume())
     finally:
         db.close()
 
     return NeptuneLiveResult(
         source=live_config.source,
-        dates_refreshed=refreshed_dates,
-        records_promoted=sum(result.record_count for result in promotions),
-        shard_files=sum(len(result.shard_files) for result in promotions),
+        dates_refreshed=tuple(sorted(refreshed_dates)),
+        records_promoted=records_promoted,
+        shard_files=shard_files,
     )
 
 
@@ -244,13 +308,43 @@ def _import_neptune_archive():
 def _import_neptune_streaming():
     try:
         from neptune_ais.sinks import ParquetSink, promote_landing
-        from neptune_ais.stream import NeptuneStream, StreamConfig
+        from neptune_ais.stream import NeptuneStream, StreamConfig, run_with_reconnect
     except ImportError as exc:
         raise RuntimeError(
             "Neptune live ingest requires the optional dependency "
             "'neptune-ais[sql,parquet,stream]'."
         ) from exc
-    return NeptuneStream, StreamConfig, ParquetSink, promote_landing
+    return NeptuneStream, StreamConfig, ParquetSink, promote_landing, run_with_reconnect
+
+
+def _import_neptune_stream_source(source: str):
+    try:
+        from neptune_ais.adapters.registry import load_all_adapters
+
+        load_all_adapters()
+        module = import_module(f"neptune_ais.adapters.{source}")
+        return getattr(module, "connect_and_stream")
+    except (ImportError, AttributeError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            f"Neptune live ingest source {source!r} is unavailable or does not "
+            "expose connect_and_stream()."
+        ) from exc
+
+
+def _build_stream_connect_fn(*, connect_and_stream, stream, live_config: NeptuneLiveConfig):
+    params = inspect.signature(connect_and_stream).parameters
+    kwargs: dict[str, object] = {}
+    if "api_key" in params:
+        kwargs["api_key"] = live_config.api_key
+    if "bbox" in params:
+        kwargs["bbox"] = live_config.bbox
+    if "mmsi" in params and live_config.mmsi:
+        kwargs["mmsi"] = list(live_config.mmsi)
+
+    async def _connect() -> None:
+        await connect_and_stream(stream, **kwargs)
+
+    return _connect
 
 
 def _neptune_select_sql(relation_name: str, columns: set[str]) -> str:
