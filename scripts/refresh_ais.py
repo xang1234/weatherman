@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from datetime import date
@@ -38,13 +39,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "For backend=neptune: snapshot_date."
         ),
     )
-    parser.add_argument("--db-path", default="ais.duckdb", help="DuckDB path")
-    parser.add_argument("--tenant-id", default="default", help="Tenant identifier")
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("AIS_DB_PATH", "ais.duckdb"),
+        help="DuckDB path (defaults to AIS_DB_PATH or ais.duckdb)",
+    )
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("AIS_TENANT_ID", "default"),
+        help="Tenant identifier (defaults to AIS_TENANT_ID or default)",
+    )
     parser.add_argument(
         "--backend",
         choices=[backend.value for backend in AISBackend],
-        default=AISBackend.LEGACY_PARQUET.value,
-        help="AIS ingest backend to use",
+        default=os.environ.get("AIS_BACKEND", AISBackend.LEGACY_PARQUET.value),
+        help="AIS ingest backend to use (defaults to AIS_BACKEND or legacy_parquet)",
     )
     parser.add_argument(
         "--emit-event",

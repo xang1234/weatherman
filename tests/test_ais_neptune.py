@@ -24,12 +24,12 @@ from weatherman.events.router import get_event_bus, init_event_bus, shutdown_eve
 SNAPSHOT_DATE = date(2025, 12, 25)
 
 
-def _relation_columns(con: duckdb.DuckDBPyConnection, name: str) -> set[str]:
-    rows = con.execute(
-        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
-        [name],
-    ).fetchall()
-    return {row[0] for row in rows}
+def _relation_column_types(
+    con: duckdb.DuckDBPyConnection,
+    name: str,
+) -> dict[str, str]:
+    rows = con.execute(f"DESCRIBE {name}").fetchall()
+    return {str(column_name): str(data_type) for column_name, data_type, *_ in rows}
 
 
 def test_neptune_mapping_loads_rows_into_ais_positions() -> None:
@@ -104,7 +104,7 @@ def test_neptune_mapping_loads_rows_into_ais_positions() -> None:
         count = load_day_from_select(
             _neptune_select_sql(
                 "neptune_positions",
-                _relation_columns(con, "neptune_positions"),
+                _relation_column_types(con, "neptune_positions"),
             ),
             load_date=SNAPSHOT_DATE,
             tenant_id="default",
@@ -138,6 +138,96 @@ def test_neptune_mapping_loads_rows_into_ais_positions() -> None:
         assert rows[1][1] == "311234567"
         assert rows[1][2] == "src-002"
         assert rows[1][3] == "Tanker"
+    finally:
+        db.close()
+
+
+def test_neptune_mapping_filters_timestamptz_rows_by_utc_day() -> None:
+    db = AISDatabase(":memory:")
+    con = db.connect()
+    try:
+        con.execute("SET TimeZone = 'America/Los_Angeles'")
+        con.execute(
+            """
+            CREATE TEMP TABLE neptune_positions_tz AS
+            SELECT
+                CAST(211234567 AS BIGINT) AS mmsi,
+                TIMESTAMPTZ '2025-12-25 00:30:00+00' AS "timestamp",
+                1.35 AS lat,
+                103.8 AS lon,
+                'noaa' AS source
+            UNION ALL
+            SELECT
+                CAST(311234567 AS BIGINT),
+                TIMESTAMPTZ '2025-12-24 23:30:00+00',
+                51.5,
+                -0.1,
+                'noaa'
+            """
+        )
+
+        count = load_day_from_select(
+            _neptune_select_sql(
+                "neptune_positions_tz",
+                _relation_column_types(con, "neptune_positions_tz"),
+            ),
+            load_date=SNAPSHOT_DATE,
+            tenant_id="default",
+            con=con,
+            params={"load_date": SNAPSHOT_DATE, "tenant_id": "default"},
+        )
+
+        assert count == 1
+        row = con.execute(
+            'SELECT mmsi, "date" FROM ais_positions WHERE tenant_id = ?',
+            ["default"],
+        ).fetchone()
+        assert row == (211234567, SNAPSHOT_DATE)
+    finally:
+        db.close()
+
+
+def test_neptune_mapping_filters_offset_timestamps_by_utc_day() -> None:
+    db = AISDatabase(":memory:")
+    con = db.connect()
+    try:
+        con.execute("SET TimeZone = 'America/Los_Angeles'")
+        con.execute(
+            """
+            CREATE TEMP TABLE neptune_positions_text AS
+            SELECT
+                CAST(211234567 AS BIGINT) AS mmsi,
+                '2025-12-25T00:30:00+00:00' AS "timestamp",
+                1.35 AS lat,
+                103.8 AS lon,
+                'noaa' AS source
+            UNION ALL
+            SELECT
+                CAST(311234567 AS BIGINT),
+                '2025-12-24T23:30:00+00:00',
+                51.5,
+                -0.1,
+                'noaa'
+            """
+        )
+
+        count = load_day_from_select(
+            _neptune_select_sql(
+                "neptune_positions_text",
+                _relation_column_types(con, "neptune_positions_text"),
+            ),
+            load_date=SNAPSHOT_DATE,
+            tenant_id="default",
+            con=con,
+            params={"load_date": SNAPSHOT_DATE, "tenant_id": "default"},
+        )
+
+        assert count == 1
+        row = con.execute(
+            'SELECT mmsi, "date" FROM ais_positions WHERE tenant_id = ?',
+            ["default"],
+        ).fetchone()
+        assert row == (211234567, SNAPSHOT_DATE)
     finally:
         db.close()
 

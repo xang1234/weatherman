@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -30,8 +31,16 @@ logging.basicConfig(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Neptune live AIS ingest.")
-    parser.add_argument("--db-path", default="ais.duckdb", help="DuckDB path")
-    parser.add_argument("--tenant-id", default="default", help="Tenant identifier")
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("AIS_DB_PATH", "ais.duckdb"),
+        help="DuckDB path (defaults to AIS_DB_PATH or ais.duckdb)",
+    )
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("AIS_TENANT_ID", "default"),
+        help="Tenant identifier (defaults to AIS_TENANT_ID or default)",
+    )
     parser.add_argument("--source", help="Neptune live source ID (default: aisstream)")
     parser.add_argument("--landing-dir", help="Landing directory for live Parquet batches")
     parser.add_argument("--api-key", help="Live source API key")

@@ -34,3 +34,29 @@ failureThreshold: {{ .probe.failureThreshold }}
 successThreshold: {{ .probe.successThreshold }}
 {{- end }}
 {{- end }}
+
+{{/*
+Render merged plain env vars and secretKeyRef-backed env vars.
+Accepts:
+- .globalEnv / .componentEnv as string maps
+- .globalSecretEnv / .componentSecretEnv as maps of
+  { name: <secretName>, key: <secretKey>, optional?: <bool> }
+*/}}
+{{- define "weatherman.containerEnv" -}}
+{{- $env := mergeOverwrite (dict) (.globalEnv | default dict) (.componentEnv | default dict) -}}
+{{- range $name, $value := $env }}
+- name: {{ $name }}
+  value: {{ $value | quote }}
+{{- end }}
+{{- $secretEnv := mergeOverwrite (dict) (.globalSecretEnv | default dict) (.componentSecretEnv | default dict) -}}
+{{- range $name, $spec := $secretEnv }}
+- name: {{ $name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $spec.name | quote }}
+      key: {{ $spec.key | quote }}
+      {{- if hasKey $spec "optional" }}
+      optional: {{ $spec.optional }}
+      {{- end }}
+{{- end }}
+{{- end }}

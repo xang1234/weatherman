@@ -39,6 +39,8 @@ docker compose up
 
 Copy `.env.example` to `.env` and configure S3 credentials and data paths before starting.
 
+For Neptune-backed AIS ingestion and live streaming, see [docs/ais-neptune.md](docs/ais-neptune.md).
+
 ## Development
 
 **Backend**
@@ -59,6 +61,13 @@ npm install
 > ```bash
 > PATH="/Users/admin/.nvm/versions/node/v22.18.0/bin:/usr/bin:/bin" ./node_modules/.bin/vite dev
 > ```
+
+**AIS / Neptune**
+
+```bash
+AIS_BACKEND=neptune uv run python scripts/refresh_ais.py 2026-03-08
+NEPTUNE_LIVE_ENABLE=true ./scripts/dev.sh
+```
 
 ## Architecture
 

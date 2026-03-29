@@ -46,3 +46,14 @@ def test_refresh_script_accepts_neptune_date_only() -> None:
 
     assert snapshot_date.isoformat() == "2026-03-08"
     assert parquet_path is None
+
+
+def test_refresh_script_reads_backend_and_db_path_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("AIS_BACKEND", "neptune")
+    monkeypatch.setenv("AIS_DB_PATH", "/tmp/test-ais.duckdb")
+    module = _load_refresh_script_module()
+
+    args = module.parse_args(["2026-03-08"])
+
+    assert args.backend == "neptune"
+    assert args.db_path == "/tmp/test-ais.duckdb"

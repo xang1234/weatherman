@@ -4,6 +4,20 @@ global:
     repository: weatherman
     tag: latest
     pullPolicy: IfNotPresent
+  env:
+    AIS_DB_PATH: /data/ais.duckdb
+    AIS_BACKEND: legacy_parquet
+    AIS_TENANT_ID: default
+    NEPTUNE_STORE_ROOT: /data/neptune
+    NEPTUNE_SOURCES: noaa
+    NEPTUNE_MERGE: best
+    NEPTUNE_RAW_POLICY: metadata
+    NEPTUNE_OVERWRITE: "false"
+    NEPTUNE_LIVE_SOURCE: aisstream
+    NEPTUNE_LIVE_LANDING_DIR: /data/neptune-live
+    NEPTUNE_LIVE_CLEANUP: "false"
+    NEPTUNE_LIVE_FLUSH_INTERVAL: "60"
+  secretEnv: {}
 
 # -- Tile Service --
 # Serves dynamic map tiles via TiTiler. User-facing, latency-sensitive.
@@ -14,6 +28,8 @@ tileService:
   image:
     repository: ""  # defaults to global
     tag: ""
+  env: {}
+  secretEnv: {}
   port: 8000
   resources:
     requests:
@@ -65,6 +81,8 @@ catalogService:
   image:
     repository: ""
     tag: ""
+  env: {}
+  secretEnv: {}
   port: 8000
   resources:
     requests:
@@ -111,6 +129,8 @@ ingestionService:
   image:
     repository: ""
     tag: ""
+  env: {}
+  secretEnv: {}
   port: 8000
   resources:
     requests:
@@ -158,6 +178,8 @@ pipelineWorker:
   image:
     repository: ""
     tag: ""
+  env: {}
+  secretEnv: {}
   port: 8000
   resources:
     requests:

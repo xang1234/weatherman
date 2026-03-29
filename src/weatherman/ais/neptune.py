@@ -128,17 +128,18 @@ def load_day_from_neptune(
         neptune.download()
 
     positions = neptune.positions().collect()
-    columns = set(getattr(positions, "columns", []))
-    if "timestamp" not in columns:
+    position_columns = set(getattr(positions, "columns", []))
+    if "timestamp" not in position_columns:
         raise ValueError("Neptune positions data is missing required 'timestamp' column")
-    if "mmsi" not in columns:
+    if "mmsi" not in position_columns:
         raise ValueError("Neptune positions data is missing required 'mmsi' column")
 
     relation_name = f"neptune_positions_{load_date:%Y%m%d}"
     con.register(relation_name, positions)
     try:
+        column_types = _relation_column_types(con, relation_name)
         return load_day_from_select(
-            _neptune_select_sql(relation_name, columns),
+            _neptune_select_sql(relation_name, column_types),
             load_date=load_date,
             tenant_id=tenant_id,
             con=con,
@@ -347,8 +348,9 @@ def _build_stream_connect_fn(*, connect_and_stream, stream, live_config: Neptune
     return _connect
 
 
-def _neptune_select_sql(relation_name: str, columns: set[str]) -> str:
-    timestamp = _column_expr(columns, "timestamp", "TIMESTAMP")
+def _neptune_select_sql(relation_name: str, column_types: dict[str, str]) -> str:
+    columns = set(column_types)
+    timestamp, timestamp_date = _timestamp_expr(column_types, "timestamp")
     source = _column_expr(columns, "source", "VARCHAR")
     source_record_id = _column_expr(columns, "source_record_id", "VARCHAR")
     ship_type = _column_expr(columns, "ship_type", "VARCHAR")
@@ -402,7 +404,7 @@ def _neptune_select_sql(relation_name: str, columns: set[str]) -> str:
         {_column_expr(columns, "beam", "DOUBLE")}          AS beam,
         {_column_expr(columns, "length", "DOUBLE")}        AS length,
         {timestamp}                                        AS "timestamp",
-        CAST({timestamp} AS DATE)                          AS "date",
+        {timestamp_date}                                   AS "date",
         {_column_expr(columns, "lat", "DOUBLE")}           AS lat,
         {_column_expr(columns, "lon", "DOUBLE")}           AS lon,
         {_column_expr(columns, "sog", "DOUBLE")}           AS sog,
@@ -416,7 +418,52 @@ def _neptune_select_sql(relation_name: str, columns: set[str]) -> str:
         CAST(NULL AS VARCHAR)                              AS additionalinfo,
         $tenant_id                                         AS tenant_id
     FROM {relation_name}
-    WHERE CAST({timestamp} AS DATE) = $load_date"""
+    WHERE {timestamp_date} = $load_date"""
+
+
+def _relation_column_types(
+    con: duckdb.DuckDBPyConnection,
+    relation_name: str,
+) -> dict[str, str]:
+    rows = con.execute(f"DESCRIBE {relation_name}").fetchall()
+    return {str(name): str(data_type) for name, data_type, *_ in rows}
+
+
+def _timestamp_expr(
+    column_types: dict[str, str],
+    name: str,
+) -> tuple[str, str]:
+    if name not in column_types:
+        null_timestamp = "CAST(NULL AS TIMESTAMP)"
+        return null_timestamp, "CAST(NULL AS DATE)"
+
+    column = _quote_identifier(name)
+    column_type = column_types[name].upper()
+
+    if "TIMESTAMP WITH TIME ZONE" in column_type:
+        timestamp = f"CAST({column} AT TIME ZONE 'UTC' AS TIMESTAMP)"
+        return timestamp, f"CAST({column} AT TIME ZONE 'UTC' AS DATE)"
+
+    if column_type == "VARCHAR":
+        has_utc_offset = f"regexp_matches({column}, '(Z|[+-][0-9]{{2}}:[0-9]{{2}})$')"
+        timestamp = f"""(
+            CASE
+                WHEN {has_utc_offset}
+                    THEN CAST(TRY_CAST({column} AS TIMESTAMPTZ) AT TIME ZONE 'UTC' AS TIMESTAMP)
+                ELSE CAST({column} AS TIMESTAMP)
+            END
+        )"""
+        timestamp_date = f"""(
+            CASE
+                WHEN {has_utc_offset}
+                    THEN CAST(TRY_CAST({column} AS TIMESTAMPTZ) AT TIME ZONE 'UTC' AS DATE)
+                ELSE CAST(CAST({column} AS TIMESTAMP) AS DATE)
+            END
+        )"""
+        return timestamp, timestamp_date
+
+    timestamp = f"CAST({column} AS TIMESTAMP)"
+    return timestamp, f"CAST({timestamp} AS DATE)"
 
 
 def _column_expr(columns: set[str], name: str, sql_type: str) -> str:
