@@ -3,17 +3,21 @@
 
 Usage:
     uv run python scripts/refresh_ais.py '.data/ais/movement_date=2026-03-08/*' 2026-03-08
+    uv run python scripts/refresh_ais.py 2026-03-08 --backend neptune
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import date
+from pathlib import Path
 
 from weatherman.ais.db import AISDatabase
-from weatherman.ais.refresh import refresh_day
+from weatherman.ais.neptune import NeptuneConfig, neptune_config_from_env
+from weatherman.ais.refresh import AISBackend, refresh_day_from_backend
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,31 +28,117 @@ logging.basicConfig(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh one AIS day into DuckDB.")
-    parser.add_argument("parquet_path", help="Glob path to the day's Parquet files")
     parser.add_argument("snapshot_date", help="AIS date in YYYY-MM-DD format")
+    parser.add_argument(
+        "parquet_path",
+        nargs="?",
+        help="Glob path to the day's Parquet files (required for backend=legacy_parquet)",
+    )
     parser.add_argument("--db-path", default="ais.duckdb", help="DuckDB path")
     parser.add_argument("--tenant-id", default="default", help="Tenant identifier")
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in AISBackend],
+        default=AISBackend.LEGACY_PARQUET.value,
+        help="AIS ingest backend to use",
+    )
     parser.add_argument(
         "--emit-event",
         action="store_true",
         help="Emit ais.refreshed on an in-process SSE event bus",
     )
+    parser.add_argument(
+        "--neptune-store-root",
+        help="Neptune cache/store root (defaults to NEPTUNE_STORE_ROOT or .data/neptune)",
+    )
+    parser.add_argument(
+        "--neptune-sources",
+        help="Comma-separated Neptune source IDs",
+    )
+    parser.add_argument(
+        "--neptune-merge",
+        help="Neptune merge mode (best, union, prefer:<source>)",
+    )
+    parser.add_argument(
+        "--neptune-api-keys-json",
+        help="JSON object of Neptune API keys by source ID",
+    )
+    parser.add_argument(
+        "--neptune-bbox",
+        help="Optional bbox: west,south,east,north",
+    )
+    parser.add_argument(
+        "--neptune-mmsi",
+        help="Optional comma-separated MMSI filter list",
+    )
+    parser.add_argument(
+        "--neptune-overwrite",
+        action="store_true",
+        help="Force Neptune to re-download raw data even if cached",
+    )
     return parser.parse_args()
+
+
+def _build_neptune_config(args: argparse.Namespace) -> NeptuneConfig:
+    config = neptune_config_from_env()
+
+    sources = config.sources
+    if args.neptune_sources:
+        sources = tuple(
+            part.strip() for part in args.neptune_sources.split(",") if part.strip()
+        )
+
+    api_keys = config.api_keys
+    if args.neptune_api_keys_json:
+        decoded = json.loads(args.neptune_api_keys_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("--neptune-api-keys-json must decode to an object")
+        api_keys = {str(key): str(value) for key, value in decoded.items()}
+
+    if args.neptune_bbox:
+        bbox = tuple(float(part.strip()) for part in args.neptune_bbox.split(","))  # type: ignore[assignment]
+        if len(bbox) != 4:
+            raise ValueError("--neptune-bbox must have four comma-separated floats")
+    else:
+        bbox = config.bbox
+
+    if args.neptune_mmsi:
+        mmsi = tuple(int(part.strip()) for part in args.neptune_mmsi.split(",") if part.strip())
+    else:
+        mmsi = config.mmsi
+
+    return NeptuneConfig(
+        store_root=Path(args.neptune_store_root) if args.neptune_store_root else config.store_root,
+        sources=sources,
+        merge=args.neptune_merge or config.merge,
+        bbox=bbox,
+        mmsi=mmsi,
+        api_keys=api_keys,
+        raw_policy=config.raw_policy,
+        overwrite=args.neptune_overwrite or config.overwrite,
+    )
 
 
 def main() -> None:
     args = parse_args()
     snapshot_date = date.fromisoformat(args.snapshot_date)
+    backend = AISBackend(args.backend)
+
+    if backend == AISBackend.LEGACY_PARQUET and not args.parquet_path:
+        print("AIS refresh failed: parquet_path is required for backend=legacy_parquet", file=sys.stderr)
+        sys.exit(2)
 
     db = AISDatabase(args.db_path)
     try:
         con = db.connect()
-        result = refresh_day(
-            args.parquet_path,
+        result = refresh_day_from_backend(
+            backend=backend,
             load_date=snapshot_date,
             tenant_id=args.tenant_id,
             con=con,
             emit_event=args.emit_event,
+            parquet_path=args.parquet_path,
+            neptune_config=_build_neptune_config(args) if backend == AISBackend.NEPTUNE else None,
         )
     except Exception as exc:
         print(f"AIS refresh failed: {exc}", file=sys.stderr)

@@ -65,8 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_ais_snapshot_date
 """
 
 # Window query: latest position per vessel for a given date + tenant.
-# ROW_NUMBER partitioned by imommsi (composite IMO-MMSI key), ordered by
-# timestamp DESC picks the most recent report.  Ties broken arbitrarily.
+# Prefer imommsi when present, otherwise fall back to MMSI so mixed-source
+# rows without an IMO-derived identity still collapse deterministically.
 SNAPSHOT_QUERY = """\
 SELECT
     mmsi, imo, imommsi, vessel_name, shiptype, vessel_class, dwt, callsign,
@@ -76,7 +76,7 @@ SELECT
 FROM (
     SELECT *,
         ROW_NUMBER() OVER (
-            PARTITION BY imommsi
+            PARTITION BY COALESCE(NULLIF(imommsi, ''), CAST(mmsi AS VARCHAR))
             ORDER BY "timestamp" DESC
         ) AS _rn
     FROM ais_positions
