@@ -80,7 +80,7 @@ services:
     volumes:
       - ./.data:/data
     environment:
-      AIS_DB_PATH: /data/ais.duckdb
+      AIS_DB_PATH: ${AIS_DB_PATH:-/data/ais.duckdb}
       AIS_TENANT_ID: ${AIS_TENANT_ID:-default}
       NEPTUNE_STORE_ROOT: ${NEPTUNE_STORE_ROOT:-/data/neptune}
       NEPTUNE_SOURCES: ${NEPTUNE_SOURCES:-noaa}
