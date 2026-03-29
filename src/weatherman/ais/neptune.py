@@ -351,6 +351,7 @@ def _build_stream_connect_fn(*, connect_and_stream, stream, live_config: Neptune
 def _neptune_select_sql(relation_name: str, column_types: dict[str, str]) -> str:
     columns = set(column_types)
     timestamp, timestamp_date = _timestamp_expr(column_types, "timestamp")
+    eta, _ = _timestamp_expr(column_types, "eta")
     source = _column_expr(columns, "source", "VARCHAR")
     source_record_id = _column_expr(columns, "source_record_id", "VARCHAR")
     ship_type = _column_expr(columns, "ship_type", "VARCHAR")
@@ -414,7 +415,7 @@ def _neptune_select_sql(relation_name: str, column_types: dict[str, str]) -> str
         {_column_expr(columns, "nav_status", "VARCHAR")}   AS movestatus,
         {destination}                                      AS destination,
         {destination}                                      AS destinationtidied,
-        {_column_expr(columns, "eta", "TIMESTAMP")}        AS eta,
+        {eta}                                              AS eta,
         CAST(NULL AS VARCHAR)                              AS additionalinfo,
         $tenant_id                                         AS tenant_id
     FROM {relation_name}

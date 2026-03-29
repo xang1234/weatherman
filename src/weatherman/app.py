@@ -273,6 +273,16 @@ def create_app(
     zarr_opener = _make_zarr_opener(store)
 
     ais_db_path = os.environ.get("AIS_DB_PATH", "ais.duckdb")
+    explicit_event_journal_path = os.environ.get("WEATHERMAN_EVENT_JOURNAL_PATH")
+    event_journal_path = (
+        Path(explicit_event_journal_path)
+        if explicit_event_journal_path
+        else (
+            (store._root / "events" / "sse-events.jsonl")
+            if isinstance(store, LocalObjectStore)
+            else None
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -289,7 +299,7 @@ def create_app(
         )
         init_edr_service(catalog_loader, zarr_opener)
         init_ais_tile_service(ais_db_path)
-        init_event_bus()
+        init_event_bus(journal_path=event_journal_path)
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield

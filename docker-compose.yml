@@ -42,6 +42,7 @@ services:
       AIS_DB_PATH: ${AIS_DB_PATH:-/data/ais.duckdb}
       AIS_BACKEND: ${AIS_BACKEND:-legacy_parquet}
       AIS_TENANT_ID: ${AIS_TENANT_ID:-default}
+      WEATHERMAN_EVENT_JOURNAL_PATH: ${WEATHERMAN_EVENT_JOURNAL_PATH:-/data/events/sse-events.jsonl}
       NEPTUNE_STORE_ROOT: ${NEPTUNE_STORE_ROOT:-/data/neptune}
       NEPTUNE_SOURCES: ${NEPTUNE_SOURCES:-noaa}
       NEPTUNE_MERGE: ${NEPTUNE_MERGE:-best}
@@ -82,6 +83,7 @@ services:
     environment:
       AIS_DB_PATH: ${AIS_DB_PATH:-/data/ais.duckdb}
       AIS_TENANT_ID: ${AIS_TENANT_ID:-default}
+      WEATHERMAN_EVENT_JOURNAL_PATH: ${WEATHERMAN_EVENT_JOURNAL_PATH:-/data/events/sse-events.jsonl}
       NEPTUNE_STORE_ROOT: ${NEPTUNE_STORE_ROOT:-/data/neptune}
       NEPTUNE_SOURCES: ${NEPTUNE_SOURCES:-noaa}
       NEPTUNE_MERGE: ${NEPTUNE_MERGE:-best}

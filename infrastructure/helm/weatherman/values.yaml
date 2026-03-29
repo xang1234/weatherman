@@ -8,6 +8,7 @@ global:
     AIS_DB_PATH: /data/ais.duckdb
     AIS_BACKEND: legacy_parquet
     AIS_TENANT_ID: default
+    WEATHERMAN_EVENT_JOURNAL_PATH: /data/events/sse-events.jsonl
     NEPTUNE_STORE_ROOT: /data/neptune
     NEPTUNE_SOURCES: noaa
     NEPTUNE_MERGE: best

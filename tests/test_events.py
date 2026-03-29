@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import date
 
 import pytest
 
 from weatherman.events.bus import EventBus, ServerEvent
 from weatherman.events.emissions import emit_ais_refreshed, emit_run_published
-from weatherman.events.router import _format_sse, init_event_bus, get_event_bus, shutdown_event_bus
+from weatherman.events.router import (
+    _format_sse,
+    _sse_generator,
+    get_event_bus,
+    get_event_journal_optional,
+    init_event_bus,
+    init_event_journal,
+    shutdown_event_bus,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -396,16 +406,67 @@ class TestEmitAisRefreshed:
         finally:
             shutdown_event_bus()
 
-    def test_raises_if_bus_not_initialised(self):
-        """Calling emit_ais_refreshed without init_event_bus raises RuntimeError."""
-        from datetime import date
-
+    def test_raises_if_no_event_sink_is_initialised(self):
+        """Calling emit_ais_refreshed without a bus or journal raises RuntimeError."""
         shutdown_event_bus()  # ensure clean state
-        with pytest.raises(RuntimeError, match="EventBus not initialised"):
+        with pytest.raises(RuntimeError, match="No event sink initialised"):
             emit_ais_refreshed(
                 ais_date=date(2026, 3, 8),
                 tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
             )
+
+    def test_writes_to_event_journal_without_bus(self, tmp_path):
+        """A separate ingester process can emit to the shared journal without a live bus."""
+        shutdown_event_bus()
+        journal = init_event_journal(tmp_path / "events.jsonl")
+
+        emit_ais_refreshed(
+            ais_date=date(2026, 3, 8),
+            tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+        )
+
+        assert get_event_journal_optional() is journal
+        payload = journal.path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(payload) == 1
+
+        event = json.loads(payload[0])
+        assert event["event"] == "ais.refreshed"
+        assert event["tenant_id"] == "*"
+        assert json.loads(event["data"]) == {
+            "ais_date": "2026-03-08",
+            "tile_url_template": "/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+        }
+
+    def test_sse_generator_replays_journal_events(self, tmp_path):
+        """API workers should replay journaled events even when another process emitted them."""
+        shutdown_event_bus()
+        journal_path = tmp_path / "events.jsonl"
+        init_event_journal(journal_path)
+        emit_ais_refreshed(
+            ais_date=date(2026, 3, 8),
+            tile_url_template="/api/tiles/ais/2026-03-08/{z}/{x}/{y}.mvt",
+        )
+        init_event_bus(journal_path=journal_path)
+
+        class FakeRequest:
+            def __init__(self):
+                self._calls = 0
+
+            async def is_disconnected(self) -> bool:
+                self._calls += 1
+                return self._calls > 1
+
+        async def _test():
+            generator = _sse_generator(FakeRequest(), "tenant-a", None)
+            chunk = await asyncio.wait_for(anext(generator), timeout=1)
+            assert "event: ais.refreshed" in chunk
+            assert '"ais_date": "2026-03-08"' in chunk
+            await generator.aclose()
+
+        try:
+            run(_test())
+        finally:
+            shutdown_event_bus()
 
 
 class TestCallbackFailureDoesNotBlockPublish:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -228,6 +228,45 @@ def test_neptune_mapping_filters_offset_timestamps_by_utc_day() -> None:
             ["default"],
         ).fetchone()
         assert row == (211234567, SNAPSHOT_DATE)
+    finally:
+        db.close()
+
+
+def test_neptune_mapping_normalizes_eta_to_utc_timestamp() -> None:
+    db = AISDatabase(":memory:")
+    con = db.connect()
+    try:
+        con.execute("SET TimeZone = 'America/Los_Angeles'")
+        con.execute(
+            """
+            CREATE TEMP TABLE neptune_positions_eta AS
+            SELECT
+                CAST(211234567 AS BIGINT) AS mmsi,
+                TIMESTAMPTZ '2025-12-25 00:30:00+00' AS "timestamp",
+                TIMESTAMPTZ '2025-12-30 06:00:00+00' AS eta,
+                1.35 AS lat,
+                103.8 AS lon,
+                'noaa' AS source
+            """
+        )
+
+        count = load_day_from_select(
+            _neptune_select_sql(
+                "neptune_positions_eta",
+                _relation_column_types(con, "neptune_positions_eta"),
+            ),
+            load_date=SNAPSHOT_DATE,
+            tenant_id="default",
+            con=con,
+            params={"load_date": SNAPSHOT_DATE, "tenant_id": "default"},
+        )
+
+        assert count == 1
+        eta = con.execute(
+            'SELECT eta FROM ais_positions WHERE tenant_id = ?',
+            ["default"],
+        ).fetchone()[0]
+        assert eta == datetime(2025, 12, 30, 6, 0)
     finally:
         db.close()
 
