@@ -5,6 +5,7 @@ import { useDataAge } from '@/hooks/useDataAge'
 import { useLatestAISDate } from '@/hooks/useLatestAISDate'
 import { useManifest } from '@/hooks/useManifest'
 import { useWeatherInspector } from '@/hooks/useWeatherInspector'
+import { useHoverProbe } from '@/hooks/useHoverProbe'
 import { useWeatherLayer, type WeatherLayerHandle } from '@/hooks/useWeatherLayer'
 import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
@@ -21,6 +22,7 @@ import { ModelSelector, type ModelId } from '@/components/ModelSelector'
 import { VoyageDrawButton } from '@/components/VoyageDrawButton'
 import { VoyageWeatherPanel } from '@/components/VoyageWeatherPanel'
 import { WeatherInspector } from '@/components/WeatherInspector'
+import { WeatherHoverHud } from '@/components/WeatherHoverHud'
 import type { LayerConfig } from '@/types/manifest'
 
 const EMPTY_LAYERS: LayerConfig[] = []
@@ -243,6 +245,13 @@ export function MapView() {
     runId,
     disabled: voyageRoute.isDrawing,
   })
+  const hoverProbe = useHoverProbe({
+    map,
+    isLoaded,
+    model,
+    runId,
+    disabled: voyageRoute.isDrawing || inspector.point !== null,
+  })
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -250,6 +259,11 @@ export function MapView() {
       <ModelSelector model={model} onChange={setModel} />
       {dataAge && <DataAgeIndicator state={dataAge} />}
       <WeatherInspector inspector={inspector} forecastHour={forecastHour} />
+      <WeatherHoverHud
+        probe={hoverProbe}
+        forecastHour={forecastHour}
+        activeVariable={resolvedLayerId}
+      />
       <VoyageDrawButton route={voyageRoute} />
       {voyageRoute.lineString && (
         <VoyageWeatherPanel
