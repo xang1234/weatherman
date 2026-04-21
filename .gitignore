@@ -17,4 +17,5 @@ frontend/.env
 
 # Local data and tools
 .data/
+.runtime/
 .playwright-mcp/
