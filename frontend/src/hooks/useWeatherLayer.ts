@@ -68,18 +68,21 @@ function layerId(model: string, runId: string, layer: string, forecastHour: numb
  * the semi-transparent basemap fills — the Windy.com layering trick:
  *   [background] → [WEATHER] → [water@0.3] → [earth@0.3] → [lines] → [labels]
  *
- * Falls back to the first symbol layer if no fill layer exists (e.g.
- * raster-only basemaps), so weather still renders below labels.
+ * Falls back to the first raster layer (CartoDB fallback) so weather still
+ * renders below the basemap when PMTiles isn't available; then to the first
+ * symbol layer as a last resort.
  */
 function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
   const layers = map.getStyle()?.layers
   if (!layers) return undefined
+  let firstRaster: string | undefined
   let firstSymbol: string | undefined
   for (const l of layers) {
     if (l.type === 'fill') return l.id
+    if (l.type === 'raster' && !firstRaster) firstRaster = l.id
     if (l.type === 'symbol' && !firstSymbol) firstSymbol = l.id
   }
-  return firstSymbol
+  return firstRaster ?? firstSymbol
 }
 
 /**

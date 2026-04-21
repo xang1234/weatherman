@@ -26,6 +26,13 @@ const USE_PMTILES =
 /** Fill-layer opacity when weather overlay is active (Windy.com style). */
 const WEATHER_FILL_OPACITY = 0.3
 
+/**
+ * Raster basemap opacity when weather overlay is active. Higher than the fill
+ * dim because raster tiles carry labels baked-in; over-dimming makes labels
+ * unreadable. Tradeoff is inherent to raster fallback.
+ */
+const WEATHER_RASTER_OPACITY = 0.55
+
 /** Layer IDs whose fill-opacity should be reduced for weather transparency. */
 const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
 
@@ -174,8 +181,11 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
  *
  * Call this when toggling weather overlay on/off — restores full opacity
  * when weather is hidden so the basemap looks normal without weather.
- * Raster basemaps (CartoDB fallback) stay at full opacity since weather
- * renders on top — dimming pre-rendered tiles would reduce label readability.
+ *
+ * For raster basemaps (CartoDB fallback), the single raster layer is also
+ * dimmed so weather — inserted *below* it by weatherInsertBeforeId — shows
+ * through. Ocean-only weather layers keep the raster fully opaque (matching
+ * the vector-earth behavior) since the weather is only valid over water.
  */
 export function setWeatherOverlayOpacity(
   map: maplibregl.Map,
@@ -199,6 +209,12 @@ export function setWeatherOverlayOpacity(
       }
       map.setPaintProperty(layer.id, 'fill-opacity', opacity)
       console.info(`[setWeatherOverlayOpacity] ${layer.id} fill-opacity → ${opacity}`)
+    } else if (layer.type === 'raster') {
+      // Raster fallback: weather renders beneath, so dim the raster to let
+      // it show through. Ocean-only layers stay opaque (raster carries land).
+      const opacity = !active || oceanOnly ? 1 : WEATHER_RASTER_OPACITY
+      map.setPaintProperty(layer.id, 'raster-opacity', opacity)
+      console.info(`[setWeatherOverlayOpacity] ${layer.id} raster-opacity → ${opacity}`)
     }
   }
 }
