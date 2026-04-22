@@ -1,9 +1,12 @@
-"""Pre-generate data-encoded RGBA PNG tiles from COGs.
+"""Pre-generate data tiles from COGs for the WebGL hot path.
 
-Converts float32 raster data into 256x256 RGBA tiles at z0–z5, using the
-same encoding as the live TiTiler path (R=low byte, G=high byte, B=nodata
-flag, A=0xFF). These tiles are stored alongside COGs and served as static
-reads, eliminating the TiTiler roundtrip for the WebGL data path.
+Supports the same two encodings as the live tile service:
+
+- RGBA PNG: normalized values packed into bytes for broad compatibility.
+- Float16 binary: physical values stored directly for high-fidelity GPU input.
+
+These tiles are stored alongside COGs and served as static reads,
+eliminating the TiTiler roundtrip for the hottest WebGL data requests.
 
 Web Mercator math reference: OGC TMS / Slippy Map convention.
 """
@@ -18,7 +21,11 @@ from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import from_bounds
 
-from weatherman.tiling.data_encoder import encode_float_to_rgba, rgba_to_png_bytes
+from weatherman.tiling.data_encoder import (
+    encode_float_to_f16,
+    encode_float_to_rgba,
+    rgba_to_png_bytes,
+)
 
 MAX_DATA_TILE_ZOOM = 5
 
@@ -26,6 +33,23 @@ MAX_DATA_TILE_ZOOM = 5
 _WORLD_EXTENT = 20037508.342789244
 
 _NEAREST_DATA_TILE_LAYERS = frozenset({"wave_direction"})
+
+
+def _encode_data_tile(
+    data: np.ndarray,
+    value_min: float,
+    value_max: float,
+    nodata: float | None,
+    tile_format: str,
+) -> bytes:
+    if tile_format == "png":
+        rgba = encode_float_to_rgba(data, value_min, value_max, nodata=nodata)
+        return rgba_to_png_bytes(rgba)
+    if tile_format == "f16":
+        return encode_float_to_f16(data, nodata=nodata)
+    raise ValueError(
+        f"Unsupported data tile format '{tile_format}' (expected 'png' or 'f16')"
+    )
 
 
 def tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float]:
@@ -62,12 +86,13 @@ def generate_data_tile(
     value_max: float,
     tile_size: int = 256,
     resampling: Resampling = Resampling.bilinear,
+    tile_format: str = "png",
 ) -> bytes:
-    """Generate a single data-encoded RGBA PNG tile from a COG.
+    """Generate a single pre-generated data tile from a COG.
 
     Opens the COG, warps to EPSG:3857 via WarpedVRT (GDAL auto-selects
     COG overviews for efficiency), reads the tile window, and encodes
-    to RGBA PNG.
+    to the requested output format.
     """
     with rasterio.open(cog_path) as src:
         with WarpedVRT(src, crs="EPSG:3857", resampling=resampling) as vrt:
@@ -80,8 +105,9 @@ def generate_data_tile(
                 resampling=resampling,
             ).astype(np.float32)
 
-            rgba = encode_float_to_rgba(data, value_min, value_max, nodata=vrt.nodata)
-            return rgba_to_png_bytes(rgba)
+            return _encode_data_tile(
+                data, value_min, value_max, vrt.nodata, tile_format,
+            )
 
 
 def generate_all_data_tiles(
@@ -91,10 +117,11 @@ def generate_all_data_tiles(
     max_zoom: int = MAX_DATA_TILE_ZOOM,
     tile_size: int = 256,
     resampling: Resampling = Resampling.bilinear,
+    tile_format: str = "png",
 ) -> Iterator[tuple[int, int, int, bytes]]:
-    """Generate data tiles for z0 through max_zoom from a single COG.
+    """Generate pre-generated data tiles for z0 through max_zoom from a COG.
 
-    Opens the COG once via WarpedVRT and yields (z, x, y, png_bytes)
+    Opens the COG once via WarpedVRT and yields (z, x, y, tile_bytes)
     for every tile in the zoom range. GDAL handles overview selection
     automatically based on the requested resolution.
     """
@@ -114,7 +141,11 @@ def generate_all_data_tiles(
                             resampling=resampling,
                         ).astype(np.float32)
 
-                        rgba = encode_float_to_rgba(
-                            data, value_min, value_max, nodata=nodata,
+                        yield (
+                            z,
+                            x,
+                            y,
+                            _encode_data_tile(
+                                data, value_min, value_max, nodata, tile_format,
+                            ),
                         )
-                        yield (z, x, y, rgba_to_png_bytes(rgba))

@@ -206,10 +206,22 @@ class TestStorageLayout:
             == "models/gfs/runs/20260306T00Z/data_tiles/temperature/006/3/4/2.png"
         )
 
+    def test_data_tile_path_float16(self, gfs, run_id):
+        assert (
+            gfs.data_tile_path(run_id, "temperature", 6, 3, 4, 2, tile_format="f16")
+            == "models/gfs/runs/20260306T00Z/data_tiles/temperature/006/3/4/2.bin"
+        )
+
     def test_staging_data_tile_path(self, gfs, run_id):
         assert (
             gfs.staging_data_tile_path(run_id, "temperature", 6, 3, 4, 2)
             == "models/gfs/staging/20260306T00Z/data_tiles/temperature/006/3/4/2.png"
+        )
+
+    def test_staging_data_tile_path_float16(self, gfs, run_id):
+        assert (
+            gfs.staging_data_tile_path(run_id, "temperature", 6, 3, 4, 2, tile_format="f16")
+            == "models/gfs/staging/20260306T00Z/data_tiles/temperature/006/3/4/2.bin"
         )
 
     def test_data_tile_path_rejects_invalid_layer(self, gfs, run_id):

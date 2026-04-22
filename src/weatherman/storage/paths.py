@@ -35,6 +35,16 @@ def _validate_layer(layer: str) -> None:
         )
 
 
+def _data_tile_extension(tile_format: str) -> str:
+    if tile_format == "png":
+        return "png"
+    if tile_format == "f16":
+        return "bin"
+    raise ValueError(
+        f"Data tile format must be 'png' or 'f16', got '{tile_format}'"
+    )
+
+
 @total_ordering
 @dataclass(frozen=True)
 class RunID:
@@ -184,15 +194,19 @@ class StorageLayout:
     def data_tile_path(
         self, run_id: RunID, layer: str, forecast_hour: int,
         z: int, x: int, y: int,
+        tile_format: str = "png",
     ) -> str:
         """Published data tile: models/<model>/runs/<run_id>/data_tiles/<layer>/<fhour>/<z>/<x>/<y>.png"""
         _validate_layer(layer)
-        return f"{self.run_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.png"
+        ext = _data_tile_extension(tile_format)
+        return f"{self.run_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.{ext}"
 
     def staging_data_tile_path(
         self, run_id: RunID, layer: str, forecast_hour: int,
         z: int, x: int, y: int,
+        tile_format: str = "png",
     ) -> str:
         """Staging data tile: models/<model>/staging/<run_id>/data_tiles/<layer>/<fhour>/<z>/<x>/<y>.png"""
         _validate_layer(layer)
-        return f"{self.staging_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.png"
+        ext = _data_tile_extension(tile_format)
+        return f"{self.staging_prefix(run_id)}/data_tiles/{layer}/{forecast_hour:03d}/{z}/{x}/{y}.{ext}"

@@ -18,7 +18,13 @@ from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
 from weatherman.storage.object_store import LocalObjectStore
-from weatherman.tiling.data_encoder import decode_rgba_to_float, encode_float_to_rgba, rgba_to_png_bytes
+from weatherman.tiling.data_encoder import (
+    decode_f16_to_float,
+    decode_rgba_to_float,
+    encode_float_to_f16,
+    encode_float_to_rgba,
+    rgba_to_png_bytes,
+)
 from weatherman.tiling.router import (
     TileService,
     init_tile_service,
@@ -608,6 +614,8 @@ class TestPreGeneratedDataTiles:
         rgba = encode_float_to_rgba(data, -55.0, 55.0)
         png_bytes = rgba_to_png_bytes(rgba)
         store.write_bytes(tile_key, png_bytes)
+        f16_key = layout.data_tile_path(RUN, "temperature", 0, 3, 4, 2, tile_format="f16")
+        store.write_bytes(f16_key, encode_float_to_f16(data))
 
         app = FastAPI()
         init_tile_service(STORAGE, TITILER_URL, _catalog_loader, store=store)
@@ -670,4 +678,39 @@ class TestPreGeneratedDataTiles:
 
         assert resp.status_code == 200
         # TiTiler SHOULD have been called (fallback)
+        mock_get.assert_called_once()
+
+    def test_float16_tile_served_from_pregenerated(self, store_client):
+        """Pre-generated Float16 tile should be returned without TiTiler call."""
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+        ) as mock_get:
+            resp = store_client.get(
+                "/tiles/gfs/20260306T12Z/temperature/0/data/3/4/2.bin"
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.headers["x-tile-format"] == "float16"
+        decoded, mask = decode_f16_to_float(resp.content, 256, 256)
+        assert decoded.shape == (256, 256)
+        assert not mask.all()
+        mock_get.assert_not_called()
+
+    def test_float16_tile_fallback_missing(self, store_client):
+        """Missing pre-generated Float16 tile should fall through to TiTiler."""
+        values = np.full((256, 256), 11.0, dtype=np.float32)
+        tiff_bytes = _make_fake_tiff(values)
+        mock_response = httpx.Response(200, content=tiff_bytes)
+
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_get:
+            resp = store_client.get(
+                "/tiles/gfs/20260306T12Z/temperature/0/data/3/0/0.bin"
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["x-tile-format"] == "float16"
         mock_get.assert_called_once()

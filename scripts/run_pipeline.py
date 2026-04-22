@@ -333,8 +333,9 @@ def step_generate_data_tiles(
     store: LocalObjectStore,
     layout: StorageLayout,
     generated_layers: set[str],
+    max_zoom: int = MAX_DATA_TILE_ZOOM,
 ) -> int:
-    """Pre-generate data-encoded RGBA PNG tiles (z0–z5) for each layer/hour.
+    """Pre-generate static data tiles for each layer/hour.
 
     These tiles are placed in staging alongside the COGs and auto-publish
     with the rest of the run artifacts.
@@ -343,18 +344,10 @@ def step_generate_data_tiles(
     """
     from weatherman.tiling.colormaps import get_value_range
 
-    logger.info("Step 3/5: Pre-generating data tiles (z0–z5)")
+    logger.info("Step 3/5: Pre-generating data tiles (z0–z%d)", max_zoom)
     total = 0
 
-    # Skip wind_u/wind_v: the WebGL vector pipeline fetches these on-demand
-    # via TiTiler fallback. Pre-generating doubles tile count and memory usage
-    # for layers that are never displayed directly (only used as GPU inputs).
-    skip_data_tiles = {"wind_u", "wind_v", "wave_period", "wave_dir_u", "wave_dir_v"}
-
     for layer in sorted(generated_layers):
-        if layer in skip_data_tiles:
-            logger.info("  Skipping data tile pre-gen for %s (TiTiler fallback)", layer)
-            continue
         try:
             vmin, vmax = get_value_range(layer)
         except KeyError:
@@ -367,25 +360,32 @@ def step_generate_data_tiles(
             if not cog_path.exists():
                 continue
 
-            count = 0
-            tiles = generate_all_data_tiles(
-                str(cog_path),
-                vmin,
-                vmax,
-                resampling=data_tile_resampling_for_layer(layer),
-            )
-            try:
-                for z, x, y, png_bytes in tiles:
-                    tile_key = layout.staging_data_tile_path(
-                        run_id, layer, fhour, z, x, y,
-                    )
-                    store.write_bytes(tile_key, png_bytes)
-                    count += 1
-            finally:
-                tiles.close()
+            for tile_format in ("png", "f16"):
+                count = 0
+                tiles = generate_all_data_tiles(
+                    str(cog_path),
+                    vmin,
+                    vmax,
+                    max_zoom=max_zoom,
+                    resampling=data_tile_resampling_for_layer(layer),
+                    tile_format=tile_format,
+                )
+                try:
+                    for z, x, y, tile_bytes in tiles:
+                        tile_key = layout.staging_data_tile_path(
+                            run_id, layer, fhour, z, x, y,
+                            tile_format=tile_format,
+                        )
+                        store.write_bytes(tile_key, tile_bytes)
+                        count += 1
+                finally:
+                    tiles.close()
 
-            total += count
-            logger.info("  %s/f%03d: %d tiles", layer, fhour, count)
+                total += count
+                logger.info(
+                    "  %s/f%03d (%s): %d tiles",
+                    layer, fhour, tile_format, count,
+                )
 
     logger.info("Generated %d data tiles total", total)
     return total

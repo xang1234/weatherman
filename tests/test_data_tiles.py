@@ -21,7 +21,7 @@ from weatherman.processing.data_tiles import (
     generate_data_tile,
     tile_bounds_3857,
 )
-from weatherman.tiling.data_encoder import decode_rgba_to_float
+from weatherman.tiling.data_encoder import decode_f16_to_float, decode_rgba_to_float
 
 
 def _make_test_cog(
@@ -141,6 +141,32 @@ class TestGenerateDataTile:
         finally:
             Path(cog_path).unlink()
 
+    def test_float16_roundtrip_preserves_physical_values(self):
+        """Float16 generation should preserve physical values directly."""
+        values = np.full((180, 360), 12.5, dtype=np.float32)
+
+        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as f:
+            _make_test_cog(values, f.name)
+            cog_path = f.name
+
+        try:
+            buf = generate_data_tile(
+                cog_path,
+                0,
+                0,
+                0,
+                0.0,
+                50.0,
+                tile_format="f16",
+            )
+            decoded, mask = decode_f16_to_float(buf, 256, 256)
+
+            assert decoded.shape == (256, 256)
+            assert not mask.all()
+            assert np.allclose(decoded[~mask], 12.5, atol=0.1)
+        finally:
+            Path(cog_path).unlink()
+
 
 # -- generate_all_data_tiles tests --
 
@@ -181,5 +207,32 @@ class TestGenerateAllDataTiles:
                 img = Image.open(io.BytesIO(png_bytes))
                 assert img.size == (256, 256)
                 assert img.mode == "RGBA"
+        finally:
+            Path(cog_path).unlink()
+
+    def test_float16_tiles_are_generated(self):
+        """Iterator should emit raw Float16 tiles when requested."""
+        values = np.full((180, 360), 18.0, dtype=np.float32)
+
+        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as f:
+            _make_test_cog(values, f.name)
+            cog_path = f.name
+
+        try:
+            tiles = list(
+                generate_all_data_tiles(
+                    cog_path,
+                    0.0,
+                    50.0,
+                    max_zoom=0,
+                    tile_format="f16",
+                )
+            )
+            assert len(tiles) == 1
+            _, _, _, buf = tiles[0]
+            decoded, mask = decode_f16_to_float(buf, 256, 256)
+            assert decoded.shape == (256, 256)
+            assert not mask.all()
+            assert np.allclose(decoded[~mask], 18.0, atol=0.1)
         finally:
             Path(cog_path).unlink()

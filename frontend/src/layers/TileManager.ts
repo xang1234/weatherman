@@ -68,6 +68,23 @@ export interface TileManagerOptions {
  */
 let _nextManagerId = 0
 
+interface DatasetConfig {
+  model: string
+  runId: string
+  layer: string
+  forecastHour: number
+}
+
+interface DatasetState {
+  config: DatasetConfig
+  tiles: Map<string, TileEntry>
+  pending: Map<string, { image: HTMLImageElement; texture: WebGLTexture }>
+  pendingF16: Map<string, { abort: AbortController; texture: WebGLTexture }>
+  pendingWorker: Map<string, WebGLTexture>
+  allErrorWarned: boolean
+  lastUsed: number
+}
+
 export class TileManager {
   private _gl: WebGL2RenderingContext
   private _apiBase: string
@@ -80,21 +97,11 @@ export class TileManager {
   private _layer = ''
   private _forecastHour = 0
 
-  /** All cached tiles keyed by "z/x/y". */
-  private _tiles = new Map<string, TileEntry>()
+  /** Dataset caches keyed by "model/run/layer/hour". */
+  private _datasets = new Map<string, DatasetState>()
 
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
-
-  /** Guard to emit the all-tiles-error warning only once. */
-  private _allErrorWarned = false
-
-
-  /** In-flight fetches keyed by tile key, with Image + texture refs for cleanup. */
-  private _pending = new Map<string, { image: HTMLImageElement; texture: WebGLTexture }>()
-
-  /** In-flight Float16 fetches with AbortController for cancellation. */
-  private _pendingF16 = new Map<string, { abort: AbortController; texture: WebGLTexture }>()
 
   /** Shared Web Worker client for off-thread fetching (optional). */
   private _fetchClient: TileFetchClient | null = null
@@ -102,15 +109,12 @@ export class TileManager {
   /** Unique ID for this manager instance, used to namespace worker keys. */
   private _id: string
 
-  /** Pending worker-initiated fetches: tile key → pre-allocated placeholder texture. */
-  private _pendingWorker = new Map<string, WebGLTexture>()
-
   /** Unsubscribe functions for worker listener cleanup. */
   private _unsubLoaded: (() => void) | null = null
   private _unsubError: (() => void) | null = null
 
   /** Callback invoked when a tile finishes loading (for triggering repaint). */
-  onTileLoaded: (() => void) | null = null
+  onTileLoaded: ((key: string) => void) | null = null
 
   /** Whether this manager fetches Float16 binary tiles. */
   get isFloat16(): boolean {
@@ -128,7 +132,7 @@ export class TileManager {
 
   /**
    * Set the current dataset to fetch tiles for.
-   * Clears the cache if any parameter changed.
+   * Switching datasets reuses any cached tiles already kept for that key.
    */
   setLayer(model: string, runId: string, layer: string, forecastHour: number): void {
     if (
@@ -139,11 +143,11 @@ export class TileManager {
     ) {
       return
     }
-    this.clear()
     this._model = model
     this._runId = runId
     this._layer = layer
     this._forecastHour = forecastHour
+    this._ensureCurrentState()
   }
 
   /**
@@ -160,9 +164,13 @@ export class TileManager {
       this._wireWorkerCallbacks()
     }
 
+    const state = this._ensureCurrentState()
+    if (!state) return
+    state.lastUsed = ++this._accessCounter
+
     for (const { z, x, y } of coords) {
       const key = tileKey(z, x, y)
-      const existing = this._tiles.get(key)
+      const existing = state.tiles.get(key)
       if (existing) {
         // Don't bump access counter for errored tiles — let them be
         // evicted so they can be retried on the next updateVisibleTiles call.
@@ -170,24 +178,24 @@ export class TileManager {
         existing.lastAccess = ++this._accessCounter
         continue
       }
-      if (this._pending.has(key) || this._pendingF16.has(key) || this._pendingWorker.has(key)) continue
-      this._fetchTile(z, x, y, priority)
+      if (state.pending.has(key) || state.pendingF16.has(key) || state.pendingWorker.has(key)) continue
+      this._fetchTile(state, z, x, y, priority)
     }
     this._evict()
 
     // One-time warning when all requested tiles are in error state
-    if (coords.length > 0 && !this._allErrorWarned) {
+    if (coords.length > 0 && !state.allErrorWarned) {
       const allError = coords.every(({ z, x, y }) => {
-        const state = this.getTileState(z, x, y)
-        return state === 'error'
+        const tileState = this.getTileState(z, x, y)
+        return tileState === 'error'
       })
       if (allError) {
-        this._allErrorWarned = true
+        state.allErrorWarned = true
         console.warn(
           `[TileManager] All ${coords.length} visible tiles are in error state — check tile server and COG paths`,
         )
       } else {
-        this._allErrorWarned = false
+        state.allErrorWarned = false
       }
     }
   }
@@ -197,7 +205,7 @@ export class TileManager {
    * Updates the LRU access counter.
    */
   getTexture(z: number, x: number, y: number): WebGLTexture | null {
-    const entry = this._tiles.get(tileKey(z, x, y))
+    const entry = this._currentState()?.tiles.get(tileKey(z, x, y))
     if (!entry || entry.state !== 'loaded') return null
     entry.lastAccess = ++this._accessCounter
     return entry.texture
@@ -206,18 +214,25 @@ export class TileManager {
   /** Get the loading state for a tile. */
   getTileState(z: number, x: number, y: number): TileState | null {
     const key = tileKey(z, x, y)
-    if (this._pending.has(key) || this._pendingF16.has(key) || this._pendingWorker.has(key)) return 'pending'
-    return this._tiles.get(key)?.state ?? null
+    const state = this._currentState()
+    if (!state) return null
+    if (state.pending.has(key) || state.pendingF16.has(key) || state.pendingWorker.has(key)) return 'pending'
+    return state.tiles.get(key)?.state ?? null
   }
 
   /** Returns true if any tiles are currently loading. */
   get isLoading(): boolean {
-    return this._pending.size > 0 || this._pendingF16.size > 0 || this._pendingWorker.size > 0
+    const state = this._currentState()
+    return state != null && (
+      state.pending.size > 0 ||
+      state.pendingF16.size > 0 ||
+      state.pendingWorker.size > 0
+    )
   }
 
   /** Number of textures currently cached. */
   get cacheSize(): number {
-    return this._tiles.size
+    return this._currentState()?.tiles.size ?? 0
   }
 
   /** Current layer name this manager is fetching. */
@@ -232,38 +247,11 @@ export class TileManager {
 
   /** Clear all cached textures and abort pending fetches. */
   clear(): void {
-    // Abort in-flight Image loads and delete their placeholder textures
-    for (const { image, texture } of this._pending.values()) {
-      image.onload = null
-      image.onerror = null
-      image.src = ''
-      this._gl.deleteTexture(texture)
+    for (const [datasetKey, state] of this._datasets) {
+      this._disposeDatasetState(datasetKey, state)
     }
-    this._pending.clear()
-
-    // Abort in-flight Float16 fetches
-    for (const { abort, texture } of this._pendingF16.values()) {
-      abort.abort()
-      this._gl.deleteTexture(texture)
-    }
-    this._pendingF16.clear()
-
-    // Cancel and clean up worker-pending fetches
-    if (this._fetchClient && this._pendingWorker.size > 0) {
-      for (const [key, texture] of this._pendingWorker) {
-        this._fetchClient.cancel(this._workerKey(key))
-        this._gl.deleteTexture(texture)
-      }
-      this._pendingWorker.clear()
-    }
-
-    // Delete all cached textures
-    for (const entry of this._tiles.values()) {
-      this._gl.deleteTexture(entry.texture)
-    }
-    this._tiles.clear()
+    this._datasets.clear()
     this._accessCounter = 0
-    this._allErrorWarned = false
   }
 
   /** Release all GL resources. Call when done with this manager. */
@@ -279,30 +267,89 @@ export class TileManager {
 
   // ── Private ──────────────────────────────────────────────────────
 
-  private _buildUrl(z: number, x: number, y: number): string {
-    const ext = this._format === 'f16' ? 'bin' : 'png'
-    return `${this._apiBase}/tiles/${this._model}/${this._runId}/${this._layer}/${this._forecastHour}/data/${z}/${x}/${y}.${ext}`
+  private _datasetKey(config: DatasetConfig): string {
+    return `${config.model}/${config.runId}/${config.layer}/${config.forecastHour}`
   }
 
-  private _fetchTile(z: number, x: number, y: number, priority: TilePriority = 0): void {
-    if (this._fetchClient) {
-      this._fetchTileViaWorker(z, x, y, priority)
-    } else if (this._format === 'f16') {
-      this._fetchTileF16(z, x, y)
+  private _currentDatasetKey(): string | null {
+    if (!this._model || !this._runId || !this._layer) return null
+    return this._datasetKey({
+      model: this._model,
+      runId: this._runId,
+      layer: this._layer,
+      forecastHour: this._forecastHour,
+    })
+  }
+
+  private _currentState(): DatasetState | null {
+    if (!this._model || !this._runId || !this._layer) return null
+    return this._datasets.get(this._datasetKey({
+      model: this._model,
+      runId: this._runId,
+      layer: this._layer,
+      forecastHour: this._forecastHour,
+    })) ?? null
+  }
+
+  private _ensureCurrentState(): DatasetState | null {
+    if (!this._model || !this._runId || !this._layer) return null
+    const config: DatasetConfig = {
+      model: this._model,
+      runId: this._runId,
+      layer: this._layer,
+      forecastHour: this._forecastHour,
+    }
+    const datasetKey = this._datasetKey(config)
+    let state = this._datasets.get(datasetKey)
+    if (!state) {
+      state = {
+        config,
+        tiles: new Map(),
+        pending: new Map(),
+        pendingF16: new Map(),
+        pendingWorker: new Map(),
+        allErrorWarned: false,
+        lastUsed: ++this._accessCounter,
+      }
+      this._datasets.set(datasetKey, state)
     } else {
-      this._fetchTilePng(z, x, y)
+      state.config = config
+      state.lastUsed = ++this._accessCounter
+    }
+    return state
+  }
+
+  private _buildUrl(config: DatasetConfig, z: number, x: number, y: number): string {
+    const ext = this._format === 'f16' ? 'bin' : 'png'
+    return `${this._apiBase}/tiles/${config.model}/${config.runId}/${config.layer}/${config.forecastHour}/data/${z}/${x}/${y}.${ext}`
+  }
+
+  private _fetchTile(state: DatasetState, z: number, x: number, y: number, priority: TilePriority = 0): void {
+    if (this._fetchClient) {
+      this._fetchTileViaWorker(state, z, x, y, priority)
+    } else if (this._format === 'f16') {
+      this._fetchTileF16(state, z, x, y)
+    } else {
+      this._fetchTilePng(state, z, x, y)
     }
   }
 
   /** Build a worker-namespaced key to avoid collisions between managers. */
-  private _workerKey(localKey: string): string {
-    return `${this._id}:${localKey}`
+  private _workerKey(datasetKey: string, localKey: string): string {
+    return `${this._id}::${datasetKey}::${localKey}`
   }
 
-  /** Extract the tile key from a worker-namespaced key, or null if not ours. */
-  private _parseWorkerKey(workerKey: string): string | null {
-    const prefix = `${this._id}:`
-    return workerKey.startsWith(prefix) ? workerKey.slice(prefix.length) : null
+  /** Extract the dataset/tile key pair from a worker-namespaced key, or null if not ours. */
+  private _parseWorkerKey(workerKey: string): { datasetKey: string; localKey: string } | null {
+    const prefix = `${this._id}::`
+    if (!workerKey.startsWith(prefix)) return null
+    const rest = workerKey.slice(prefix.length)
+    const separator = rest.indexOf('::')
+    if (separator === -1) return null
+    return {
+      datasetKey: rest.slice(0, separator),
+      localKey: rest.slice(separator + 2),
+    }
   }
 
   /**
@@ -310,10 +357,17 @@ export class TileManager {
    * Creates a placeholder texture and sends the fetch request;
    * the worker callback handles texture upload when data arrives.
    */
-  private _fetchTileViaWorker(z: number, x: number, y: number, priority: TilePriority = 0): void {
+  private _fetchTileViaWorker(
+    state: DatasetState,
+    z: number,
+    x: number,
+    y: number,
+    priority: TilePriority = 0,
+  ): void {
     const key = tileKey(z, x, y)
     const gl = this._gl
-    const url = this._buildUrl(z, x, y)
+    const datasetKey = this._datasetKey(state.config)
+    const url = this._buildUrl(state.config, z, x, y)
 
     const texture = gl.createTexture()
     if (!texture) return
@@ -331,9 +385,9 @@ export class TileManager {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.bindTexture(gl.TEXTURE_2D, null)
 
-    this._pendingWorker.set(key, texture)
+    state.pendingWorker.set(key, texture)
     // Use namespaced key in worker to avoid collisions between managers
-    this._fetchClient!.fetch(this._workerKey(key), url, this._format, priority)
+    this._fetchClient!.fetch(this._workerKey(datasetKey, key), url, this._format, priority)
   }
 
   /**
@@ -349,9 +403,10 @@ export class TileManager {
     const client = this._fetchClient!
 
     this._unsubLoaded = client.addLoadedListener((result: TileFetchResult) => {
-      const localKey = this._parseWorkerKey(result.key)
-      if (!localKey) return // Not our namespace
-      const texture = this._pendingWorker.get(localKey)
+      const parsed = this._parseWorkerKey(result.key)
+      if (!parsed) return
+      const state = this._datasets.get(parsed.datasetKey)
+      const texture = state?.pendingWorker.get(parsed.localKey)
       if (!texture) {
         // Tile was cancelled/cleared while in-flight — free transferred data
         if (result.format === 'png' && result.data instanceof ImageBitmap) {
@@ -360,20 +415,21 @@ export class TileManager {
         return
       }
 
-      this._pendingWorker.delete(localKey)
-      this._uploadWorkerResult(localKey, texture, result)
+      state!.pendingWorker.delete(parsed.localKey)
+      this._uploadWorkerResult(state!, parsed.localKey, texture, result)
     })
 
     this._unsubError = client.addErrorListener((error: TileFetchError) => {
-      const localKey = this._parseWorkerKey(error.key)
-      if (!localKey) return
-      const texture = this._pendingWorker.get(localKey)
+      const parsed = this._parseWorkerKey(error.key)
+      if (!parsed) return
+      const state = this._datasets.get(parsed.datasetKey)
+      const texture = state?.pendingWorker.get(parsed.localKey)
       if (!texture) return
 
-      this._pendingWorker.delete(localKey)
-      console.warn(`[TileManager] Worker fetch failed: ${localKey} — ${error.error}`)
-      this._tiles.set(localKey, {
-        key: localKey,
+      state!.pendingWorker.delete(parsed.localKey)
+      console.warn(`[TileManager] Worker fetch failed: ${parsed.localKey} — ${error.error}`)
+      state!.tiles.set(parsed.localKey, {
+        key: parsed.localKey,
         texture,
         state: 'error',
         lastAccess: ++this._accessCounter,
@@ -385,7 +441,12 @@ export class TileManager {
    * Upload tile data received from the worker into the pre-allocated texture.
    * Handles both PNG (ImageBitmap) and Float16 (ArrayBuffer) formats.
    */
-  private _uploadWorkerResult(key: string, texture: WebGLTexture, result: TileFetchResult): void {
+  private _uploadWorkerResult(
+    state: DatasetState,
+    key: string,
+    texture: WebGLTexture,
+    result: TileFetchResult,
+  ): void {
     const gl = this._gl
 
     if (result.format === 'f16') {
@@ -394,7 +455,7 @@ export class TileManager {
 
       if (side <= 0) {
         console.warn(`[TileManager] Float16 tile from worker has non-square size`)
-        this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+        state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
         return
       }
 
@@ -419,20 +480,20 @@ export class TileManager {
       bitmap.close()
     }
 
-    this._tiles.set(key, {
+    state.tiles.set(key, {
       key,
       texture,
       state: 'loaded',
       lastAccess: ++this._accessCounter,
     })
-    this.onTileLoaded?.()
+    this.onTileLoaded?.(key)
   }
 
   /** Fetch a Float16 binary tile and upload as R16F texture. */
-  private _fetchTileF16(z: number, x: number, y: number): void {
+  private _fetchTileF16(state: DatasetState, z: number, x: number, y: number): void {
     const key = tileKey(z, x, y)
     const gl = this._gl
-    const url = this._buildUrl(z, x, y)
+    const url = this._buildUrl(state.config, z, x, y)
 
     const texture = gl.createTexture()
     if (!texture) return
@@ -453,7 +514,7 @@ export class TileManager {
     gl.bindTexture(gl.TEXTURE_2D, null)
 
     const abort = new AbortController()
-    this._pendingF16.set(key, { abort, texture })
+    state.pendingF16.set(key, { abort, texture })
 
     fetch(url, { signal: abort.signal })
       .then(resp => {
@@ -461,18 +522,18 @@ export class TileManager {
         return resp.arrayBuffer()
       })
       .then(buffer => {
-        if (!this._pendingF16.has(key)) {
+        if (!state.pendingF16.has(key)) {
           gl.deleteTexture(texture)
           return
         }
-        this._pendingF16.delete(key)
+        state.pendingF16.delete(key)
 
         // Determine tile dimensions from buffer size (assumes square tiles)
         const pixelCount = buffer.byteLength / 2  // 2 bytes per float16
         const side = Math.sqrt(pixelCount)
         if (side !== Math.floor(side)) {
           console.warn(`[TileManager] Float16 tile has non-square size: ${pixelCount} pixels`)
-          this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+          state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
           return
         }
 
@@ -486,31 +547,31 @@ export class TileManager {
         )
         gl.bindTexture(gl.TEXTURE_2D, null)
 
-        this._tiles.set(key, {
+        state.tiles.set(key, {
           key,
           texture,
           state: 'loaded',
           lastAccess: ++this._accessCounter,
         })
-        this.onTileLoaded?.()
+        this.onTileLoaded?.(key)
       })
       .catch(err => {
         if (err.name === 'AbortError') return
         console.warn(`[TileManager] Failed to load Float16 tile: ${url}`, err)
-        if (!this._pendingF16.has(key)) {
+        if (!state.pendingF16.has(key)) {
           gl.deleteTexture(texture)
           return
         }
-        this._pendingF16.delete(key)
-        this._tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+        state.pendingF16.delete(key)
+        state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
       })
   }
 
   /** Fetch a PNG data tile and upload as RGBA texture (original path). */
-  private _fetchTilePng(z: number, x: number, y: number): void {
+  private _fetchTilePng(state: DatasetState, z: number, x: number, y: number): void {
     const key = tileKey(z, x, y)
     const gl = this._gl
-    const url = this._buildUrl(z, x, y)
+    const url = this._buildUrl(state.config, z, x, y)
 
     const texture = gl.createTexture()
     if (!texture) {
@@ -536,15 +597,15 @@ export class TileManager {
     img.crossOrigin = 'anonymous'
 
     // Store in pending map so clear() can abort and delete the texture
-    this._pending.set(key, { image: img, texture })
+    state.pending.set(key, { image: img, texture })
 
     img.onload = () => {
       // Check we haven't been cleared/destroyed while loading
-      if (!this._pending.has(key)) {
+      if (!state.pending.has(key)) {
         gl.deleteTexture(texture)
         return
       }
-      this._pending.delete(key)
+      state.pending.delete(key)
 
       // Upload image data to texture
       gl.bindTexture(gl.TEXTURE_2D, texture)
@@ -555,24 +616,24 @@ export class TileManager {
       )
       gl.bindTexture(gl.TEXTURE_2D, null)
 
-      this._tiles.set(key, {
+      state.tiles.set(key, {
         key,
         texture,
         state: 'loaded',
         lastAccess: ++this._accessCounter,
       })
-      this.onTileLoaded?.()
+      this.onTileLoaded?.(key)
     }
 
     img.onerror = () => {
       console.warn(`[TileManager] Failed to load tile: ${url}`)
-      if (!this._pending.has(key)) {
+      if (!state.pending.has(key)) {
         gl.deleteTexture(texture)
         return
       }
-      this._pending.delete(key)
+      state.pending.delete(key)
 
-      this._tiles.set(key, {
+      state.tiles.set(key, {
         key,
         texture,
         state: 'error',
@@ -585,18 +646,61 @@ export class TileManager {
 
   /** Evict least-recently-used tiles when over the cache limit. */
   private _evict(): void {
-    if (this._tiles.size <= this._maxTextures) return
-
-    // Collect entries sorted by last access (ascending = oldest first)
-    const entries = [...this._tiles.values()]
-      .sort((a, b) => a.lastAccess - b.lastAccess)
-
-    const toRemove = this._tiles.size - this._maxTextures
-    for (let i = 0; i < toRemove; i++) {
-      const entry = entries[i]
-      this._gl.deleteTexture(entry.texture)
-      this._tiles.delete(entry.key)
+    const currentDatasetKey = this._currentDatasetKey()
+    const entries: Array<{ datasetKey: string; state: DatasetState; entry: TileEntry }> = []
+    for (const [datasetKey, state] of this._datasets) {
+      for (const entry of state.tiles.values()) {
+        entries.push({ datasetKey, state, entry })
+      }
     }
+    if (entries.length <= this._maxTextures) return
+
+    entries.sort((a, b) => a.entry.lastAccess - b.entry.lastAccess)
+
+    const toRemove = entries.length - this._maxTextures
+    for (let i = 0; i < toRemove; i++) {
+      const { datasetKey, state, entry } = entries[i]
+      this._gl.deleteTexture(entry.texture)
+      state.tiles.delete(entry.key)
+      if (
+        state.tiles.size === 0 &&
+        state.pending.size === 0 &&
+        state.pendingF16.size === 0 &&
+        state.pendingWorker.size === 0 &&
+        datasetKey !== currentDatasetKey
+      ) {
+        this._datasets.delete(datasetKey)
+      }
+    }
+  }
+
+  private _disposeDatasetState(datasetKey: string, state: DatasetState): void {
+    for (const { image, texture } of state.pending.values()) {
+      image.onload = null
+      image.onerror = null
+      image.src = ''
+      this._gl.deleteTexture(texture)
+    }
+    state.pending.clear()
+
+    for (const { abort, texture } of state.pendingF16.values()) {
+      abort.abort()
+      this._gl.deleteTexture(texture)
+    }
+    state.pendingF16.clear()
+
+    if (this._fetchClient && state.pendingWorker.size > 0) {
+      for (const [localKey, texture] of state.pendingWorker) {
+        this._fetchClient.cancel(this._workerKey(datasetKey, localKey))
+        this._gl.deleteTexture(texture)
+      }
+      state.pendingWorker.clear()
+    }
+
+    for (const entry of state.tiles.values()) {
+      this._gl.deleteTexture(entry.texture)
+    }
+    state.tiles.clear()
   }
 }
 

@@ -36,6 +36,7 @@ import {
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
+import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
 const DEFAULT_STATE_SIZE = 50
 const TRAIL_FADE = 0.55
@@ -64,6 +65,11 @@ interface AtlasLayout {
   hasAnyTile: boolean
 }
 
+interface AtlasSlot {
+  col: number
+  row: number
+}
+
 export class WaveParticleLayer implements CustomLayerInterface {
   readonly id: string
   readonly type = 'custom' as const
@@ -72,9 +78,11 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _map: MaplibreMap | null = null
   private _gl: WebGL2RenderingContext | null = null
   private _opacity: number
+  private _active = false
   private _apiBase: string
   private _tileFormat: TileFormat
   private _maxTextureSize = 4096
+  private _debug: ParticleDebugState
 
   private _stateSize: number
   private _particleCount: number
@@ -164,6 +172,12 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _atlasHeight = 0
   private _copyFbo: WebGLFramebuffer | null = null
   private _atlasFbo: WebGLFramebuffer | null = null
+  private _atlasLayout: AtlasLayout | null = null
+  private _atlasLayoutKey = ''
+  private _atlasSlotsByKey = new Map<string, AtlasSlot[]>()
+  private _atlasVisibleKeys: string[] = []
+  private _atlasDirtyT0 = new Set<string>()
+  private _atlasDirtyT1 = new Set<string>()
 
   private _panTracker = new PanVelocityTracker()
 
@@ -176,6 +190,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._opacity = options.opacity ?? 0.8
     this._apiBase = options.apiBase ?? ''
     this._tileFormat = options.tileFormat ?? 'png'
+    this._debug = ensureParticleDebugState('wave')
+    this._debug.active = this._active
     this._stateSizeOverride = options.stateSize
     this._stateSize = DEFAULT_STATE_SIZE
     this._particleCount = DEFAULT_STATE_SIZE * DEFAULT_STATE_SIZE
@@ -189,6 +205,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
 
     this._map = map
     this._gl = gl
+    this._debug.mounts += 1
+    this._debug.active = this._active
 
     if (!gl.getExtension('EXT_color_buffer_float')) {
       console.error('[WaveParticleLayer] EXT_color_buffer_float not supported')
@@ -229,6 +247,10 @@ export class WaveParticleLayer implements CustomLayerInterface {
       !this._stateTextures || !this._stateFbos ||
       !this._map || !(gl instanceof WebGL2RenderingContext)
     ) {
+      return
+    }
+
+    if (!this._active || this._opacity <= 0 || !this._waveConfigured) {
       return
     }
 
@@ -284,7 +306,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
     const prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA) as number
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
 
-    const atlas = this._waveConfigured ? this._packAtlas(gl, visibleCoords) : null
+    const atlas = this._packAtlas(gl, visibleCoords)
     const hasWaveData = atlas?.hasAnyTile ?? false
 
     const canvasW = gl.drawingBufferWidth
@@ -471,10 +493,14 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._waveDirUManager?.setLayer(model, runId, 'wave_dir_u', forecastHour)
     this._waveDirVManager?.setLayer(model, runId, 'wave_dir_v', forecastHour)
     this._waveConfigured = true
+    this._invalidateAtlas()
     this._map?.triggerRepaint()
   }
 
   setTemporalBlend(forecastHourT1: number, mix: number): void {
+    const shouldInvalidateAtlas =
+      forecastHourT1 !== this._forecastHourT1 ||
+      (forecastHourT1 >= 0) !== (this._forecastHourT1 >= 0)
     this._forecastHourT1 = forecastHourT1
     this._temporalMix = Math.max(0, Math.min(1, mix))
 
@@ -483,6 +509,9 @@ export class WaveParticleLayer implements CustomLayerInterface {
       this._wavePeriodT1Manager?.setLayer(this._model, this._runId, 'wave_period', forecastHourT1)
       this._waveDirUT1Manager?.setLayer(this._model, this._runId, 'wave_dir_u', forecastHourT1)
       this._waveDirVT1Manager?.setLayer(this._model, this._runId, 'wave_dir_v', forecastHourT1)
+    }
+    if (shouldInvalidateAtlas) {
+      this._invalidateAtlas()
     }
     this._map?.triggerRepaint()
   }
@@ -513,6 +542,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
       this._waveDirVManager?.setLayer(this._model, this._runId, 'wave_dir_v', newHour)
     }
     this._temporalMix = 0
+    this._invalidateAtlas()
     this._map?.triggerRepaint()
   }
 
@@ -544,6 +574,15 @@ export class WaveParticleLayer implements CustomLayerInterface {
   setOpacity(opacity: number): void {
     this._opacity = Math.max(0, Math.min(1, opacity))
     this._map?.triggerRepaint()
+  }
+
+  setActive(active: boolean): void {
+    if (active === this._active) return
+    this._active = active
+    this._debug.active = active
+    if (active) {
+      this._map?.triggerRepaint()
+    }
   }
 
   private _latToMercatorY(lat: number): number {
@@ -578,27 +617,30 @@ export class WaveParticleLayer implements CustomLayerInterface {
   }
 
   private _initTileManagers(gl: WebGL2RenderingContext): void {
-    const triggerRepaint = () => this._map?.triggerRepaint()
+    const handleTileLoaded = (key: string) => {
+      this._markAtlasTileDirty(key)
+      this._map?.triggerRepaint()
+    }
     const fetchClient = getTileFetchClient()
     const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
 
     this._waveHeightManager = new TileManager(gl, tmOpts)
-    this._waveHeightManager.onTileLoaded = triggerRepaint
+    this._waveHeightManager.onTileLoaded = handleTileLoaded
     this._wavePeriodManager = new TileManager(gl, tmOpts)
-    this._wavePeriodManager.onTileLoaded = triggerRepaint
+    this._wavePeriodManager.onTileLoaded = handleTileLoaded
     this._waveDirUManager = new TileManager(gl, tmOpts)
-    this._waveDirUManager.onTileLoaded = triggerRepaint
+    this._waveDirUManager.onTileLoaded = handleTileLoaded
     this._waveDirVManager = new TileManager(gl, tmOpts)
-    this._waveDirVManager.onTileLoaded = triggerRepaint
+    this._waveDirVManager.onTileLoaded = handleTileLoaded
 
     this._waveHeightT1Manager = new TileManager(gl, tmOpts)
-    this._waveHeightT1Manager.onTileLoaded = triggerRepaint
+    this._waveHeightT1Manager.onTileLoaded = handleTileLoaded
     this._wavePeriodT1Manager = new TileManager(gl, tmOpts)
-    this._wavePeriodT1Manager.onTileLoaded = triggerRepaint
+    this._wavePeriodT1Manager.onTileLoaded = handleTileLoaded
     this._waveDirUT1Manager = new TileManager(gl, tmOpts)
-    this._waveDirUT1Manager.onTileLoaded = triggerRepaint
+    this._waveDirUT1Manager.onTileLoaded = handleTileLoaded
     this._waveDirVT1Manager = new TileManager(gl, tmOpts)
-    this._waveDirVT1Manager.onTileLoaded = triggerRepaint
+    this._waveDirVT1Manager.onTileLoaded = handleTileLoaded
   }
 
   private _initResources(gl: WebGL2RenderingContext): void {
@@ -748,7 +790,35 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._trailReadIndex = 0
   }
 
-  private _packAtlas(gl: WebGL2RenderingContext, visibleCoords: TileCoord[]): AtlasLayout | null {
+  private _invalidateAtlas(): void {
+    this._atlasLayout = null
+    this._atlasLayoutKey = ''
+    this._atlasSlotsByKey.clear()
+    this._atlasVisibleKeys = []
+    this._atlasDirtyT0.clear()
+    this._atlasDirtyT1.clear()
+    this._updateDebugPendingDirtyTiles()
+  }
+
+  private _markAtlasTileDirty(key: string): void {
+    if (!this._atlasSlotsByKey.has(key)) return
+    this._atlasDirtyT0.add(key)
+    if (this._forecastHourT1 >= 0) {
+      this._atlasDirtyT1.add(key)
+    }
+    this._updateDebugPendingDirtyTiles()
+  }
+
+  private _updateDebugPendingDirtyTiles(): void {
+    this._debug.pendingDirtyTiles = this._atlasDirtyT0.size + this._atlasDirtyT1.size
+  }
+
+  private _computeAtlasLayout(visibleCoords: TileCoord[]): {
+    layout: Omit<AtlasLayout, 'hasAnyTile'>
+    layoutKey: string
+    slotsByKey: Map<string, AtlasSlot[]>
+    visibleKeys: string[]
+  } | null {
     if (visibleCoords.length === 0) return null
 
     const zoom = visibleCoords[0].z
@@ -771,52 +841,165 @@ export class WaveParticleLayer implements CustomLayerInterface {
       return null
     }
 
-    this._ensureAtlas(gl, cols, rows)
-    this._clearAtlas(gl)
-
-    let hasAnyTile = false
+    const slotsByKey = new Map<string, AtlasSlot[]>()
+    const visibleKeys: string[] = []
     for (const c of visibleCoords) {
       const rx = c.x + c.wrap * n
-      const col = rx - minRX
-      const row = c.y - minY
-
-      const heightTex = this._waveHeightManager?.getTexture(c.z, c.x, c.y) ?? null
-      const periodTex = this._wavePeriodManager?.getTexture(c.z, c.x, c.y) ?? null
-      const dirUTex = this._waveDirUManager?.getTexture(c.z, c.x, c.y) ?? null
-      const dirVTex = this._waveDirVManager?.getTexture(c.z, c.x, c.y) ?? null
-
-      if (heightTex && this._atlasWaveH) this._copyTileToAtlas(gl, heightTex, this._atlasWaveH, col, row)
-      if (periodTex && this._atlasPeriod) this._copyTileToAtlas(gl, periodTex, this._atlasPeriod, col, row)
-      if (dirUTex && this._atlasDirU) this._copyTileToAtlas(gl, dirUTex, this._atlasDirU, col, row)
-      if (dirVTex && this._atlasDirV) this._copyTileToAtlas(gl, dirVTex, this._atlasDirV, col, row)
-
-      if (heightTex && periodTex && dirUTex && dirVTex) {
-        hasAnyTile = true
+      const key = tileKey(c.z, c.x, c.y)
+      const slot = { col: rx - minRX, row: c.y - minY }
+      const slots = slotsByKey.get(key)
+      if (slots) {
+        slots.push(slot)
+      } else {
+        slotsByKey.set(key, [slot])
+        visibleKeys.push(key)
       }
     }
 
-    if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
-      for (const c of visibleCoords) {
-        const rx = c.x + c.wrap * n
-        const col = rx - minRX
-        const row = c.y - minY
+    return {
+      layout: { cols, rows, originX: minRX, originY: minY, zoom },
+      layoutKey: `${zoom}:${minRX}:${minY}:${cols}:${rows}`,
+      slotsByKey,
+      visibleKeys,
+    }
+  }
 
-        const heightT1 = this._waveHeightT1Manager?.getTexture(c.z, c.x, c.y) ?? null
-        const periodT1 = this._wavePeriodT1Manager?.getTexture(c.z, c.x, c.y) ?? null
-        const dirUT1 = this._waveDirUT1Manager?.getTexture(c.z, c.x, c.y) ?? null
-        const dirVT1 = this._waveDirVT1Manager?.getTexture(c.z, c.x, c.y) ?? null
+  private _packAtlas(gl: WebGL2RenderingContext, visibleCoords: TileCoord[]): AtlasLayout | null {
+    const computed = this._computeAtlasLayout(visibleCoords)
+    if (!computed) {
+      this._invalidateAtlas()
+      return null
+    }
 
-        if (heightT1 && this._atlasHeightT1) this._copyTileToAtlas(gl, heightT1, this._atlasHeightT1, col, row)
-        if (periodT1 && this._atlasPeriodT1) this._copyTileToAtlas(gl, periodT1, this._atlasPeriodT1, col, row)
-        if (dirUT1 && this._atlasDirUT1) this._copyTileToAtlas(gl, dirUT1, this._atlasDirUT1, col, row)
-        if (dirVT1 && this._atlasDirVT1) this._copyTileToAtlas(gl, dirVT1, this._atlasDirVT1, col, row)
+    const layoutChanged = computed.layoutKey !== this._atlasLayoutKey || !this._atlasLayout
+    this._atlasSlotsByKey = computed.slotsByKey
+    this._atlasVisibleKeys = computed.visibleKeys
+
+    if (layoutChanged) {
+      this._ensureAtlas(gl, computed.layout.cols, computed.layout.rows)
+      this._clearAtlas(gl)
+      this._debug.atlasClears += 1
+      this._debug.atlasFlushes += 1
+      this._atlasLayout = {
+        ...computed.layout,
+        hasAnyTile: false,
+      }
+      this._atlasLayoutKey = computed.layoutKey
+      this._atlasDirtyT0 = new Set(computed.visibleKeys)
+      this._atlasDirtyT1 = this._forecastHourT1 >= 0
+        ? new Set(computed.visibleKeys)
+        : new Set()
+    } else if (this._forecastHourT1 < 0) {
+      this._atlasDirtyT1.clear()
+    }
+
+    let blits = 0
+    blits += this._flushDirtyWaveAtlas(
+      gl,
+      this._atlasDirtyT0,
+      this._waveHeightManager,
+      this._wavePeriodManager,
+      this._waveDirUManager,
+      this._waveDirVManager,
+      this._atlasWaveH,
+      this._atlasPeriod,
+      this._atlasDirU,
+      this._atlasDirV,
+    )
+    if (this._forecastHourT1 >= 0) {
+      blits += this._flushDirtyWaveAtlas(
+        gl,
+        this._atlasDirtyT1,
+        this._waveHeightT1Manager,
+        this._wavePeriodT1Manager,
+        this._waveDirUT1Manager,
+        this._waveDirVT1Manager,
+        this._atlasHeightT1,
+        this._atlasPeriodT1,
+        this._atlasDirUT1,
+        this._atlasDirVT1,
+      )
+    } else {
+      this._atlasDirtyT1.clear()
+    }
+
+    if (!layoutChanged && blits > 0) {
+      this._debug.atlasFlushes += 1
+    }
+    if (blits > 0) {
+      this._debug.atlasBlits += blits
+    }
+    this._updateDebugPendingDirtyTiles()
+
+    if (!this._atlasLayout) return null
+    this._atlasLayout.hasAnyTile = this._hasVisibleWaveTile()
+    return this._atlasLayout
+  }
+
+  private _flushDirtyWaveAtlas(
+    gl: WebGL2RenderingContext,
+    dirtyKeys: Set<string>,
+    heightManager: TileManager | null,
+    periodManager: TileManager | null,
+    dirUManager: TileManager | null,
+    dirVManager: TileManager | null,
+    atlasHeight: WebGLTexture | null,
+    atlasPeriod: WebGLTexture | null,
+    atlasDirU: WebGLTexture | null,
+    atlasDirV: WebGLTexture | null,
+  ): number {
+    if (dirtyKeys.size === 0) return 0
+
+    let blits = 0
+    for (const key of dirtyKeys) {
+      const slots = this._atlasSlotsByKey.get(key)
+      if (!slots || slots.length === 0) continue
+
+      const { z, x, y } = parseTileKey(key)
+      const heightTex = heightManager?.getTexture(z, x, y) ?? null
+      const periodTex = periodManager?.getTexture(z, x, y) ?? null
+      const dirUTex = dirUManager?.getTexture(z, x, y) ?? null
+      const dirVTex = dirVManager?.getTexture(z, x, y) ?? null
+
+      for (const slot of slots) {
+        if (heightTex && atlasHeight) {
+          this._copyTileToAtlas(gl, heightTex, atlasHeight, slot.col, slot.row)
+          blits += 1
+        }
+        if (periodTex && atlasPeriod) {
+          this._copyTileToAtlas(gl, periodTex, atlasPeriod, slot.col, slot.row)
+          blits += 1
+        }
+        if (dirUTex && atlasDirU) {
+          this._copyTileToAtlas(gl, dirUTex, atlasDirU, slot.col, slot.row)
+          blits += 1
+        }
+        if (dirVTex && atlasDirV) {
+          this._copyTileToAtlas(gl, dirVTex, atlasDirV, slot.col, slot.row)
+          blits += 1
+        }
       }
     }
 
+    dirtyKeys.clear()
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
+    return blits
+  }
 
-    return { cols, rows, originX: minRX, originY: minY, zoom, hasAnyTile }
+  private _hasVisibleWaveTile(): boolean {
+    for (const key of this._atlasVisibleKeys) {
+      const { z, x, y } = parseTileKey(key)
+      if (
+        this._waveHeightManager?.getTexture(z, x, y) &&
+        this._wavePeriodManager?.getTexture(z, x, y) &&
+        this._waveDirUManager?.getTexture(z, x, y) &&
+        this._waveDirVManager?.getTexture(z, x, y)
+      ) {
+        return true
+      }
+    }
+    return false
   }
 
   private _ensureAtlas(gl: WebGL2RenderingContext, cols: number, rows: number): void {
@@ -913,6 +1096,10 @@ export class WaveParticleLayer implements CustomLayerInterface {
   }
 
   private _cleanup(): void {
+    this._active = false
+    this._debug.active = false
+    this._invalidateAtlas()
+
     this._waveHeightManager?.destroy()
     this._waveHeightManager = null
     this._wavePeriodManager?.destroy()
@@ -1016,4 +1203,13 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._gl = null
     this._map = null
   }
+}
+
+function tileKey(z: number, x: number, y: number): string {
+  return `${z}/${x}/${y}`
+}
+
+function parseTileKey(key: string): { z: number; x: number; y: number } {
+  const [z, x, y] = key.split('/').map(Number)
+  return { z, x, y }
 }

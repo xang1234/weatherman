@@ -158,10 +158,13 @@ class TileService:
     def _data_tile_path(
         self, model: str, run_id: RunID, layer: str,
         forecast_hour: int, z: int, x: int, y: int,
+        *, tile_format: str = "png",
     ) -> str:
         """Build the storage key for a pre-generated data tile."""
         layout = StorageLayout(model)
-        return layout.data_tile_path(run_id, layer, forecast_hour, z, x, y)
+        return layout.data_tile_path(
+            run_id, layer, forecast_hour, z, x, y, tile_format=tile_format,
+        )
 
     async def fetch_data_tile(
         self,
@@ -276,6 +279,9 @@ class TileService:
         y: int,
         *,
         is_latest: bool = False,
+        model: str = "",
+        run_id: RunID | None = None,
+        forecast_hour: int = 0,
     ) -> Response:
         """Fetch raw float data and return as Float16 binary.
 
@@ -292,6 +298,30 @@ class TileService:
                 status_code=400,
                 detail=f"Unknown layer '{layer}'. Available: {list(COLORMAPS.keys())}",
             )
+
+        if (
+            self._store is not None
+            and run_id is not None
+            and z <= MAX_DATA_TILE_ZOOM
+        ):
+            try:
+                tile_key = self._data_tile_path(
+                    model, run_id, layer, forecast_hour, z, x, y,
+                    tile_format="f16",
+                )
+                f16_bytes = self._store.read_bytes(tile_key)
+                cache = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
+                return Response(
+                    content=f16_bytes,
+                    media_type="application/octet-stream",
+                    headers={
+                        "Cache-Control": cache,
+                        "X-Tile-Format": "float16",
+                        "X-Tile-Size": "256,256",
+                    },
+                )
+            except (FileNotFoundError, OSError):
+                pass
 
         # Request raw float32 data from TiTiler
         params: dict[str, str] = {
@@ -530,6 +560,9 @@ async def get_data_tile_f16(
     return await svc.fetch_data_tile_f16(
         cog_uri, layer, z, x, y,
         is_latest=is_latest,
+        model=model,
+        run_id=resolved_run_id,
+        forecast_hour=forecast_hour,
     )
 
 

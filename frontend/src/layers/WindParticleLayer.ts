@@ -50,6 +50,7 @@ import {
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
+import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
 const DEFAULT_STATE_SIZE = 50
@@ -96,6 +97,20 @@ export interface WindParticleLayerOptions {
   stateSize?: number
 }
 
+interface AtlasLayout {
+  cols: number
+  rows: number
+  originX: number
+  originY: number
+  zoom: number
+  hasAnyTile: boolean
+}
+
+interface AtlasSlot {
+  col: number
+  row: number
+}
+
 export class WindParticleLayer implements CustomLayerInterface {
   readonly id: string
   readonly type = 'custom' as const
@@ -104,9 +119,11 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _map: MaplibreMap | null = null
   private _gl: WebGL2RenderingContext | null = null
   private _opacity: number
+  private _active = false
   private _apiBase: string
   private _tileFormat: TileFormat
   private _maxTextureSize = 4096
+  private _debug: ParticleDebugState
 
   // ── Adaptive particle count ───────────────────────────────────────
   private _stateSize: number
@@ -190,6 +207,12 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _atlasHeight = 0
   private _copyFbo: WebGLFramebuffer | null = null
   private _atlasFbo: WebGLFramebuffer | null = null
+  private _atlasLayout: AtlasLayout | null = null
+  private _atlasLayoutKey = ''
+  private _atlasSlotsByKey = new Map<string, AtlasSlot[]>()
+  private _atlasVisibleKeys: string[] = []
+  private _atlasDirtyT0 = new Set<string>()
+  private _atlasDirtyT1 = new Set<string>()
 
   // ── Pan prefetch ───────────────────────────────────────────────────
   private _panTracker = new PanVelocityTracker()
@@ -205,6 +228,8 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._opacity = options.opacity ?? 1.0
     this._apiBase = options.apiBase ?? ''
     this._tileFormat = options.tileFormat ?? 'png'
+    this._debug = ensureParticleDebugState('wind')
+    this._debug.active = this._active
     this._stateSizeOverride = options.stateSize
     // Temporary defaults — overwritten by GPU detection in onAdd()
     this._stateSize = DEFAULT_STATE_SIZE
@@ -221,6 +246,8 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     this._map = map
     this._gl = gl
+    this._debug.mounts += 1
+    this._debug.active = this._active
 
     const ext = gl.getExtension('EXT_color_buffer_float')
     if (!ext) {
@@ -263,6 +290,10 @@ export class WindParticleLayer implements CustomLayerInterface {
       !this._stateTextures || !this._stateFbos ||
       !this._map || !(gl instanceof WebGL2RenderingContext)
     ) {
+      return
+    }
+
+    if (!this._active || this._opacity <= 0 || !this._windConfigured) {
       return
     }
 
@@ -341,9 +372,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
 
     // ── Pack visible tiles into atlas textures ──
-    const atlas = this._windConfigured
-      ? this._packAtlas(gl, visibleCoords)
-      : null
+    const atlas = this._packAtlas(gl, visibleCoords)
     const hasWindData = atlas?.hasAnyTile ?? false
 
     // ── Resize trail textures if canvas size changed ──
@@ -557,17 +586,24 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._windUManager?.setLayer(model, runId, 'wind_u', forecastHour)
     this._windVManager?.setLayer(model, runId, 'wind_v', forecastHour)
     this._windConfigured = true
+    this._invalidateAtlas()
     this._map?.triggerRepaint()
   }
 
   /** Set temporal interpolation for the particle wind field. */
   setTemporalBlend(forecastHourT1: number, mix: number): void {
+    const shouldInvalidateAtlas =
+      forecastHourT1 !== this._forecastHourT1 ||
+      (forecastHourT1 >= 0) !== (this._forecastHourT1 >= 0)
     this._forecastHourT1 = forecastHourT1
     this._temporalMix = Math.max(0, Math.min(1, mix))
 
     if (forecastHourT1 >= 0 && this._model && this._runId) {
       this._windUT1Manager?.setLayer(this._model, this._runId, 'wind_u', forecastHourT1)
       this._windVT1Manager?.setLayer(this._model, this._runId, 'wind_v', forecastHourT1)
+    }
+    if (shouldInvalidateAtlas) {
+      this._invalidateAtlas()
     }
     this._map?.triggerRepaint()
   }
@@ -596,6 +632,7 @@ export class WindParticleLayer implements CustomLayerInterface {
       }
     }
     this._temporalMix = 0
+    this._invalidateAtlas()
     this._map?.triggerRepaint()
   }
 
@@ -633,6 +670,15 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._map?.triggerRepaint()
   }
 
+  setActive(active: boolean): void {
+    if (active === this._active) return
+    this._active = active
+    this._debug.active = active
+    if (active) {
+      this._map?.triggerRepaint()
+    }
+  }
+
   // ── Private ─────────────────────────────────────────────────────────
 
   /** Convert latitude to web mercator Y in [0,1]. */
@@ -644,17 +690,20 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   /** Create tile managers for wind data fetching. */
   private _initTileManagers(gl: WebGL2RenderingContext): void {
-    const triggerRepaint = () => this._map?.triggerRepaint()
+    const handleTileLoaded = (key: string) => {
+      this._markAtlasTileDirty(key)
+      this._map?.triggerRepaint()
+    }
     const fetchClient = getTileFetchClient()
     const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
     this._windUManager = new TileManager(gl, tmOpts)
-    this._windUManager.onTileLoaded = triggerRepaint
+    this._windUManager.onTileLoaded = handleTileLoaded
     this._windVManager = new TileManager(gl, tmOpts)
-    this._windVManager.onTileLoaded = triggerRepaint
+    this._windVManager.onTileLoaded = handleTileLoaded
     this._windUT1Manager = new TileManager(gl, tmOpts)
-    this._windUT1Manager.onTileLoaded = triggerRepaint
+    this._windUT1Manager.onTileLoaded = handleTileLoaded
     this._windVT1Manager = new TileManager(gl, tmOpts)
-    this._windVT1Manager.onTileLoaded = triggerRepaint
+    this._windVT1Manager.onTileLoaded = handleTileLoaded
   }
 
   /** Create all GL resources: programs, textures, FBOs. */
@@ -821,23 +870,44 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // ── Tile Atlas ─────────────────────────────────────────────────────
 
-  /**
-   * Pack all visible tile textures into atlas textures for GPU sampling.
-   * Returns the atlas layout for setting shader uniforms.
-   */
-  private _packAtlas(
-    gl: WebGL2RenderingContext,
-    visibleCoords: TileCoord[],
-  ): { cols: number; rows: number; originX: number; originY: number; zoom: number; hasAnyTile: boolean } | null {
+  private _invalidateAtlas(): void {
+    this._atlasLayout = null
+    this._atlasLayoutKey = ''
+    this._atlasSlotsByKey.clear()
+    this._atlasVisibleKeys = []
+    this._atlasDirtyT0.clear()
+    this._atlasDirtyT1.clear()
+    this._updateDebugPendingDirtyTiles()
+  }
+
+  private _markAtlasTileDirty(key: string): void {
+    if (!this._atlasSlotsByKey.has(key)) return
+    this._atlasDirtyT0.add(key)
+    if (this._forecastHourT1 >= 0) {
+      this._atlasDirtyT1.add(key)
+    }
+    this._updateDebugPendingDirtyTiles()
+  }
+
+  private _updateDebugPendingDirtyTiles(): void {
+    this._debug.pendingDirtyTiles = this._atlasDirtyT0.size + this._atlasDirtyT1.size
+  }
+
+  private _computeAtlasLayout(visibleCoords: TileCoord[]): {
+    layout: Omit<AtlasLayout, 'hasAnyTile'>
+    layoutKey: string
+    slotsByKey: Map<string, AtlasSlot[]>
+    visibleKeys: string[]
+  } | null {
     if (visibleCoords.length === 0) return null
 
     const zoom = visibleCoords[0].z
     const n = 2 ** zoom
-    // Use wrap-aware rendering X for bounding box — this keeps the atlas
-    // compact even when the viewport crosses the antimeridian.
-    // e.g. tiles [x=254,wrap=0], [x=255,wrap=0], [x=0,wrap=1], [x=1,wrap=1]
-    // produce renderX [254, 255, 256, 257] → cols=4 (not 256).
-    let minRX = Infinity, maxRX = -Infinity, minY = Infinity, maxY = -Infinity
+    let minRX = Infinity
+    let maxRX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+
     for (const c of visibleCoords) {
       const rx = c.x + c.wrap * n
       if (rx < minRX) minRX = rx
@@ -849,52 +919,148 @@ export class WindParticleLayer implements CustomLayerInterface {
     const cols = maxRX - minRX + 1
     const rows = maxY - minY + 1
 
-    // Guard: extreme zoom can produce a bounding box that exceeds GPU MAX_TEXTURE_SIZE.
     if (cols * TILE_SIZE > this._maxTextureSize || rows * TILE_SIZE > this._maxTextureSize) {
       return null
     }
 
-    this._ensureAtlas(gl, cols, rows)
-
-    // Clear atlas textures to nodata before packing
-    this._clearAtlas(gl)
-
-    let hasAnyTile = false
-
-    // Pack T0 tiles using wrap-aware column index
+    const slotsByKey = new Map<string, AtlasSlot[]>()
+    const visibleKeys: string[] = []
     for (const c of visibleCoords) {
       const rx = c.x + c.wrap * n
-      const col = rx - minRX
-      const row = c.y - minY
-      const uTex = this._windUManager?.getTexture(c.z, c.x, c.y) ?? null
-      const vTex = this._windVManager?.getTexture(c.z, c.x, c.y) ?? null
-      if (uTex && this._atlasU) {
-        this._copyTileToAtlas(gl, uTex, this._atlasU, col, row)
-        hasAnyTile = true
-      }
-      if (vTex && this._atlasV) {
-        this._copyTileToAtlas(gl, vTex, this._atlasV, col, row)
+      const key = tileKey(c.z, c.x, c.y)
+      const slots = slotsByKey.get(key)
+      const slot = { col: rx - minRX, row: c.y - minY }
+      if (slots) {
+        slots.push(slot)
+      } else {
+        slotsByKey.set(key, [slot])
+        visibleKeys.push(key)
       }
     }
 
-    // Pack T1 tiles (if temporal blending active)
-    if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
-      for (const c of visibleCoords) {
-        const rx = c.x + c.wrap * n
-        const col = rx - minRX
-        const row = c.y - minY
-        const uT1 = this._windUT1Manager?.getTexture(c.z, c.x, c.y) ?? null
-        const vT1 = this._windVT1Manager?.getTexture(c.z, c.x, c.y) ?? null
-        if (uT1 && this._atlasUT1) this._copyTileToAtlas(gl, uT1, this._atlasUT1, col, row)
-        if (vT1 && this._atlasVT1) this._copyTileToAtlas(gl, vT1, this._atlasVT1, col, row)
+    return {
+      layout: { cols, rows, originX: minRX, originY: minY, zoom },
+      layoutKey: `${zoom}:${minRX}:${minY}:${cols}:${rows}`,
+      slotsByKey,
+      visibleKeys,
+    }
+  }
+
+  /**
+   * Pack all visible tile textures into atlas textures for GPU sampling.
+   * Returns the atlas layout for setting shader uniforms.
+   */
+  private _packAtlas(
+    gl: WebGL2RenderingContext,
+    visibleCoords: TileCoord[],
+  ): AtlasLayout | null {
+    const computed = this._computeAtlasLayout(visibleCoords)
+    if (!computed) {
+      this._invalidateAtlas()
+      return null
+    }
+
+    const layoutChanged = computed.layoutKey !== this._atlasLayoutKey || !this._atlasLayout
+    this._atlasSlotsByKey = computed.slotsByKey
+    this._atlasVisibleKeys = computed.visibleKeys
+
+    if (layoutChanged) {
+      this._ensureAtlas(gl, computed.layout.cols, computed.layout.rows)
+      this._clearAtlas(gl)
+      this._debug.atlasClears += 1
+      this._debug.atlasFlushes += 1
+      this._atlasLayout = {
+        ...computed.layout,
+        hasAnyTile: false,
+      }
+      this._atlasLayoutKey = computed.layoutKey
+      this._atlasDirtyT0 = new Set(computed.visibleKeys)
+      this._atlasDirtyT1 = this._forecastHourT1 >= 0
+        ? new Set(computed.visibleKeys)
+        : new Set()
+    } else if (this._forecastHourT1 < 0) {
+      this._atlasDirtyT1.clear()
+    }
+
+    let blits = 0
+    blits += this._flushDirtyWindAtlas(
+      gl,
+      this._atlasDirtyT0,
+      this._windUManager,
+      this._windVManager,
+      this._atlasU,
+      this._atlasV,
+    )
+    if (this._forecastHourT1 >= 0) {
+      blits += this._flushDirtyWindAtlas(
+        gl,
+        this._atlasDirtyT1,
+        this._windUT1Manager,
+        this._windVT1Manager,
+        this._atlasUT1,
+        this._atlasVT1,
+      )
+    } else {
+      this._atlasDirtyT1.clear()
+    }
+    if (!layoutChanged && blits > 0) {
+      this._debug.atlasFlushes += 1
+    }
+    if (blits > 0) {
+      this._debug.atlasBlits += blits
+    }
+    this._updateDebugPendingDirtyTiles()
+
+    if (!this._atlasLayout) return null
+    this._atlasLayout.hasAnyTile = this._hasVisibleWindTile()
+    return this._atlasLayout
+  }
+
+  private _flushDirtyWindAtlas(
+    gl: WebGL2RenderingContext,
+    dirtyKeys: Set<string>,
+    uManager: TileManager | null,
+    vManager: TileManager | null,
+    atlasU: WebGLTexture | null,
+    atlasV: WebGLTexture | null,
+  ): number {
+    if (dirtyKeys.size === 0) return 0
+
+    let blits = 0
+    for (const key of dirtyKeys) {
+      const slots = this._atlasSlotsByKey.get(key)
+      if (!slots || slots.length === 0) continue
+
+      const { z, x, y } = parseTileKey(key)
+      const uTex = uManager?.getTexture(z, x, y) ?? null
+      const vTex = vManager?.getTexture(z, x, y) ?? null
+
+      for (const slot of slots) {
+        if (uTex && atlasU) {
+          this._copyTileToAtlas(gl, uTex, atlasU, slot.col, slot.row)
+          blits += 1
+        }
+        if (vTex && atlasV) {
+          this._copyTileToAtlas(gl, vTex, atlasV, slot.col, slot.row)
+          blits += 1
+        }
       }
     }
 
-    // Clean up framebuffer bindings
+    dirtyKeys.clear()
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
+    return blits
+  }
 
-    return { cols, rows, originX: minRX, originY: minY, zoom, hasAnyTile }
+  private _hasVisibleWindTile(): boolean {
+    for (const key of this._atlasVisibleKeys) {
+      const { z, x, y } = parseTileKey(key)
+      if (this._windUManager?.getTexture(z, x, y)) {
+        return true
+      }
+    }
+    return false
   }
 
   /** Ensure atlas textures are allocated at the required dimensions. */
@@ -991,6 +1157,10 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   /** Free all GL resources. */
   private _cleanup(): void {
+    this._active = false
+    this._debug.active = false
+    this._invalidateAtlas()
+
     // Destroy tile managers
     this._windUManager?.destroy()
     this._windUManager = null
@@ -1091,4 +1261,13 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._gl = null
     this._map = null
   }
+}
+
+function tileKey(z: number, x: number, y: number): string {
+  return `${z}/${x}/${y}`
+}
+
+function parseTileKey(key: string): { z: number; x: number; y: number } {
+  const [z, x, y] = key.split('/').map(Number)
+  return { z, x, y }
 }
