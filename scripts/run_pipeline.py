@@ -46,6 +46,7 @@ from weatherman.processing.cog import (
 )
 from weatherman.processing.zarr_writer import grib2_dir_to_zarr
 from weatherman.processing.data_tiles import (
+    MAX_DATA_TILE_ZOOM,
     data_tile_resampling_for_layer,
     generate_all_data_tiles,
 )
