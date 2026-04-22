@@ -113,7 +113,7 @@ export class TileManager {
   private _unsubLoaded: (() => void) | null = null
   private _unsubError: (() => void) | null = null
 
-  /** Callback invoked when a tile finishes loading (for triggering repaint). */
+  /** Callback invoked when a tile for the current dataset finishes loading. */
   onTileLoaded: ((key: string) => void) | null = null
 
   /** Whether this manager fetches Float16 binary tiles. */
@@ -319,6 +319,13 @@ export class TileManager {
     return state
   }
 
+  private _notifyTileLoaded(state: DatasetState, key: string): void {
+    const currentDatasetKey = this._currentDatasetKey()
+    if (!currentDatasetKey) return
+    if (this._datasetKey(state.config) !== currentDatasetKey) return
+    this.onTileLoaded?.(key)
+  }
+
   private _buildUrl(config: DatasetConfig, z: number, x: number, y: number): string {
     const ext = this._format === 'f16' ? 'bin' : 'png'
     return `${this._apiBase}/tiles/${config.model}/${config.runId}/${config.layer}/${config.forecastHour}/data/${z}/${x}/${y}.${ext}`
@@ -486,7 +493,7 @@ export class TileManager {
       state: 'loaded',
       lastAccess: ++this._accessCounter,
     })
-    this.onTileLoaded?.(key)
+    this._notifyTileLoaded(state, key)
   }
 
   /** Fetch a Float16 binary tile and upload as R16F texture. */
@@ -553,7 +560,7 @@ export class TileManager {
           state: 'loaded',
           lastAccess: ++this._accessCounter,
         })
-        this.onTileLoaded?.(key)
+        this._notifyTileLoaded(state, key)
       })
       .catch(err => {
         if (err.name === 'AbortError') return
@@ -622,7 +629,7 @@ export class TileManager {
         state: 'loaded',
         lastAccess: ++this._accessCounter,
       })
-      this.onTileLoaded?.(key)
+      this._notifyTileLoaded(state, key)
     }
 
     img.onerror = () => {

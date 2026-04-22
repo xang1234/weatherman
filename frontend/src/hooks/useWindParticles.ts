@@ -99,12 +99,15 @@ export function useWindParticles({
   // Return imperative handle for playback integration
   const handle: WindParticleHandle = {
     setTemporalBlend(forecastHourT1: number, mix: number) {
+      if (!isActive) return
       layerRef.current?.setTemporalBlend(forecastHourT1, mix)
     },
     advanceForecastHour(newHour: number) {
+      if (!isActive) return
       layerRef.current?.advanceForecastHour(newHour)
     },
     isT1Ready() {
+      if (!isActive) return true
       return layerRef.current?.isT1Ready() ?? true
     },
   }
