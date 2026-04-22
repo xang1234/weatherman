@@ -61,7 +61,7 @@ const TRAIL_FADE = 0.93
  * speedScale = TARGET_DISP_PX / (REF_WIND * dt * worldSize)
  * This produces zoom-independent apparent speed.
  */
-const TARGET_DISP_PX = 1.5
+const TARGET_DISP_PX = 0.5
 /** Reference wind speed (m/s) for the target displacement calculation. */
 const REF_WIND_MPS = 10.0
 
@@ -69,7 +69,7 @@ const REF_WIND_MPS = 10.0
 const SPEED_MAX = 50.0
 
 /** Fixed point size in CSS pixels — zoom-independent. */
-const POINT_SIZE = 5.0
+const POINT_SIZE = 1.7
 
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
@@ -263,10 +263,12 @@ export class WindParticleLayer implements CustomLayerInterface {
     } else {
       const tier = detectGpuTier(gl)
       this._gpuTier = tier.tier
-      this._stateSize = tier.stateSize
+      // Wind-specific: ~30% of tier baseline (sqrt(0.3) ≈ 0.548 on stateSize axis)
+      // for a calmer, less dense field. Waves use the unscaled tier value.
+      this._stateSize = clampStateSize(Math.round(tier.stateSize * 0.548))
       console.info(
         `[WindParticleLayer] GPU: "${tier.renderer}" → tier=${tier.tier}, ` +
-        `stateSize=${tier.stateSize} (${tier.stateSize ** 2} particles)`
+        `stateSize=${this._stateSize} (${this._stateSize ** 2} particles)`
       )
     }
     this._particleCount = this._stateSize * this._stateSize
