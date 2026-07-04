@@ -25,31 +25,30 @@ void main() {
     float s = sin(-v_direction);
     vec2 rotated = vec2(c * p.x - s * p.y, s * p.x + c * p.y);
 
-    // Two dashes along the crest axis, each half the original width,
-    // separated by a gap for a broken wavefront look.
-    float dashHalfW = 0.10;   // each segment ~half the original 0.42
-    float dashHalfH = 0.07;   // propagation axis — thin dash
-    float radius = 0.03;      // rounded corners
-    float offset = 0.15;      // center-to-center half-separation
+    // Single elongated dash along the crest axis — a thin crest line,
+    // like Windy's wave streaks.
+    float dashHalfW = 0.34;   // long axis, along the crest
+    float dashHalfH = 0.045;  // propagation axis — thin
+    float radius = 0.045;     // rounded ends
 
-    float d1 = sdRoundedRect(rotated - vec2( offset, 0.0), vec2(dashHalfW, dashHalfH), radius);
-    float d2 = sdRoundedRect(rotated - vec2(-offset, 0.0), vec2(dashHalfW, dashHalfH), radius);
-    float d = min(d1, d2); // SDF union
+    float d = sdRoundedRect(rotated, vec2(dashHalfW, dashHalfH), radius);
 
     // Anti-aliased edge (1px feather in normalized point coords)
     float aa = fwidth(d);
     float shape = 1.0 - smoothstep(-aa, aa, d);
 
-    // Soft glow halo around the dashes for a shiny/luminous look
-    float glow = exp(-max(d, 0.0) * 14.0) * 0.4;
+    // Faint sheen around the dash — subtle, not bloom
+    float glow = exp(-max(d, 0.0) * 10.0) * 0.22;
 
     // Zero-speed slots are invalid/calm and should disappear entirely.
     float speedNorm = clamp(v_speed, 0.0, 1.0);
-    float speedAlpha = smoothstep(0.0, 0.01, speedNorm) * mix(0.6, 1.0, speedNorm);
+    float speedAlpha = smoothstep(0.0, 0.01, speedNorm) * mix(0.55, 1.0, speedNorm);
 
-    // Lifecycle fade: brief flash, not a long-lived tracer
-    float fadeIn = smoothstep(0.0, 0.08, v_age);
-    float fadeOut = 1.0 - smoothstep(0.30, 0.50, v_age);
+    // Slow shimmer: ease in, drift visible for most of the phase, ease out
+    // fully before the phase wraps (position snaps back at wrap — alpha must
+    // reach zero first or the jump shows).
+    float fadeIn = smoothstep(0.0, 0.15, v_age);
+    float fadeOut = 1.0 - smoothstep(0.65, 0.95, v_age);
     float lifecycle = fadeIn * fadeOut;
 
     // Combine crisp shape + soft glow for a bright, shiny appearance

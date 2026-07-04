@@ -11,13 +11,17 @@ void main() {
     float dist = length(ctr) * 2.0; // 0 at center, 1 at edge
     float circle = 1.0 - smoothstep(0.6, 1.0, dist);
 
-    // Speed-dependent brightness: faster wind = brighter
-    float speedAlpha = mix(0.5, 1.0, clamp(v_speed, 0.0, 1.0));
+    // Speed-dependent brightness: calm zones recede, strong wind glows.
+    // pow < 1 lifts mid-range speeds so typical winds stay clearly visible.
+    float speedAlpha = mix(0.3, 1.0, pow(clamp(v_speed, 0.0, 1.0), 0.7));
 
-    // Fade out as particle ages (age 0→1 over lifespan)
-    float ageFade = 1.0 - v_age;
+    // Hold full brightness through life; only ease in at spawn (hides the
+    // respawn pop) and ease out near death. The trail buffer carries motion —
+    // a linear age fade just makes the whole field look dim and grainy.
+    float fadeIn = smoothstep(0.0, 0.05, v_age);
+    float fadeOut = 1.0 - smoothstep(0.85, 1.0, v_age);
 
-    float alpha = circle * speedAlpha * ageFade;
+    float alpha = circle * speedAlpha * fadeIn * fadeOut;
 
     // White particle with premultiplied alpha
     fragColor = vec4(alpha, alpha, alpha, alpha);

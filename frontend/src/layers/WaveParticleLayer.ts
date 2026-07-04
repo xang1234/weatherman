@@ -40,10 +40,12 @@ import { ensureParticleDebugState, type ParticleDebugState } from './particleDeb
 
 const DEFAULT_STATE_SIZE = 50
 const TRAIL_FADE = 0.55
-const GRID_SPACING_PX = 14.0
+// Sparse grid + long thin dashes: crest lines get breathing room instead of
+// a dense twinkling field. Dash length ≈ POINT_SIZE * 1.3 * 0.68 ≈ 18px.
+const GRID_SPACING_PX = 24.0
 const PHASE_AMPLITUDE_PX = 22.0
 const SPEED_MAX = 15.0
-const POINT_SIZE = 14.0
+const POINT_SIZE = 20.0
 const PERF_WINDOW = 60
 const PERF_WARN_THRESHOLD_MS = 20
 const TILE_SIZE = 256

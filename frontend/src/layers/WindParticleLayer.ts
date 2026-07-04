@@ -54,8 +54,8 @@ import { ensureParticleDebugState, type ParticleDebugState } from './particleDeb
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
 const DEFAULT_STATE_SIZE = 50
-/** Trail fade factor per frame. 0.93^60 ≈ 0.013 → ~1.5s trails for broken drop effect. */
-const TRAIL_FADE = 0.93
+/** Trail fade factor per frame. 0.96^113 ≈ 0.01 → ~2s silky comet trails (Windy-style). */
+const TRAIL_FADE = 0.96
 /**
  * Target particle displacement in screen pixels per frame for a reference 10 m/s wind.
  * speedScale = TARGET_DISP_PX / (REF_WIND * dt * worldSize)
@@ -190,6 +190,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   // Composite uniforms
   private _uCompositeTexture: WebGLUniformLocation | null = null
   private _uCompositeOpacity: WebGLUniformLocation | null = null
+  private _uCompositeEpsilon: WebGLUniformLocation | null = null
 
   // Trail ping-pong (canvas-sized RGBA8)
   private _trailTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
@@ -499,6 +500,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.useProgram(this._compositeProgram.program)
     gl.uniform1i(this._uCompositeTexture, 0)
     gl.uniform1f(this._uCompositeOpacity, TRAIL_FADE)
+    gl.uniform1f(this._uCompositeEpsilon, 1 / 255) // defeat RGBA8 decay stall
 
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
@@ -548,6 +550,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.useProgram(this._compositeProgram.program)
     gl.uniform1i(this._uCompositeTexture, 0)
     gl.uniform1f(this._uCompositeOpacity, this._opacity)
+    gl.uniform1f(this._uCompositeEpsilon, 0)
 
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
@@ -753,6 +756,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const cp = this._compositeProgram.program
     this._uCompositeTexture = gl.getUniformLocation(cp, 'u_texture')
     this._uCompositeOpacity = gl.getUniformLocation(cp, 'u_opacity')
+    this._uCompositeEpsilon = gl.getUniformLocation(cp, 'u_fadeEpsilon')
 
     // ── State textures (RGBA32F, stateSize × stateSize) ──
     this._stateTextures = [null, null]

@@ -145,8 +145,8 @@ void main() {
     float age = state.b;
 
     // Advance age
-    // Particles live ~4 seconds: age increments by dt/4.0 per frame
-    float maxLife = 4.0;
+    // Particles live ~6 seconds: long enough to trace a graceful streamline
+    float maxLife = 6.0;
     age += u_dt / maxLife;
 
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
