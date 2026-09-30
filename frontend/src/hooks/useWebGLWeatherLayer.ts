@@ -21,7 +21,7 @@ import type { UseWeatherLayerOptions } from './useWeatherLayer'
  * to raster basemap layers, then symbol layers, so weather renders below the
  * basemap even when PMTiles is unavailable.
  */
-export function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
+function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
   const layers = map.getStyle()?.layers
   if (!layers) return undefined
   let firstRaster: string | undefined
@@ -32,6 +32,16 @@ export function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
     if (l.type === 'symbol' && !firstSymbol) firstSymbol = l.id
   }
   return firstRaster ?? firstSymbol
+}
+
+/**
+ * Insertion point for the particle layers. With the vector basemap they go
+ * below the first fill, i.e. directly above the weather layer and under the
+ * land mask, lines and labels. The raster fallback has no fills and stays
+ * opaque for ocean-only layers, so there particles are appended on top.
+ */
+export function particleInsertBeforeId(map: maplibregl.Map): string | undefined {
+  return map.getStyle()?.layers?.find((l) => l.type === 'fill')?.id
 }
 
 export function useWebGLWeatherLayer({

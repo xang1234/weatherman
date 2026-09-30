@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
-import { useWebGLWeatherLayer } from './useWebGLWeatherLayer'
+import { particleInsertBeforeId, useWebGLWeatherLayer } from './useWebGLWeatherLayer'
 
 /** Feature flag: use WebGL data-tile pipeline instead of raster TileJSON. */
 const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER !== 'false'
@@ -341,8 +341,11 @@ function useRasterWeatherLayer({
     })
 
     // Insert weather below basemap fills (Windy.com layering) — invisible (back buffer)
-    // Particle layers sit at the same insertion point; stay below them.
-    const beforeLayer = m.getLayer('wind-particles') ? 'wind-particles' : weatherInsertBeforeId(m)
+    // With the vector basemap the particle layers sit at the same insertion
+    // point; stay below them.
+    const beforeLayer = particleInsertBeforeId(m) && m.getLayer('wind-particles')
+      ? 'wind-particles'
+      : weatherInsertBeforeId(m)
     m.addLayer(
       {
         id: newLyrId,
