@@ -14,12 +14,15 @@ Web Mercator math reference: OGC TMS / Slippy Map convention.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import numpy as np
 import rasterio
+from affine import Affine
 from rasterio.enums import Resampling
+from rasterio.io import DatasetReader, MemoryFile
+from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
-from rasterio.windows import from_bounds
 
 from weatherman.tiling.data_encoder import (
     encode_float_to_f16,
@@ -33,6 +36,11 @@ MAX_DATA_TILE_ZOOM = 5
 _WORLD_EXTENT = 20037508.342789244
 
 _NEAREST_DATA_TILE_LAYERS = frozenset({"wave_direction"})
+
+# Source columns copied across the antimeridian onto each side of a global
+# grid, so resampling at ±180° interpolates across it instead of stopping at
+# the raster's edge (which shows as a seam along the date line).
+_WRAP_COLUMNS = 4
 
 
 def _encode_data_tile(
@@ -77,6 +85,75 @@ def data_tile_resampling_for_layer(layer: str) -> Resampling:
     return Resampling.bilinear
 
 
+@contextmanager
+def _open_for_tiling(cog_path: str) -> Iterator[DatasetReader]:
+    """Open a COG as the source for tile warping.
+
+    A lat/lon grid that spans the full 360° is returned with
+    ``_WRAP_COLUMNS`` extra columns on each side, copied from the opposite
+    edge. Anything else is returned as is.
+    """
+    with rasterio.open(cog_path) as src:
+        spans_globe = (
+            src.crs is not None
+            and src.crs.is_geographic
+            and abs(src.width * src.res[0] - 360.0) < 1e-6
+        )
+        if not spans_globe:
+            yield src
+            return
+
+        data = src.read(1)
+        wrapped = np.concatenate(
+            [data[:, -_WRAP_COLUMNS:], data, data[:, :_WRAP_COLUMNS]], axis=1,
+        )
+        profile = {
+            "driver": "GTiff",
+            "height": src.height,
+            "width": wrapped.shape[1],
+            "count": 1,
+            "dtype": wrapped.dtype,
+            "crs": src.crs,
+            "transform": src.transform * Affine.translation(-_WRAP_COLUMNS, 0),
+            "nodata": src.nodata,
+        }
+
+    with MemoryFile() as memfile:
+        with memfile.open(**profile) as dst:
+            dst.write(wrapped, 1)
+        with memfile.open() as padded:
+            yield padded
+
+
+def _warp_tile(
+    src: DatasetReader,
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int,
+    resampling: Resampling,
+) -> tuple[np.ndarray, float | None]:
+    """Warp the source straight onto one tile's pixel grid.
+
+    The grid is given explicitly. Left to itself, WarpedVRT picks one grid for
+    the whole dataset, and for a pole-to-pole source (unbounded in Web
+    Mercator) that grid is a few hundred km per pixel and stops short of the
+    antimeridian — tiles read out of it are blurred and wrong at the edge.
+
+    Returns (values, nodata).
+    """
+    transform = from_bounds(*tile_bounds_3857(z, x, y), tile_size, tile_size)
+    with WarpedVRT(
+        src,
+        crs="EPSG:3857",
+        transform=transform,
+        width=tile_size,
+        height=tile_size,
+        resampling=resampling,
+    ) as vrt:
+        return vrt.read(1).astype(np.float32), vrt.nodata
+
+
 def generate_data_tile(
     cog_path: str,
     z: int,
@@ -90,24 +167,12 @@ def generate_data_tile(
 ) -> bytes:
     """Generate a single pre-generated data tile from a COG.
 
-    Opens the COG, warps to EPSG:3857 via WarpedVRT (GDAL auto-selects
-    COG overviews for efficiency), reads the tile window, and encodes
-    to the requested output format.
+    Warps the COG onto the tile's EPSG:3857 pixel grid and encodes the
+    result in the requested output format.
     """
-    with rasterio.open(cog_path) as src:
-        with WarpedVRT(src, crs="EPSG:3857", resampling=resampling) as vrt:
-            bounds = tile_bounds_3857(z, x, y)
-            window = from_bounds(*bounds, transform=vrt.transform)
-            data = vrt.read(
-                1,
-                window=window,
-                out_shape=(tile_size, tile_size),
-                resampling=resampling,
-            ).astype(np.float32)
-
-            return _encode_data_tile(
-                data, value_min, value_max, vrt.nodata, tile_format,
-            )
+    with _open_for_tiling(cog_path) as src:
+        data, nodata = _warp_tile(src, z, x, y, tile_size, resampling)
+        return _encode_data_tile(data, value_min, value_max, nodata, tile_format)
 
 
 def generate_all_data_tiles(
@@ -121,31 +186,20 @@ def generate_all_data_tiles(
 ) -> Iterator[tuple[int, int, int, bytes]]:
     """Generate pre-generated data tiles for z0 through max_zoom from a COG.
 
-    Opens the COG once via WarpedVRT and yields (z, x, y, tile_bytes)
-    for every tile in the zoom range. GDAL handles overview selection
-    automatically based on the requested resolution.
+    Opens the COG once and yields (z, x, y, tile_bytes) for every tile in
+    the zoom range.
     """
-    with rasterio.open(cog_path) as src:
-        with WarpedVRT(src, crs="EPSG:3857", resampling=resampling) as vrt:
-            nodata = vrt.nodata
-            for z in range(max_zoom + 1):
-                n_tiles = 2**z
-                for x in range(n_tiles):
-                    for y in range(n_tiles):
-                        bounds = tile_bounds_3857(z, x, y)
-                        window = from_bounds(*bounds, transform=vrt.transform)
-                        data = vrt.read(
-                            1,
-                            window=window,
-                            out_shape=(tile_size, tile_size),
-                            resampling=resampling,
-                        ).astype(np.float32)
-
-                        yield (
-                            z,
-                            x,
-                            y,
-                            _encode_data_tile(
-                                data, value_min, value_max, nodata, tile_format,
-                            ),
-                        )
+    with _open_for_tiling(cog_path) as src:
+        for z in range(max_zoom + 1):
+            n_tiles = 2**z
+            for x in range(n_tiles):
+                for y in range(n_tiles):
+                    data, nodata = _warp_tile(src, z, x, y, tile_size, resampling)
+                    yield (
+                        z,
+                        x,
+                        y,
+                        _encode_data_tile(
+                            data, value_min, value_max, nodata, tile_format,
+                        ),
+                    )

@@ -83,10 +83,35 @@ COG_PROFILE = {
 # Expected CRS for output COGs
 TARGET_CRS = "EPSG:4326"
 
-# GFS 0.25° global grid extents
+# Nominal extent of the GFS 0.25° global grid (the grid points themselves;
+# as a raster the cells extend half a cell further, see _grid_transform)
 GFS_GLOBAL_BOUNDS = (-180.0, -90.0, 180.0, 90.0)
 GFS_025_WIDTH = 1440
 GFS_025_HEIGHT = 721
+
+
+def _grid_transform(
+    src: rasterio.io.DatasetReader, width: int, height: int,
+) -> rasterio.transform.Affine:
+    """Affine transform to write the output COG with.
+
+    GDAL georeferences a GRIB correctly: grid points are cell centres, so the
+    global 0.25° grid spans -180.125…179.875 by -90.125…90.125. That
+    transform is kept whenever the source has a geographic CRS (a GRIB's is a
+    sphere, not EPSG:4326 — it must not be replaced on that account, or every
+    value lands half a cell east of where it belongs).
+
+    A source with no CRS is assumed to be a global lat/lon point grid whose
+    first column is at -180° and whose first and last rows are the poles.
+    """
+    if src.crs is not None and src.crs.is_geographic:
+        return src.transform
+    logger.info("Source CRS is %s, assuming a global lat/lon point grid", src.crs)
+    dx = 360.0 / width
+    dy = 180.0 / (height - 1)
+    return from_bounds(
+        -180.0 - dx / 2, -90.0 - dy / 2, 180.0 - dx / 2, 90.0 + dy / 2, width, height,
+    )
 
 
 def _read_band_as_float32(
@@ -168,21 +193,8 @@ def grib2_to_cog(
 
     with rasterio.open(grib2_path) as src:
         data = _read_band_as_float32(src)
-        src_crs = src.crs
-
-        # Determine output dimensions and transform
         height, width = data.shape
-
-        if src_crs and src_crs.to_epsg() == 4326:
-            transform = src.transform
-        else:
-            # GFS GRIB2 files may lack proper CRS metadata but are always
-            # on the 0.25° global lat/lon grid. Apply the known transform.
-            logger.info(
-                "Source CRS is %s, applying known GFS 0.25° EPSG:4326 transform",
-                src_crs,
-            )
-            transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        transform = _grid_transform(src, width, height)
 
     if ocean_only:
         from weatherman.processing.coastal_fill import coastal_fill, smooth_grid
@@ -268,16 +280,8 @@ def wind_speed_to_cog(
 
         height, width = u_data.shape
 
-        # Use CRS/transform from the U component (both should be identical)
-        src_crs = u_src.crs
-        if src_crs and src_crs.to_epsg() == 4326:
-            transform = u_src.transform
-        else:
-            logger.info(
-                "Source CRS is %s, applying known GFS 0.25° EPSG:4326 transform",
-                src_crs,
-            )
-            transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        # Use the transform from the U component (both should be identical)
+        transform = _grid_transform(u_src, width, height)
 
     wind_speed = np.sqrt(u_data**2 + v_data**2)
     has_nodata = np.isnan(wind_speed).any()
@@ -353,15 +357,7 @@ def wave_direction_to_uv_cogs(
         direction = _read_band_as_float32(src)
         height, width = direction.shape
 
-        src_crs = src.crs
-        if src_crs and src_crs.to_epsg() == 4326:
-            transform = src.transform
-        else:
-            logger.info(
-                "Source CRS is %s, applying known GFS 0.25° EPSG:4326 transform",
-                src_crs,
-            )
-            transform = from_bounds(*GFS_GLOBAL_BOUNDS, width, height)
+        transform = _grid_transform(src, width, height)
 
     theta = np.deg2rad(direction)
     u_data = np.full_like(direction, np.nan, dtype=np.float32)
