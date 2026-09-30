@@ -23,6 +23,7 @@ import {
   createProgram,
   deleteProgram,
   deleteQuadGeometry,
+  matrixChanged,
   type GLProgram,
   type QuadGeometry,
 } from './gl-utils'
@@ -36,10 +37,12 @@ import {
   type TileFormat,
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
+import { fadeForFrame } from './particle-motion'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
 const DEFAULT_STATE_SIZE = 50
+/** Trail fade factor per 1/60 s. */
 const TRAIL_FADE = 0.55
 // Sparse grid + long thin dashes: crest lines get breathing room instead of
 // a dense twinkling field. Dash length ≈ POINT_SIZE * 1.3 * 0.68 ≈ 18px.
@@ -162,6 +165,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _trailReadIndex = 0
   private _trailWidth = 0
   private _trailHeight = 0
+  // View matrix of the previous frame — trails are dropped when the view moves
+  private _lastMvp = new Float64Array(16)
 
   private _atlasWaveH: WebGLTexture | null = null
   private _atlasPeriod: WebGLTexture | null = null
@@ -424,14 +429,17 @@ export class WaveParticleLayer implements CustomLayerInterface {
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
-    gl.useProgram(this._compositeProgram.program)
-    gl.uniform1i(this._uCompositeTexture, 0)
-    gl.uniform1f(this._uCompositeOpacity, TRAIL_FADE)
-    gl.bindVertexArray(this._quad.vao)
-    gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
-    gl.bindVertexArray(null)
+    // Screen-space trail: keep it only while the view has not moved.
+    if (!matrixChanged(this._lastMvp, options.modelViewProjectionMatrix)) {
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
+      gl.useProgram(this._compositeProgram.program)
+      gl.uniform1i(this._uCompositeTexture, 0)
+      gl.uniform1f(this._uCompositeOpacity, fadeForFrame(TRAIL_FADE, dt))
+      gl.bindVertexArray(this._quad.vao)
+      gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
+      gl.bindVertexArray(null)
+    }
 
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[this._stateReadIndex])

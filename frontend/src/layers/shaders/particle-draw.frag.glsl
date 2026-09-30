@@ -6,6 +6,9 @@ in float v_speed;
 out vec4 fragColor;
 
 void main() {
+    // Just respawned, or no wind data at its position
+    if (v_speed < 0.0) discard;
+
     // Circular point with soft edge using gl_PointCoord [0,1]
     vec2 ctr = gl_PointCoord - 0.5;
     float dist = length(ctr) * 2.0; // 0 at center, 1 at edge

@@ -2,7 +2,8 @@
 precision highp float;
 
 // Previous frame's particle state texture (RGBA32F).
-// R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = speed (m/s)
+// R = longitude [0,1], G = latitude [0,1], B = age [0,1], A = speed (m/s),
+// negative when the particle must not be drawn this frame
 uniform sampler2D u_stateTex;
 
 // Wind U/V atlas textures (T0) — all visible tiles packed into one texture.
@@ -129,12 +130,16 @@ float sampleAtlas(sampler2D tex, vec2 uv) {
     return totalWeight > 0.0 ? total / totalWeight : NODATA;
 }
 
-// Sample wind vector at a mercator position using the tile atlas.
+// Sample wind vector at a mercator position using the tile atlas. Returns
+// false where there is no data: outside the atlas, tile not loaded yet, or
+// a nodata texel.
 // Converts mercator [0,1] → atlas UV by computing which tile the position
 // falls in, then mapping to the corresponding region within the packed atlas.
 // No Y-flip: XYZ tiles (y=0 at north) + GL upload (row 0 at bottom) means
 // sampling at mercator Y=0 (north) → GL V=0 → bottom row = north = correct.
-vec2 sampleWind(vec2 pos) {
+bool sampleWind(vec2 pos, out vec2 wind) {
+    wind = vec2(0.0);
+
     // Convert mercator [0,1] position to atlas-local tile position.
     // tilePos.x/y are in tile units relative to the atlas origin.
     vec2 tilePos = pos * u_atlasZoom - vec2(u_atlasOriginX, u_atlasOriginY);
@@ -142,7 +147,7 @@ vec2 sampleWind(vec2 pos) {
     // Out-of-atlas guard: particles outside visible tile range get no wind
     if (tilePos.x < 0.0 || tilePos.x >= u_atlasCols ||
         tilePos.y < 0.0 || tilePos.y >= u_atlasRows)
-        return vec2(0.0);
+        return false;
 
     // Atlas UV: fractional position within the packed atlas texture
     vec2 atlasUV = tilePos / vec2(u_atlasCols, u_atlasRows);
@@ -150,7 +155,7 @@ vec2 sampleWind(vec2 pos) {
     float u0 = sampleAtlas(u_windU, atlasUV);
     float v0 = sampleAtlas(u_windV, atlasUV);
 
-    if (isNodata(u0) || isNodata(v0)) return vec2(0.0);
+    if (isNodata(u0) || isNodata(v0)) return false;
 
     if (u_temporalMix > 0.0) {
         float u1 = sampleAtlas(u_windUT1, atlasUV);
@@ -170,7 +175,8 @@ vec2 sampleWind(vec2 pos) {
         v0 = v0 * valueRange + u_valueMin;
     }
 
-    return vec2(u0, v0);
+    wind = vec2(u0, v0);
+    return true;
 }
 
 // ── Main update ─────────────────────────────────────────────────────
@@ -181,54 +187,45 @@ void main() {
     float lat = state.g;
     float age = state.b;
 
-    // Advance age
-    // Particles live ~6 seconds: long enough to trace a graceful streamline
-    float maxLife = 6.0;
+    // Each particle has its own lifetime (4–8 s): long enough to trace a
+    // streamline, and varied so the field never ages in step.
+    float maxLife = mix(4.0, 8.0, hash(v_uv * 311.7));
     age += u_dt / maxLife;
 
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
-    float speed = 0.0;
 
-    if (u_hasWindData == 1) {
-        // Sample wind field at current particle position
-        vec2 wind = sampleWind(vec2(lon, lat));
-        speed = length(wind);
+    vec2 wind = vec2(0.0);
+    bool hasWind = u_hasWindData == 1 && sampleWind(vec2(lon, lat), wind);
+    float speed = length(wind);
 
-        if (speed > 0.001) {
-            // Advect by wind: convert m/s to mercator displacement
-            // u_speedScale converts physical velocity to mercator units/second
-            lon += wind.x * u_speedScale * u_dt;
-            lat -= wind.y * u_speedScale * u_dt; // Y is inverted in mercator
+    if (hasWind) {
+        // Advect by wind: u_speedScale converts m/s to mercator units/second
+        lon += wind.x * u_speedScale * u_dt;
+        lat -= wind.y * u_speedScale * u_dt; // Y is inverted in mercator
 
-            // Add slight random jitter for visual richness (1% of displacement)
-            vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
-            lon += rnd.x * speed * u_speedScale * u_dt * 0.01;
-            lat -= rnd.y * speed * u_speedScale * u_dt * 0.01;
-        } else {
-            // No wind at this location — gentle random drift
-            vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
-            lon += rnd.x * 0.0002;
-            lat += rnd.y * 0.0002;
-        }
-    } else {
-        // No wind data bound — random walk fallback
+        // Add slight random jitter for visual richness (1% of displacement)
         vec2 rnd = hash2(seedOffset) * 2.0 - 1.0;
-        float walkSpeed = 0.001;
-        lon += rnd.x * walkSpeed;
-        lat += rnd.y * walkSpeed;
+        lon += rnd.x * speed * u_speedScale * u_dt * 0.01;
+        lat -= rnd.y * speed * u_speedScale * u_dt * 0.01;
     }
 
-    // Respawn if aged out or drifted outside viewport
     bool outOfBounds = lon < u_viewportBounds.x || lon > u_viewportBounds.z ||
                        lat < u_viewportBounds.y || lat > u_viewportBounds.w;
 
-    if (age >= 1.0 || outOfBounds) {
-        // Respawn at random position within viewport
+    // Respawn at a random position in the viewport when aged out, carried off
+    // screen, or sitting where there is no wind data (tile still loading).
+    if (!hasWind || age >= 1.0 || outOfBounds) {
         vec2 spawnRnd = hash2(seedOffset + vec2(42.0, 17.0));
         lon = mix(u_viewportBounds.x, u_viewportBounds.z, spawnRnd.x);
         lat = mix(u_viewportBounds.y, u_viewportBounds.w, spawnRnd.y);
-        age = 0.0;
-        speed = 0.0;
+        // A particle that lived out its life restarts at 0 and fades in. One
+        // displaced by a pan, a zoom or missing data gets a random age: they
+        // are respawned in bulk, and a shared age would make the whole field
+        // fade out and restart together every lifetime.
+        age = age >= 1.0 ? 0.0 : hash(seedOffset + vec2(7.3, 91.1));
+        // Negative speed = not drawn this frame (see particle-draw.frag.glsl);
+        // the next update samples the wind at the new position.
+        speed = -1.0;
     }
 
     fragColor = vec4(lon, lat, age, speed);
