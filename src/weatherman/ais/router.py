@@ -42,7 +42,9 @@ CONTENT_TYPE_MVT = "application/vnd.mapbox-vector-tile"
 class AISTileService:
     """Serves MVT tiles from the AIS snapshot table.
 
-    Holds a read-only DuckDB connection for concurrent tile queries.
+    Holds a read-only DuckDB connection. Handlers run on several threads at
+    once and a DuckDB connection must not be used by two threads at the same
+    time (the backend deadlocks), so every query goes through ``cursor()``.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -65,6 +67,10 @@ class AISTileService:
             raise RuntimeError("AISTileService not connected")
         return self._con
 
+    def cursor(self) -> duckdb.DuckDBPyConnection:
+        """Return a cursor for a single request — never share one across threads."""
+        return self.connection.cursor()
+
     def get_tile(
         self,
         *,
@@ -76,7 +82,7 @@ class AISTileService:
     ) -> GeneratedTile:
         """Generate an MVT tile for the given parameters."""
         return generate_tile_with_stats(
-            con=self.connection,
+            con=self.cursor(),
             snapshot_date=snapshot_date,
             tenant_id=tenant_id,
             z=z,
@@ -86,7 +92,7 @@ class AISTileService:
 
     def latest_snapshot_date(self) -> date | None:
         """Return the newest available AIS snapshot date."""
-        row = self.connection.execute(
+        row = self.cursor().execute(
             'SELECT MAX("date") FROM ais_snapshot'
         ).fetchone()
         if row is None or row[0] is None:
@@ -150,7 +156,7 @@ def get_ais_tile_service() -> AISTileService:
     "/latest",
     summary="Latest available AIS snapshot date",
 )
-async def get_latest_snapshot_date(
+def get_latest_snapshot_date(
     svc: AISTileService = Depends(get_ais_tile_service),
 ) -> JSONResponse:
     """Return the latest available AIS snapshot date for frontend bootstrap."""
@@ -301,7 +307,7 @@ def get_vessels_bbox(
         if snapshot_date is None:
             raise HTTPException(status_code=404, detail="No AIS snapshots available")
 
-    con = svc.connection
+    con = svc.cursor()
     rows = con.execute(
         """
         SELECT mmsi, vessel_name, lat, lon, sog, heading,
@@ -387,7 +393,7 @@ def get_vessel_track(
     if start_date is None:
         start_date = end_date - timedelta(days=7)
 
-    con = svc.connection
+    con = svc.cursor()
     points = query_track(
         mmsi=mmsi,
         start_date=start_date,
