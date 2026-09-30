@@ -271,3 +271,34 @@ test('data tiles are never requested above the pre-generated max zoom', async ({
 
   expect(Math.max(...zooms)).toBe(5)
 })
+
+test('weather layer draws stand-in tiles while a new zoom level loads', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Registered last, so it wins for z4 tiles: hold them back long enough to observe the gap.
+  await page.route(/\/tiles\/gfs\/.*\/data\/4\/\d+\/\d+\.png/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    await route.fulfill({ path: TILE_FIXTURE_PATH })
+  })
+
+  const weatherDebug = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return debugState?.weather as { drawn: number; fallback: number } | undefined
+  })
+
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+  await expect.poll(async () => (await weatherDebug())?.drawn ?? 0, { timeout: 15_000 }).toBeGreaterThan(0)
+  expect((await weatherDebug())?.fallback).toBe(0)
+
+  // Zoom 3 → 4: the z4 tiles are still in flight, so every quad must come from a z3 ancestor.
+  await page.locator('.maplibregl-canvas').focus()
+  await page.keyboard.press('Equal')
+  await expect.poll(async () => (await weatherDebug())?.fallback ?? 0).toBeGreaterThan(0)
+  const duringGap = await weatherDebug()
+  expect(duringGap?.drawn).toBe(duringGap?.fallback)
+
+  // Once the z4 tiles arrive the stand-ins are replaced.
+  await expect.poll(async () => (await weatherDebug())?.fallback, { timeout: 10_000 }).toBe(0)
+  expect((await weatherDebug())?.drawn).toBeGreaterThan(0)
+})

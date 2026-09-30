@@ -15,10 +15,16 @@ uniform mat4 u_matrix;
 uniform vec2 u_tileOffset;
 uniform vec2 u_tileScale;
 
+// Sub-rectangle of the data texture to sample. (0,0)/(1,1) for a tile drawn
+// from its own texture; a quadrant (or smaller) when an ancestor tile stands
+// in for one that has not loaded yet.
+uniform vec2 u_uvOffset;
+uniform vec2 u_uvScale;
+
 out vec2 v_uv;
 
 void main() {
-    v_uv = a_uv;
+    v_uv = u_uvOffset + a_uv * u_uvScale;
     // Map UV [0,1] to this tile's mercator footprint, then project to clip space
     vec2 mercator = u_tileOffset + a_uv * u_tileScale;
     gl_Position = u_matrix * vec4(mercator, 0.0, 1.0);

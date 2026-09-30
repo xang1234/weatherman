@@ -9,9 +9,18 @@ export interface ParticleDebugState {
   pendingDirtyTiles: number
 }
 
+/** What the weather colour layer drew in its last frame (for the e2e suite). */
+export interface WeatherDebugState {
+  /** Quads drawn. */
+  drawn: number
+  /** Of those, drawn from a stand-in: an ancestor, child, or the previous hour. */
+  fallback: number
+}
+
 interface ParticleDebugRoot {
   wind?: ParticleDebugState
   wave?: ParticleDebugState
+  weather?: WeatherDebugState
 }
 
 const DEFAULT_STATE: ParticleDebugState = {
@@ -30,4 +39,10 @@ export function ensureParticleDebugState(layer: ParticleDebugLayer): ParticleDeb
   root[layer] = state
   globalWithDebug.__weathermanDebug = root
   return state
+}
+
+export function ensureWeatherDebugState(): WeatherDebugState {
+  const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
+  const root = (globalWithDebug.__weathermanDebug ??= {})
+  return (root.weather ??= { drawn: 0, fallback: 0 })
 }

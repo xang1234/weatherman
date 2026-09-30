@@ -45,9 +45,11 @@ import {
   computeVisibleTiles,
   computePanPrefetchTiles,
   dataTileZoom,
+  MAX_DATA_TILE_ZOOM,
   type TileCoord,
   type TileFormat,
 } from './TileManager'
+import { ensureWeatherDebugState } from './particleDebug'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
 
 /** Layers that use U/V vector component tiles instead of scalar tiles. */
@@ -104,6 +106,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
   // Pan prefetch: tracks viewport movement to prefetch tiles ahead of the pan
   private _panTracker = new PanVelocityTracker()
 
+  // Tiles covering the viewport in the last rendered frame
+  private _lastVisible: TileCoord[] = []
+
+  private _debug = ensureWeatherDebugState()
+
   // Diagnostic warning guards (one-shot to avoid console spam)
   private _renderSkipWarned = false
   private _noTilesWarned = false
@@ -124,6 +131,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _uMatrix: WebGLUniformLocation | null = null
   private _uTileOffset: WebGLUniformLocation | null = null
   private _uTileScale: WebGLUniformLocation | null = null
+  private _uUvOffset: WebGLUniformLocation | null = null
+  private _uUvScale: WebGLUniformLocation | null = null
   private _uDataTile: WebGLUniformLocation | null = null
   private _uDataTileT1: WebGLUniformLocation | null = null
   private _uDataTileV: WebGLUniformLocation | null = null
@@ -171,6 +180,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uMatrix = gl.getUniformLocation(prog, 'u_matrix')
       this._uTileOffset = gl.getUniformLocation(prog, 'u_tileOffset')
       this._uTileScale = gl.getUniformLocation(prog, 'u_tileScale')
+      this._uUvOffset = gl.getUniformLocation(prog, 'u_uvOffset')
+      this._uUvScale = gl.getUniformLocation(prog, 'u_uvScale')
       this._uDataTile = gl.getUniformLocation(prog, 'u_dataTile')
       this._uDataTileT1 = gl.getUniformLocation(prog, 'u_dataTileT1')
       this._uDataTileV = gl.getUniformLocation(prog, 'u_dataTileV')
@@ -271,14 +282,17 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     // Update tile managers with priority-differentiated fetches:
     //   P0 = visible tiles, current time (what user sees now)
-    //   P1 = visible tiles, next time step (temporal blend)
+    //   P1 = visible tiles, next time step (temporal blend) — fetched whenever
+    //        a next step is configured, so playback and stepping start warm
     //   P2 = prefetch tiles (speculative, for smooth panning)
+    this._lastVisible = visibleCoords
     this._tileManager.updateVisibleTiles(visibleCoords, 0)
     if (prefetchCoords.length > 0) {
       this._tileManager.updateVisibleTiles(prefetchCoords, 2)
     }
-    const blending = this._temporalMix > 0 && this._forecastHourT1 >= 0 && this._tileManagerT1 != null
-    if (blending) {
+    const wantT1 = this._forecastHourT1 >= 0 && this._tileManagerT1 != null
+    const blending = wantT1 && this._temporalMix > 0
+    if (wantT1) {
       this._tileManagerT1!.updateVisibleTiles(visibleCoords, 1)
       if (prefetchCoords.length > 0) {
         this._tileManagerT1!.updateVisibleTiles(prefetchCoords, 2)
@@ -289,7 +303,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
       if (prefetchCoords.length > 0) {
         this._tileManagerV.updateVisibleTiles(prefetchCoords, 2)
       }
-      if (blending && this._tileManagerVT1) {
+      if (wantT1 && this._tileManagerVT1) {
         this._tileManagerVT1.updateVisibleTiles(visibleCoords, 1)
         if (prefetchCoords.length > 0) {
           this._tileManagerVT1.updateVisibleTiles(prefetchCoords, 2)
@@ -297,35 +311,88 @@ export class WeatherGLLayer implements CustomLayerInterface {
       }
     }
 
-    // Collect tiles that have loaded required textures
+    // Collect what to draw for each visible tile. A tile that has not loaded
+    // is covered by a stand-in rather than left blank, in this order:
+    //   1. the previous hour/run, while the newly selected one is loading
+    //   2. the nearest loaded ancestor (after zooming in)
+    //   3. any loaded children (after zooming out)
     interface TileDraw {
-      coord: TileCoord
+      /** Footprint to cover: tile coordinates at zoom z. */
+      z: number
+      x: number
+      y: number
+      wrap: number
+      /** Sub-rectangle of the source textures to sample. */
+      uvOffsetX: number
+      uvOffsetY: number
+      uvScale: number
       texT0: WebGLTexture
       texT1: WebGLTexture | null
       texV: WebGLTexture | null
       texVT1: WebGLTexture | null
     }
     const tilesToDraw: TileDraw[] = []
-    for (const coord of visibleCoords) {
-      const texT0 = this._tileManager.getTexture(coord.z, coord.x, coord.y)
-      if (!texT0) continue
+    let fallbackDraws = 0
 
-      // In vector mode, both U and V must be loaded to draw
-      let texV: WebGLTexture | null = null
-      if (isVector) {
-        texV = this._tileManagerV?.getTexture(coord.z, coord.x, coord.y) ?? null
-        if (!texV) continue
+    // The previous dataset is shown for the whole viewport until every tile of
+    // the new one has settled — swapping tile by tile would show a patchwork
+    // of two timesteps.
+    const tm = this._tileManager
+    const tmV = this._tileManagerV
+    const isPending = (m: TileManager | null, c: TileCoord) => m?.getTileState(c.z, c.x, c.y) === 'pending'
+    const loading = visibleCoords.some((c) => isPending(tm, c) || (isVector && isPending(tmV, c)))
+    if (!loading) {
+      // The new dataset has taken over; a later zoom must not bring the old one back.
+      tm.dropStale()
+      tmV?.dropStale()
+    }
+    const useStale = loading && tm.hasStale
+
+    for (const coord of visibleCoords) {
+      const stale = useStale ? this._findSource(coord, true) : null
+      const src = stale ?? this._findSource(coord, false)
+      if (src) {
+        // T1 belongs to the current dataset, so never blend it into stale tiles.
+        const blendHere = blending && !stale
+        const uvScale = 1 / 2 ** src.dz
+        tilesToDraw.push({
+          z: coord.z, x: coord.x, y: coord.y, wrap: coord.wrap,
+          uvOffsetX: (coord.x - (src.x << src.dz)) * uvScale,
+          uvOffsetY: (coord.y - (src.y << src.dz)) * uvScale,
+          uvScale,
+          texT0: src.texT0,
+          texV: src.texV,
+          texT1: blendHere ? this._tileManagerT1!.getTexture(src.z, src.x, src.y) : null,
+          texVT1: blendHere && isVector
+            ? this._tileManagerVT1?.getTexture(src.z, src.x, src.y) ?? null
+            : null,
+        })
+        if (stale || src.dz > 0) fallbackDraws++
+        continue
       }
 
-      const texT1 = blending
-        ? this._tileManagerT1!.getTexture(coord.z, coord.x, coord.y)
-        : null
-      const texVT1 = (blending && isVector)
-        ? this._tileManagerVT1?.getTexture(coord.z, coord.x, coord.y) ?? null
-        : null
-
-      tilesToDraw.push({ coord, texT0, texT1, texV, texVT1 })
+      if (coord.z >= MAX_DATA_TILE_ZOOM) continue
+      for (let i = 0; i < 4; i++) {
+        const cz = coord.z + 1
+        const cx = coord.x * 2 + (i & 1)
+        const cy = coord.y * 2 + (i >> 1)
+        const texT0 = tm.getTexture(cz, cx, cy)
+        const texV = isVector ? tmV?.getTexture(cz, cx, cy) ?? null : null
+        if (!texT0 || (isVector && !texV)) continue
+        tilesToDraw.push({
+          z: cz, x: cx, y: cy, wrap: coord.wrap,
+          uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
+          texT0, texV, texT1: null, texVT1: null,
+        })
+        fallbackDraws++
+      }
     }
+
+    this._debug.drawn = tilesToDraw.length
+    this._debug.fallback = fallbackDraws
+
+    // Keep rendering while stale tiles are up so their time limit is noticed.
+    if (useStale) this._map.triggerRepaint()
 
     if (tilesToDraw.length === 0) {
       if (!this._noTilesWarned) {
@@ -438,17 +505,19 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, null)
 
     // Draw each visible tile as a positioned quad
-    const n = 2 ** zoom
-    const scale = 1 / n
-
     gl.bindVertexArray(this._quad.vao)
 
-    for (const { coord, texT0, texT1, texV, texVT1 } of tilesToDraw) {
+    for (const tile of tilesToDraw) {
+      const { texT0, texT1, texV, texVT1 } = tile
       // Per-tile uniforms: position this quad in mercator space
       // Account for world copy: wrap=1 shifts tile one world-width east
-      const renderX = coord.x + coord.wrap * n
-      gl.uniform2f(this._uTileOffset, renderX * scale, coord.y * scale)
+      const n = 2 ** tile.z
+      const scale = 1 / n
+      const renderX = tile.x + tile.wrap * n
+      gl.uniform2f(this._uTileOffset, renderX * scale, tile.y * scale)
       gl.uniform2f(this._uTileScale, scale, scale)
+      gl.uniform2f(this._uUvOffset, tile.uvOffsetX, tile.uvOffsetY)
+      gl.uniform2f(this._uUvScale, tile.uvScale, tile.uvScale)
 
       // Bind U/scalar data tile texture to unit 0
       gl.activeTexture(gl.TEXTURE0)
@@ -644,19 +713,19 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     const targetLayer = this._isVector ? 'wind_u' : this._layerName
 
-    // During playback advancement, T1 already has the target forecast hour's
-    // tiles loaded (they were pre-fetched for temporal blending). Swap T0↔T1
-    // instead of clearing and re-fetching — gives instant transitions.
+    // When stepping to the next hour, T1 usually already has its tiles (they
+    // are pre-fetched). Swap T0↔T1 instead of re-fetching — an instant
+    // transition. Only when T1 covers the whole viewport: a partial swap
+    // would leave holes, whereas the path below keeps the old hour up.
     if (
       this._tileManagerT1 &&
-      this._tileManagerT1.cacheSize > 0 &&
       this._tileManagerT1.currentLayer === targetLayer &&
       this._tileManagerT1.currentForecastHour === this._forecastHour &&
       (!this._isVector || (
         this._tileManagerVT1 != null &&
-        this._tileManagerVT1.cacheSize > 0 &&
         this._tileManagerVT1.currentForecastHour === this._forecastHour
-      ))
+      )) &&
+      this._t1CoversViewport()
     ) {
       const tmpT = this._tileManager
       this._tileManager = this._tileManagerT1
@@ -673,15 +742,15 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     if (this._isVector) {
       // Vector mode: split into U and V component tile fetches
-      this._tileManager?.setLayer(this._model, this._runId, 'wind_u', this._forecastHour)
-      this._tileManagerV?.setLayer(this._model, this._runId, 'wind_v', this._forecastHour)
+      this._tileManager?.setLayer(this._model, this._runId, 'wind_u', this._forecastHour, true)
+      this._tileManagerV?.setLayer(this._model, this._runId, 'wind_v', this._forecastHour, true)
       if (this._forecastHourT1 >= 0) {
         this._tileManagerT1?.setLayer(this._model, this._runId, 'wind_u', this._forecastHourT1)
         this._tileManagerVT1?.setLayer(this._model, this._runId, 'wind_v', this._forecastHourT1)
       }
     } else {
       // Scalar mode: single tile per cell
-      this._tileManager?.setLayer(this._model, this._runId, this._layerName, this._forecastHour)
+      this._tileManager?.setLayer(this._model, this._runId, this._layerName, this._forecastHour, true)
       if (this._forecastHourT1 >= 0) {
         this._tileManagerT1?.setLayer(this._model, this._runId, this._layerName, this._forecastHourT1)
       } else {
@@ -692,6 +761,40 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._tileManagerV?.clear()
       this._tileManagerVT1?.clear()
     }
+  }
+
+  /**
+   * Find loaded textures to draw a tile from: the tile itself, else its
+   * nearest loaded ancestor (dz levels up). In vector mode U and V must come
+   * from the same tile. `stale` reads the dataset shown before the last
+   * hour/run change instead of the current one.
+   */
+  private _findSource(coord: TileCoord, stale: boolean): {
+    z: number
+    x: number
+    y: number
+    dz: number
+    texT0: WebGLTexture
+    texV: WebGLTexture | null
+  } | null {
+    const isVector = this._isVector
+    for (let dz = 0; dz <= coord.z; dz++) {
+      const z = coord.z - dz
+      const x = coord.x >> dz
+      const y = coord.y >> dz
+      const texT0 = this._tileManager?.getTexture(z, x, y, stale) ?? null
+      const texV = isVector ? this._tileManagerV?.getTexture(z, x, y, stale) ?? null : null
+      if (texT0 && (!isVector || texV)) return { z, x, y, dz, texT0, texV }
+    }
+    return null
+  }
+
+  /** Whether T1 has every tile of the last rendered viewport loaded. */
+  private _t1CoversViewport(): boolean {
+    const isVector = this._isVector
+    return this._lastVisible.length > 0 && this._lastVisible.every(({ z, x, y }) =>
+      this._tileManagerT1?.getTexture(z, x, y) != null &&
+      (!isVector || this._tileManagerVT1?.getTexture(z, x, y) != null))
   }
 
   /** Create or replace the color ramp texture for the current layer. */
@@ -795,6 +898,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._uMatrix = null
     this._uTileOffset = null
     this._uTileScale = null
+    this._uUvOffset = null
+    this._uUvScale = null
     this._uDataTile = null
     this._uDataTileT1 = null
     this._uDataTileV = null
