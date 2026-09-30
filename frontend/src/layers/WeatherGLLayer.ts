@@ -214,7 +214,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
       // network fetch callbacks never block the main thread render loop.
       const triggerRepaint = () => map.triggerRepaint()
       const fetchClient = getTileFetchClient()
-      const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
+      const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient, requestRender: triggerRepaint }
       this._tileManager = new TileManager(gl, tmOpts)
       this._tileManager.onTileLoaded = triggerRepaint
       this._tileManagerT1 = new TileManager(gl, tmOpts)

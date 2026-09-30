@@ -12,7 +12,10 @@
  *   Priority 2 — adjacent / prefetch tiles (lowest)
  *
  * When at max concurrency and a higher-priority request arrives,
- * the lowest-priority in-flight fetch is cancelled to make room.
+ * the lowest-priority in-flight fetch is aborted and put back on the queue
+ * to make room. A fetch that takes longer than FETCH_TIMEOUT_MS is aborted
+ * and reported as an error, so a request that never completes cannot hold a
+ * slot forever.
  */
 
 import type {
@@ -26,6 +29,9 @@ import type {
 
 let maxConcurrent = 12
 
+/** Abort a fetch that has not completed by then and report it as an error. */
+const FETCH_TIMEOUT_MS = 15_000
+
 // ── Queue & in-flight tracking ──────────────────────────────────
 
 interface QueueEntry {
@@ -35,9 +41,8 @@ interface QueueEntry {
   priority: TilePriority
 }
 
-interface InFlightEntry {
+interface InFlightEntry extends QueueEntry {
   abort: AbortController
-  priority: TilePriority
 }
 
 /** Waiting requests, drained by priority (lower number first). */
@@ -76,18 +81,20 @@ self.onmessage = (e: MessageEvent<MainToWorkerMessage>) => {
 // ── Enqueue & drain ─────────────────────────────────────────────
 
 function enqueue(key: string, url: string, format: 'png' | 'f16', priority: TilePriority): void {
-  // If already in-flight with same or better priority, skip
+  // Already in flight: keep the fetch, just raise its priority so it is not
+  // the one picked for preemption.
   const existing = inFlight.get(key)
   if (existing) {
-    if (existing.priority <= priority) return
-    // Re-enqueue at higher priority: cancel old fetch
-    existing.abort.abort()
-    inFlight.delete(key)
+    if (priority < existing.priority) existing.priority = priority
+    return
   }
 
-  // Remove any queued entry for this key (de-dup)
+  // Replace any queued entry for this key (de-dup), keeping the better priority
   const idx = queue.findIndex(e => e.key === key)
-  if (idx !== -1) queue.splice(idx, 1)
+  if (idx !== -1) {
+    priority = Math.min(priority, queue[idx].priority) as TilePriority
+    queue.splice(idx, 1)
+  }
 
   queue.push({ key, url, format, priority })
 
@@ -118,14 +125,15 @@ function drain(): void {
     }
 
     if (worstKey != null && bestQueued.priority < worstPriority) {
-      // Cancel the lowest-priority in-flight to make room.
-      // The cancelled tile is simply dropped — the main thread will
-      // re-request it on the next frame if it's still needed.
+      // Abort the lowest-priority in-flight to make room and put it back on
+      // the queue. The main thread still counts it as pending and will not
+      // ask again, so dropping it here would lose the tile for good.
       const victim = inFlight.get(worstKey)!
       victim.abort.abort()
       inFlight.delete(worstKey)
 
       const next = queue.shift()!
+      queue.push({ key: victim.key, url: victim.url, format: victim.format, priority: victim.priority })
       startFetch(next)
     }
   }
@@ -134,10 +142,14 @@ function drain(): void {
 // ── Fetch execution ─────────────────────────────────────────────
 
 function startFetch(entry: QueueEntry): void {
-  const { key, url, format, priority } = entry
   const abort = new AbortController()
-  inFlight.set(key, { abort, priority })
-  executeFetch(key, url, format, abort)
+  inFlight.set(entry.key, { ...entry, abort })
+  executeFetch(entry.key, entry.url, entry.format, abort)
+}
+
+/** Whether this fetch still owns its key (not cancelled, preempted or restarted). */
+function isCurrent(key: string, abort: AbortController): boolean {
+  return inFlight.get(key)?.abort === abort
 }
 
 async function executeFetch(
@@ -146,6 +158,11 @@ async function executeFetch(
   format: 'png' | 'f16',
   abort: AbortController,
 ): Promise<void> {
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    abort.abort()
+  }, FETCH_TIMEOUT_MS)
   try {
     const resp = await fetch(url, { signal: abort.signal })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -154,7 +171,7 @@ async function executeFetch(
       const buffer = await resp.arrayBuffer()
 
       // Verify we haven't been cancelled while awaiting
-      if (!inFlight.has(key)) return
+      if (!isCurrent(key, abort)) return
       inFlight.delete(key)
 
       // Compute tile dimensions from buffer size (2 bytes per float16 pixel)
@@ -173,11 +190,11 @@ async function executeFetch(
       // PNG: fetch as blob, decode to ImageBitmap in the worker
       const blob = await resp.blob()
 
-      if (!inFlight.has(key)) return
+      if (!isCurrent(key, abort)) return
 
       const bitmap = await createImageBitmap(blob)
 
-      if (!inFlight.has(key)) {
+      if (!isCurrent(key, abort)) {
         bitmap.close()
         return
       }
@@ -192,21 +209,27 @@ async function executeFetch(
       self.postMessage(msg, { transfer: [bitmap] })
     }
   } catch (err: unknown) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
+    if (err instanceof DOMException && err.name === 'AbortError' && !timedOut) {
       // Aborted fetches don't free a slot here — they were already
       // removed from inFlight by the canceller. Just drain.
       drain()
       return
     }
 
+    // Cancelled or restarted while failing: the key is no longer ours to report.
+    if (!isCurrent(key, abort)) return
     inFlight.delete(key)
 
     const msg: TileErrorMessage = {
       type: 'tile-error',
       key,
-      error: err instanceof Error ? err.message : String(err),
+      error: timedOut
+        ? `timed out after ${FETCH_TIMEOUT_MS / 1000}s`
+        : err instanceof Error ? err.message : String(err),
     }
     self.postMessage(msg)
+  } finally {
+    clearTimeout(timer)
   }
 
   // A slot freed up — drain queue
