@@ -12,6 +12,7 @@
 import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WaveParticleLayer } from '@/layers/WaveParticleLayer'
+import { weatherInsertBeforeId } from './useWebGLWeatherLayer'
 
 export interface UseWaveParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
@@ -61,8 +62,10 @@ export function useWaveParticles({
     })
     layerRef.current = particleLayer
 
-    // Add particles above the weather overlay
-    m.addLayer(particleLayer as maplibregl.CustomLayerInterface)
+    // Directly above the weather overlay (added first, same insertion point)
+    // and below the basemap fills, lines, labels and AIS — the opaque land
+    // mask of ocean-only layers then also hides particles over land.
+    m.addLayer(particleLayer as maplibregl.CustomLayerInterface, weatherInsertBeforeId(m))
 
     return () => {
       layerRef.current = null

@@ -341,7 +341,8 @@ function useRasterWeatherLayer({
     })
 
     // Insert weather below basemap fills (Windy.com layering) — invisible (back buffer)
-    const beforeLayer = weatherInsertBeforeId(m)
+    // Particle layers sit at the same insertion point; stay below them.
+    const beforeLayer = m.getLayer('wind-particles') ? 'wind-particles' : weatherInsertBeforeId(m)
     m.addLayer(
       {
         id: newLyrId,

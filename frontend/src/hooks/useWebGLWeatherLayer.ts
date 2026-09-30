@@ -21,7 +21,7 @@ import type { UseWeatherLayerOptions } from './useWeatherLayer'
  * to raster basemap layers, then symbol layers, so weather renders below the
  * basemap even when PMTiles is unavailable.
  */
-function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
+export function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
   const layers = map.getStyle()?.layers
   if (!layers) return undefined
   let firstRaster: string | undefined
