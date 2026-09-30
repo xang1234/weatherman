@@ -146,7 +146,9 @@ export function useAISLayer({
 
     addSprites(m)
 
-    const tileUrl = `${apiBase}/ais/tiles/${snapshotDate}/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`
+    // MapLibre fetches vector tiles in a worker, which cannot resolve a
+    // relative URL — so an empty (same-origin) API base needs the origin.
+    const tileUrl = `${apiBase || window.location.origin}/ais/tiles/${snapshotDate}/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`
 
     m.addSource(SOURCE_ID, {
       type: 'vector',
