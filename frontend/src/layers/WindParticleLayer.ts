@@ -51,7 +51,7 @@ import {
   type TileFormat,
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
-import { fadeForFrame, windSpeedScale } from './particle-motion'
+import { createTrailDecay, windSpeedScale } from './particle-motion'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
@@ -195,6 +195,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   // View matrix of the previous frame — trails are screen-space, so they are
   // dropped whenever the view moves
   private _lastMvp = new Float64Array(16)
+  private _trailDecay = createTrailDecay(TRAIL_FADE)
 
   // ── Tile atlas ──────────────────────────────────────────────────────
   private _atlasU: WebGLTexture | null = null
@@ -489,14 +490,15 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA) // premultiplied alpha
 
+    const decay = this._trailDecay(dt)
     if (!matrixChanged(this._lastMvp, options.modelViewProjectionMatrix)) {
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
 
       gl.useProgram(this._compositeProgram.program)
       gl.uniform1i(this._uCompositeTexture, 0)
-      gl.uniform1f(this._uCompositeOpacity, fadeForFrame(TRAIL_FADE, dt))
-      gl.uniform1f(this._uCompositeEpsilon, 1 / 255) // defeat RGBA8 decay stall
+      gl.uniform1f(this._uCompositeOpacity, decay.fade)
+      gl.uniform1f(this._uCompositeEpsilon, decay.epsilon) // defeats the RGBA8 decay stall
 
       gl.bindVertexArray(this._quad.vao)
       gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)

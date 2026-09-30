@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
-import { windSpeedScale } from '../src/layers/particle-motion'
+import { createTrailDecay, windSpeedScale } from '../src/layers/particle-motion'
 
 const shader = (name: string) =>
   readFileSync(fileURLToPath(new URL(`../src/layers/shaders/${name}`, import.meta.url)), 'utf8')
@@ -158,3 +158,26 @@ test('wind particles: speed per second, bulk respawn and missing data', async ({
   // No wind data: nothing is drawn, rather than particles drifting at random (#34).
   expect(result.hiddenWithoutData).toBe(result.count)
 })
+
+test('wind trail lasts the same time at any frame rate', () => {
+  // Decay of a full-brightness trail pixel in an RGBA8 buffer, the way the
+  // composite shader and the framebuffer do it: multiply, subtract, round.
+  const lifetimeSeconds = (fps: number) => {
+    const decay = createTrailDecay(0.96)
+    let level = 255
+    let frames = 0
+    while (level > 0 && frames < fps * 10) {
+      const { fade, epsilon } = decay(1 / fps)
+      level = Math.round(Math.max(level * fade - epsilon * 255, 0))
+      frames++
+    }
+    expect(level, `trail never clears at ${fps} fps`).toBe(0)
+    return frames / fps
+  }
+
+  const at60 = lifetimeSeconds(60)
+  for (const fps of [30, 90, 120, 144, 240]) {
+    expect(Math.abs(lifetimeSeconds(fps) - at60) / at60, `${fps} fps vs 60 fps`).toBeLessThan(0.1)
+  }
+})
+
