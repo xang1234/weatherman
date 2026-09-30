@@ -336,3 +336,50 @@ test('zooming out two levels draws cached grandchildren', async ({ page }) => {
   expect(atZoom3?.drawn).toBeGreaterThan(0)
   expect(atZoom3?.fallback).toBe(atZoom3?.drawn)
 })
+
+test('a failed tile is fetched again and drawn', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Registered last, so it wins: every data tile fails once, then loads.
+  const failedOnce = new Set<string>()
+  await page.route(/\/tiles\/gfs\/.*\/data\/\d+\/\d+\/\d+\.png/, async (route) => {
+    const url = route.request().url()
+    if (failedOnce.has(url)) return route.fallback()
+    failedOnce.add(url)
+    await route.fulfill({ status: 503, body: 'unavailable' })
+  })
+
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+
+  await expect.poll(() => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return (debugState?.weather as { drawn: number } | undefined)?.drawn ?? 0
+  }), { timeout: 15_000 }).toBeGreaterThan(0)
+})
+
+test('tile fetches preempted by higher-priority ones are still delivered', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Slow tiles keep every fetch slot busy, so the wind layer's visible tiles
+  // preempt the next-hour tiles already in flight for the initial layer.
+  await page.route(/\/tiles\/gfs\/.*\/data\/\d+\/\d+\/\d+\.png/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    await route.fulfill({ path: TILE_FIXTURE_PATH }).catch(() => undefined) // aborted meanwhile
+  })
+  const requested = new Set<string>()
+  const delivered = new Set<string>()
+  page.on('request', (request) => {
+    if (request.url().includes('/data/')) requested.add(request.url())
+  })
+  page.on('requestfinished', (request) => {
+    if (request.url().includes('/data/')) delivered.add(request.url())
+  })
+
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  await expect.poll(() => [...requested].filter((url) => !delivered.has(url)).length, { timeout: 20_000 }).toBe(0)
+  expect(requested.size).toBeGreaterThan(12)
+})

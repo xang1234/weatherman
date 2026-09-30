@@ -625,7 +625,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
       this._map?.triggerRepaint()
     }
     const fetchClient = getTileFetchClient()
-    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
+    const requestRender = () => this._map?.triggerRepaint()
+    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient, requestRender }
 
     this._waveHeightManager = new TileManager(gl, tmOpts)
     this._waveHeightManager.onTileLoaded = handleTileLoaded

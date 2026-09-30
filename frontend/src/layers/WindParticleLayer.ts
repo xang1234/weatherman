@@ -701,7 +701,8 @@ export class WindParticleLayer implements CustomLayerInterface {
       this._map?.triggerRepaint()
     }
     const fetchClient = getTileFetchClient()
-    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient }
+    const requestRender = () => this._map?.triggerRepaint()
+    const tmOpts = { apiBase: this._apiBase, format: this._tileFormat, fetchClient, requestRender }
     this._windUManager = new TileManager(gl, tmOpts)
     this._windUManager.onTileLoaded = handleTileLoaded
     this._windVManager = new TileManager(gl, tmOpts)

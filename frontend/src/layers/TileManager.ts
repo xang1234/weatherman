@@ -34,6 +34,8 @@ interface TileEntry {
   state: TileState
   /** Monotonically increasing access counter for LRU ordering. */
   lastAccess: number
+  /** Error entries only: performance.now() time after which to fetch again. */
+  retryAt?: number
 }
 
 /** Tile coordinate with world-copy tracking for antimeridian support. */
@@ -54,6 +56,9 @@ export interface TileManagerOptions {
   /** Shared Web Worker client for off-thread fetching. When provided,
    *  all fetches go through the worker instead of the main thread. */
   fetchClient?: TileFetchClient
+  /** Ask the owner to render a frame. Failed tiles are retried from
+   *  updateVisibleTiles(), which only runs when something renders. */
+  requestRender?: () => void
 }
 
 /**
@@ -75,6 +80,9 @@ let _nextManagerId = 0
  */
 const STALE_FALLBACK_MS = 4000
 
+/** Wait before re-fetching a failed tile, by consecutive failure count; the last value repeats. */
+const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 60_000]
+
 interface DatasetConfig {
   model: string
   runId: string
@@ -87,7 +95,9 @@ interface DatasetState {
   tiles: Map<string, TileEntry>
   pending: Map<string, { image: HTMLImageElement; texture: WebGLTexture }>
   pendingF16: Map<string, { abort: AbortController; texture: WebGLTexture }>
-  pendingWorker: Map<string, WebGLTexture>
+  pendingWorker: Map<string, { texture: WebGLTexture; priority: TilePriority }>
+  /** Consecutive failures per tile key; cleared when the tile loads. */
+  failures: Map<string, number>
   allErrorWarned: boolean
   lastUsed: number
 }
@@ -117,6 +127,8 @@ export class TileManager {
   /** Shared Web Worker client for off-thread fetching (optional). */
   private _fetchClient: TileFetchClient | null = null
 
+  private _requestRender: (() => void) | null = null
+
   /** Unique ID for this manager instance, used to namespace worker keys. */
   private _id: string
 
@@ -138,6 +150,7 @@ export class TileManager {
     this._maxTextures = options.maxTextures ?? 128
     this._format = options.format ?? 'png'
     this._fetchClient = options.fetchClient ?? null
+    this._requestRender = options.requestRender ?? null
     this._id = String(_nextManagerId++)
   }
 
@@ -197,17 +210,33 @@ export class TileManager {
     if (!state) return
     state.lastUsed = ++this._accessCounter
 
+    const now = performance.now()
     for (const { z, x, y } of coords) {
       const key = tileKey(z, x, y)
       const existing = state.tiles.get(key)
-      if (existing) {
-        // Don't bump access counter for errored tiles — let them be
-        // evicted so they can be retried on the next updateVisibleTiles call.
-        if (existing.state === 'error') continue
+      if (existing?.state === 'error') {
+        if (now < (existing.retryAt ?? 0)) continue
+        // Retry is due: drop the failed entry and fall through to fetch again.
+        this._gl.deleteTexture(existing.texture)
+        state.tiles.delete(key)
+      } else if (existing) {
         existing.lastAccess = ++this._accessCounter
         continue
       }
-      if (state.pending.has(key) || state.pendingF16.has(key) || state.pendingWorker.has(key)) continue
+      const inWorker = state.pendingWorker.get(key)
+      if (inWorker) {
+        // A tile first requested as a prefetch may now be on screen: tell
+        // the worker, or it stays behind every visible tile in the queue.
+        if (priority < inWorker.priority) {
+          inWorker.priority = priority
+          this._fetchClient!.fetch(
+            this._workerKey(this._datasetKey(state.config), key),
+            this._buildUrl(state.config, z, x, y), this._format, priority,
+          )
+        }
+        continue
+      }
+      if (state.pending.has(key) || state.pendingF16.has(key)) continue
       this._fetchTile(state, z, x, y, priority)
     }
     this._evict()
@@ -273,9 +302,13 @@ export class TileManager {
     )
   }
 
-  /** Number of textures currently cached. */
+  /** Number of loaded tiles in the current dataset. */
   get cacheSize(): number {
-    return this._currentState()?.tiles.size ?? 0
+    let loaded = 0
+    for (const entry of this._currentState()?.tiles.values() ?? []) {
+      if (entry.state === 'loaded') loaded++
+    }
+    return loaded
   }
 
   /** Current layer name this manager is fetching. */
@@ -302,6 +335,7 @@ export class TileManager {
   destroy(): void {
     this.clear()
     this.onTileLoaded = null
+    this._requestRender = null
     // Unsubscribe from worker events
     this._unsubLoaded?.()
     this._unsubError?.()
@@ -357,6 +391,7 @@ export class TileManager {
         pending: new Map(),
         pendingF16: new Map(),
         pendingWorker: new Map(),
+        failures: new Map(),
         allErrorWarned: false,
         lastUsed: ++this._accessCounter,
       }
@@ -373,6 +408,31 @@ export class TileManager {
     if (!currentDatasetKey) return
     if (this._datasetKey(state.config) !== currentDatasetKey) return
     this.onTileLoaded?.(key)
+  }
+
+  /** Store a freshly uploaded tile and tell the owner. */
+  private _markLoaded(state: DatasetState, key: string, texture: WebGLTexture): void {
+    state.failures.delete(key)
+    state.tiles.set(key, { key, texture, state: 'loaded', lastAccess: ++this._accessCounter })
+    this._notifyTileLoaded(state, key)
+  }
+
+  /**
+   * Record a failed tile and schedule its retry. The entry stays in `tiles`
+   * as an error until updateVisibleTiles() finds the retry due.
+   */
+  private _markError(state: DatasetState, key: string, texture: WebGLTexture): void {
+    const failures = (state.failures.get(key) ?? 0) + 1
+    state.failures.set(key, failures)
+    const delay = RETRY_DELAYS_MS[Math.min(failures, RETRY_DELAYS_MS.length) - 1]
+    state.tiles.set(key, {
+      key,
+      texture,
+      state: 'error',
+      lastAccess: ++this._accessCounter,
+      retryAt: performance.now() + delay,
+    })
+    setTimeout(() => this._requestRender?.(), delay)
   }
 
   private _buildUrl(config: DatasetConfig, z: number, x: number, y: number): string {
@@ -441,7 +501,7 @@ export class TileManager {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.bindTexture(gl.TEXTURE_2D, null)
 
-    state.pendingWorker.set(key, texture)
+    state.pendingWorker.set(key, { texture, priority })
     // Use namespaced key in worker to avoid collisions between managers
     this._fetchClient!.fetch(this._workerKey(datasetKey, key), url, this._format, priority)
   }
@@ -462,7 +522,7 @@ export class TileManager {
       const parsed = this._parseWorkerKey(result.key)
       if (!parsed) return
       const state = this._datasets.get(parsed.datasetKey)
-      const texture = state?.pendingWorker.get(parsed.localKey)
+      const texture = state?.pendingWorker.get(parsed.localKey)?.texture
       if (!texture) {
         // Tile was cancelled/cleared while in-flight — free transferred data
         if (result.format === 'png' && result.data instanceof ImageBitmap) {
@@ -479,17 +539,15 @@ export class TileManager {
       const parsed = this._parseWorkerKey(error.key)
       if (!parsed) return
       const state = this._datasets.get(parsed.datasetKey)
-      const texture = state?.pendingWorker.get(parsed.localKey)
+      const texture = state?.pendingWorker.get(parsed.localKey)?.texture
       if (!texture) return
 
       state!.pendingWorker.delete(parsed.localKey)
-      console.warn(`[TileManager] Worker fetch failed: ${parsed.localKey} — ${error.error}`)
-      state!.tiles.set(parsed.localKey, {
-        key: parsed.localKey,
-        texture,
-        state: 'error',
-        lastAccess: ++this._accessCounter,
-      })
+      // Warn once per tile, not on every failed retry.
+      if (!state!.failures.has(parsed.localKey)) {
+        console.warn(`[TileManager] Worker fetch failed: ${parsed.localKey} — ${error.error} (will retry)`)
+      }
+      this._markError(state!, parsed.localKey, texture)
     })
   }
 
@@ -511,7 +569,7 @@ export class TileManager {
 
       if (side <= 0) {
         console.warn(`[TileManager] Float16 tile from worker has non-square size`)
-        state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+        this._markError(state, key, texture)
         return
       }
 
@@ -536,13 +594,7 @@ export class TileManager {
       bitmap.close()
     }
 
-    state.tiles.set(key, {
-      key,
-      texture,
-      state: 'loaded',
-      lastAccess: ++this._accessCounter,
-    })
-    this._notifyTileLoaded(state, key)
+    this._markLoaded(state, key, texture)
   }
 
   /** Fetch a Float16 binary tile and upload as R16F texture. */
@@ -589,7 +641,7 @@ export class TileManager {
         const side = Math.sqrt(pixelCount)
         if (side !== Math.floor(side)) {
           console.warn(`[TileManager] Float16 tile has non-square size: ${pixelCount} pixels`)
-          state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+          this._markError(state, key, texture)
           return
         }
 
@@ -603,13 +655,7 @@ export class TileManager {
         )
         gl.bindTexture(gl.TEXTURE_2D, null)
 
-        state.tiles.set(key, {
-          key,
-          texture,
-          state: 'loaded',
-          lastAccess: ++this._accessCounter,
-        })
-        this._notifyTileLoaded(state, key)
+        this._markLoaded(state, key, texture)
       })
       .catch(err => {
         if (err.name === 'AbortError') return
@@ -619,7 +665,7 @@ export class TileManager {
           return
         }
         state.pendingF16.delete(key)
-        state.tiles.set(key, { key, texture, state: 'error', lastAccess: ++this._accessCounter })
+        this._markError(state, key, texture)
       })
   }
 
@@ -672,13 +718,7 @@ export class TileManager {
       )
       gl.bindTexture(gl.TEXTURE_2D, null)
 
-      state.tiles.set(key, {
-        key,
-        texture,
-        state: 'loaded',
-        lastAccess: ++this._accessCounter,
-      })
-      this._notifyTileLoaded(state, key)
+      this._markLoaded(state, key, texture)
     }
 
     img.onerror = () => {
@@ -689,12 +729,7 @@ export class TileManager {
       }
       state.pending.delete(key)
 
-      state.tiles.set(key, {
-        key,
-        texture,
-        state: 'error',
-        lastAccess: ++this._accessCounter,
-      })
+      this._markError(state, key, texture)
     }
 
     img.src = url
@@ -746,7 +781,7 @@ export class TileManager {
     state.pendingF16.clear()
 
     if (this._fetchClient && state.pendingWorker.size > 0) {
-      for (const [localKey, texture] of state.pendingWorker) {
+      for (const [localKey, { texture }] of state.pendingWorker) {
         this._fetchClient.cancel(this._workerKey(datasetKey, localKey))
         this._gl.deleteTexture(texture)
       }
