@@ -37,6 +37,7 @@ import {
   createProgram,
   deleteProgram,
   deleteQuadGeometry,
+  matrixChanged,
   type GLProgram,
   type QuadGeometry,
 } from './gl-utils'
@@ -50,22 +51,14 @@ import {
   type TileFormat,
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
+import { fadeForFrame, windSpeedScale } from './particle-motion'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
 const DEFAULT_STATE_SIZE = 50
-/** Trail fade factor per frame. 0.96^113 ≈ 0.01 → ~2s silky comet trails (Windy-style). */
+/** Trail fade factor per 1/60 s. 0.96^113 ≈ 0.01 → ~2s silky comet trails (Windy-style). */
 const TRAIL_FADE = 0.96
-/**
- * Target particle displacement in screen pixels per frame for a reference 10 m/s wind.
- * speedScale = TARGET_DISP_PX / (REF_WIND * dt * worldSize)
- * This produces zoom-independent apparent speed.
- */
-const TARGET_DISP_PX = 0.5
-/** Reference wind speed (m/s) for the target displacement calculation. */
-const REF_WIND_MPS = 10.0
-
 /** Maximum expected wind speed (m/s) for normalizing speed → alpha in the draw shader. */
 const SPEED_MAX = 50.0
 
@@ -199,6 +192,9 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _trailReadIndex = 0
   private _trailWidth = 0
   private _trailHeight = 0
+  // View matrix of the previous frame — trails are screen-space, so they are
+  // dropped whenever the view moves
+  private _lastMvp = new Float64Array(16)
 
   // ── Tile atlas ──────────────────────────────────────────────────────
   private _atlasU: WebGLTexture | null = null
@@ -433,13 +429,9 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform1i(this._uUpdateIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
     gl.uniform1f(this._uUpdateValueMin, this._valueMin)
     gl.uniform1f(this._uUpdateValueMax, this._valueMax)
-    // Zoom-adaptive speed scale: ensure particles move TARGET_DISP_PX per frame for REF_WIND_MPS.
-    // speedScale = TARGET_DISP_PX / (refWind * dt * worldSize)  [mercator units / (m/s · s)]
-    // The shader receives the same clamped dt used in the speedScale formula.
-    const safeDt = Math.max(dt, 0.004)
-    const speedScale = TARGET_DISP_PX / (REF_WIND_MPS * safeDt * worldSize)
-    gl.uniform1f(this._uUpdateSpeedScale, speedScale)
-    gl.uniform1f(this._uUpdateDt, safeDt)
+    // The shader multiplies by dt, so speed on screen is per second, not per frame.
+    gl.uniform1f(this._uUpdateSpeedScale, windSpeedScale(worldSize))
+    gl.uniform1f(this._uUpdateDt, dt)
     gl.uniform1f(this._uUpdateSeed, (now * 137.0) % 1000.0)
 
     const bounds = this._map.getBounds()
@@ -491,21 +483,25 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.clearColor(0, 0, 0, 0)
     gl.clear(gl.COLOR_BUFFER_BIT)
 
-    // 2a: Draw previous trail at TRAIL_FADE opacity
+    // 2a: Draw the faded previous trail — unless the view moved since the
+    // last frame. The trail is screen-space, so after a pan or zoom it would
+    // sit at the old positions and smear; start it afresh instead.
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA) // premultiplied alpha
 
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
+    if (!matrixChanged(this._lastMvp, options.modelViewProjectionMatrix)) {
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
 
-    gl.useProgram(this._compositeProgram.program)
-    gl.uniform1i(this._uCompositeTexture, 0)
-    gl.uniform1f(this._uCompositeOpacity, TRAIL_FADE)
-    gl.uniform1f(this._uCompositeEpsilon, 1 / 255) // defeat RGBA8 decay stall
+      gl.useProgram(this._compositeProgram.program)
+      gl.uniform1i(this._uCompositeTexture, 0)
+      gl.uniform1f(this._uCompositeOpacity, fadeForFrame(TRAIL_FADE, dt))
+      gl.uniform1f(this._uCompositeEpsilon, 1 / 255) // defeat RGBA8 decay stall
 
-    gl.bindVertexArray(this._quad.vao)
-    gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
-    gl.bindVertexArray(null)
+      gl.bindVertexArray(this._quad.vao)
+      gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
+      gl.bindVertexArray(null)
+    }
 
     // 2b: Draw particles as GL_POINTS — trail fade shows movement direction
     gl.activeTexture(gl.TEXTURE0)

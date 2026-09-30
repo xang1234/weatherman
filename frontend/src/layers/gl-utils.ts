@@ -190,3 +190,19 @@ export function deleteQuadGeometry(
   gl.deleteBuffer(quad.positionBuffer)
   gl.deleteBuffer(quad.uvBuffer)
 }
+
+/**
+ * Whether `next` differs from `prev` (a 4x4 matrix). Copies `next` into
+ * `prev`, so calling it once per frame answers "did the view move since the
+ * last frame?".
+ */
+export function matrixChanged(prev: Float64Array, next: ArrayLike<number>): boolean {
+  let changed = false
+  for (let i = 0; i < 16; i++) {
+    if (prev[i] !== next[i]) {
+      changed = true
+      prev[i] = next[i]
+    }
+  }
+  return changed
+}
