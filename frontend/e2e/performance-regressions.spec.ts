@@ -127,21 +127,20 @@ test('wind layer stays mounted and atlas blits stop on a steady viewport', async
   await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
   await waitForWindSettled(page)
 
-  const initialCounters = await page.evaluate(() => {
+  const atlasCounters = () => page.evaluate(() => {
     const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
     const wind = debugState.wind as { atlasClears: number; atlasFlushes: number }
     return { atlasClears: wind.atlasClears, atlasFlushes: wind.atlasFlushes }
   })
 
-  await page.waitForTimeout(300)
-
-  const laterCounters = await page.evaluate(() => {
-    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
-    const wind = debugState.wind as { atlasClears: number; atlasFlushes: number }
-    return { atlasClears: wind.atlasClears, atlasFlushes: wind.atlasFlushes }
-  })
-
-  expect(laterCounters).toEqual(initialCounters)
+  // Tiles arrive over several frames, each one flushing into the atlas, so
+  // "settled" can be true between two arrivals. The blits must stop: wait for
+  // a 300 ms window in which neither counter moves.
+  await expect.poll(async () => {
+    const before = await atlasCounters()
+    await page.waitForTimeout(300)
+    return JSON.stringify(await atlasCounters()) === JSON.stringify(before)
+  }, { timeout: 10_000 }).toBe(true)
 
   await page.locator('button').filter({ hasText: 'Temperature' }).click()
   await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
@@ -380,6 +379,10 @@ test('tile fetches preempted by higher-priority ones are still delivered', async
   await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
   await waitForWindSettled(page)
 
-  await expect.poll(() => [...requested].filter((url) => !delivered.has(url)).length, { timeout: 20_000 }).toBe(0)
-  expect(requested.size).toBeGreaterThan(12)
+  // Require the requests to have actually gone out: "nothing undelivered" is
+  // also true in the instant before the first tile is requested.
+  await expect.poll(
+    () => requested.size > 12 && [...requested].every((url) => delivered.has(url)),
+    { timeout: 20_000 },
+  ).toBe(true)
 })
