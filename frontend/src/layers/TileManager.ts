@@ -161,15 +161,17 @@ export class TileManager {
     }
     if (!keepStale || model !== this._model || layer !== this._layer) {
       this._staleKey = null
-    } else {
-      // Skip a dataset that never got a tile (rapid scrubbing A→B→C): A is
-      // still the last thing that was on screen.
+    } else if (this._staleState() == null) {
+      // The dataset being replaced had taken over the screen (its own stand-in
+      // was dropped or timed out), so it becomes the stand-in.
       const previous = this._currentState()
-      if (previous && [...previous.tiles.values()].some((t) => t.state === 'loaded')) {
-        this._staleKey = this._datasetKey(previous.config)
-      }
+      const shown = previous != null && [...previous.tiles.values()].some((t) => t.state === 'loaded')
+      this._staleKey = shown ? this._datasetKey(previous.config) : null
       this._staleUntil = performance.now() + STALE_FALLBACK_MS
     }
+    // Otherwise a stand-in is still up (rapid scrubbing A→B→C with B not yet
+    // loaded): A is what the user is looking at, so keep it rather than
+    // promoting a partly loaded B. Its time limit is not extended.
     this._model = model
     this._runId = runId
     this._layer = layer
