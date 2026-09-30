@@ -7,6 +7,7 @@ name = "weatherman"
 version = "0.1.0"
 description = "Maritime Weather & Dry Bulk AIS Platform"
 requires-python = ">=3.11"
+license = "MIT"
 dependencies = [
     "duckdb>=1.4.4",
     "fastapi>=0.135.1",

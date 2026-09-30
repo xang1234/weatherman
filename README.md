@@ -82,3 +82,7 @@ Ingest pipelines convert raw GRIB2 forecasts into Zarr archives (canonical store
 ## API standards
 
 Exposes **OGC API Tiles**, **EDR**, and **Features** endpoints, with a **STAC** catalog for dataset discovery.
+
+## License
+
+[MIT](LICENSE)
