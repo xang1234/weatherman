@@ -1,6 +1,3 @@
-# bv (beads viewer) local config and caches
-.bv/
-
 # Python
 __pycache__/
 *.pyc

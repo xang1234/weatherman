@@ -31,4 +31,4 @@
 
 - Backend: `uv run pytest` (pytest with coverage plugin available)
 - Frontend: TypeScript compilation (`tsc -b --noEmit`) + Vite build (see Node.js section for invocation)
-- Always run relevant tests before closing a bead
+- Always run relevant tests before closing an issue
