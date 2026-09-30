@@ -23,9 +23,6 @@ const USE_PMTILES =
   RAW_BASEMAP_URL.endsWith('.pmtiles') ||
   RAW_BASEMAP_URL.startsWith('pmtiles://')
 
-/** Fill-layer opacity when weather overlay is active (Windy.com style). */
-const WEATHER_FILL_OPACITY = 0.3
-
 /**
  * Raster basemap opacity when weather overlay is active. Higher than the fill
  * dim because raster tiles carry labels baked-in; over-dimming makes labels
@@ -33,8 +30,8 @@ const WEATHER_FILL_OPACITY = 0.3
  */
 const WEATHER_RASTER_OPACITY = 0.55
 
-/** Layer IDs whose fill-opacity should be reduced for weather transparency. */
-const TRANSPARENT_FILL_LAYERS = new Set(['water', 'earth'])
+/** Label layers whose colours flip to white-on-dark when weather is showing. */
+const LABEL_LAYERS = ['places_country', 'places_city']
 
 /** Weather layers that only have data over ocean — need opaque earth mask. */
 const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
@@ -45,10 +42,10 @@ const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
  * Uses Protomaps vector tiles via PMTiles protocol when available,
  * falling back to CartoDB light raster tiles for local development.
  *
- * Fill layers (earth, water) start opaque but are dynamically reduced to
- * ~30% opacity via setWeatherOverlayOpacity() when weather data is visible —
- * the Windy.com "semi-transparent basemap" look. Labels use stronger halos
- * for readability over weather colors.
+ * Starts as a plain light map. When weather is showing,
+ * setWeatherOverlayOpacity() hides the fills and darkens the background so
+ * the overlay keeps its full colour and the basemap contributes only thin
+ * coastlines, borders and white labels — the Windy.com look.
  */
 export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
   ? {
@@ -89,8 +86,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           source: 'protomaps',
           'source-layer': 'earth',
           paint: {
-            'line-color': '#000000',
-            'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.8, 4, 1.5, 8, 2, 14, 3],
+            'line-color': 'rgba(10, 14, 22, 0.75)',
+            'line-width': ['interpolate', ['linear'], ['zoom'], 0, 0.7, 4, 1.2, 8, 1.6, 14, 2.2],
           },
         },
         {
@@ -99,9 +96,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           source: 'protomaps',
           'source-layer': 'boundaries',
           paint: {
-            'line-color': '#1a1a1a',
-            'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.8, 6, 2, 10, 2.5],
-            'line-dasharray': [3, 2],
+            'line-color': 'rgba(10, 14, 22, 0.45)',
+            'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 6, 0.9, 10, 1.3],
           },
         },
         {
@@ -121,8 +117,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           paint: {
             'text-color': '#1f2937',
             'text-halo-color': 'rgba(255, 255, 255, 0.85)',
-            'text-halo-width': 2.5,
-            'text-halo-blur': 1,
+            'text-halo-width': 1.5,
+            'text-halo-blur': 0.5,
           },
           minzoom: 1,
         },
@@ -141,8 +137,8 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
           paint: {
             'text-color': '#1f2937',
             'text-halo-color': 'rgba(255, 255, 255, 0.85)',
-            'text-halo-width': 2.5,
-            'text-halo-blur': 1,
+            'text-halo-width': 1.5,
+            'text-halo-blur': 0.5,
           },
           minzoom: 3,
         },
@@ -177,15 +173,16 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
     }
 
 /**
- * Set the fill-layer opacity for weather-transparent layers at runtime.
+ * Switch the basemap between its plain look and its weather-overlay look.
  *
- * Call this when toggling weather overlay on/off — restores full opacity
- * when weather is hidden so the basemap looks normal without weather.
+ * With weather showing, the water and earth fills are hidden and the
+ * background goes dark, so the overlay (inserted below the fills) keeps its
+ * full colour; labels turn white with a dark halo. Ocean-only layers keep an
+ * opaque land mask, since their data is only valid over water.
  *
- * For raster basemaps (CartoDB fallback), the single raster layer is also
- * dimmed so weather — inserted *below* it by weatherInsertBeforeId — shows
- * through. Ocean-only weather layers keep the raster fully opaque (matching
- * the vector-earth behavior) since the weather is only valid over water.
+ * For raster basemaps (CartoDB fallback), the single raster layer is dimmed
+ * instead so weather — inserted *below* it by weatherInsertBeforeId — shows
+ * through. Ocean-only weather layers keep the raster fully opaque.
  */
 export function setWeatherOverlayOpacity(
   map: maplibregl.Map,
@@ -195,26 +192,28 @@ export function setWeatherOverlayOpacity(
   const style = map.getStyle()
   if (!style?.layers) return
   const oceanOnly = active && layerName != null && OCEAN_ONLY_LAYERS.has(layerName)
+
+  const paint: Array<[layerId: string, property: string, value: unknown]> = [
+    ['background', 'background-color', active ? '#0b1018' : '#f0f0f0'],
+    ['water', 'fill-opacity', active ? 0 : 1],
+    ['earth', 'fill-color', oceanOnly ? '#3b4150' : '#e8e8e8'],
+    ['earth', 'fill-opacity', active && !oceanOnly ? 0 : 1],
+  ]
+  for (const id of LABEL_LAYERS) {
+    paint.push(
+      [id, 'text-color', active ? '#ffffff' : '#1f2937'],
+      [id, 'text-halo-color', active ? 'rgba(0, 0, 0, 0.6)' : 'rgba(255, 255, 255, 0.85)'],
+    )
+  }
+  for (const [id, property, value] of paint) {
+    if (map.getLayer(id)) map.setPaintProperty(id, property, value)
+  }
+
+  // Raster fallback: weather renders beneath, so dim the raster to let it
+  // show through. Ocean-only layers stay opaque (raster carries land).
   for (const layer of style.layers) {
-    if (layer.type === 'fill' && TRANSPARENT_FILL_LAYERS.has(layer.id)) {
-      let opacity: number
-      if (!active) {
-        opacity = 1
-      } else if (oceanOnly) {
-        // Ocean-only layers: opaque earth masks wave color bleed,
-        // nearly transparent water lets wave colors show through.
-        opacity = layer.id === 'earth' ? 1.0 : 0.08
-      } else {
-        opacity = WEATHER_FILL_OPACITY
-      }
-      map.setPaintProperty(layer.id, 'fill-opacity', opacity)
-      console.info(`[setWeatherOverlayOpacity] ${layer.id} fill-opacity → ${opacity}`)
-    } else if (layer.type === 'raster') {
-      // Raster fallback: weather renders beneath, so dim the raster to let
-      // it show through. Ocean-only layers stay opaque (raster carries land).
-      const opacity = !active || oceanOnly ? 1 : WEATHER_RASTER_OPACITY
-      map.setPaintProperty(layer.id, 'raster-opacity', opacity)
-      console.info(`[setWeatherOverlayOpacity] ${layer.id} raster-opacity → ${opacity}`)
+    if (layer.type === 'raster') {
+      map.setPaintProperty(layer.id, 'raster-opacity', !active || oceanOnly ? 1 : WEATHER_RASTER_OPACITY)
     }
   }
 }

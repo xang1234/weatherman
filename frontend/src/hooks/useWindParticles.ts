@@ -12,6 +12,7 @@
 import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WindParticleLayer } from '@/layers/WindParticleLayer'
+import { particleInsertBeforeId } from './useWebGLWeatherLayer'
 import { COLOR_RAMPS } from '@/layers/color-ramps'
 
 export interface UseWindParticlesOptions {
@@ -63,8 +64,11 @@ export function useWindParticles({
     })
     layerRef.current = particleLayer
 
-    // Add particles above the weather overlay
-    m.addLayer(particleLayer as maplibregl.CustomLayerInterface)
+    // Vector basemap: directly above the weather overlay (added first, same
+    // insertion point) and below the fills, lines, labels and AIS — the
+    // opaque land mask of ocean-only layers then also hides particles over
+    // land. Raster fallback: on top, as the raster would cover them.
+    m.addLayer(particleLayer as maplibregl.CustomLayerInterface, particleInsertBeforeId(m))
 
     return () => {
       layerRef.current = null

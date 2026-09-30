@@ -34,6 +34,16 @@ function weatherInsertBeforeId(map: maplibregl.Map): string | undefined {
   return firstRaster ?? firstSymbol
 }
 
+/**
+ * Insertion point for the particle layers. With the vector basemap they go
+ * below the first fill, i.e. directly above the weather layer and under the
+ * land mask, lines and labels. The raster fallback has no fills and stays
+ * opaque for ocean-only layers, so there particles are appended on top.
+ */
+export function particleInsertBeforeId(map: maplibregl.Map): string | undefined {
+  return map.getStyle()?.layers?.find((l) => l.type === 'fill')?.id
+}
+
 export function useWebGLWeatherLayer({
   map,
   isLoaded,

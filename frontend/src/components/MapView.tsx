@@ -43,7 +43,7 @@ export function MapView() {
   const sse = useSSE()
   const latestAISDate = useLatestAISDate()
   const dataAge = useDataAge({ model, version: sse.weatherVersion })
-  const opacity = 0.7
+  const opacity = 0.9
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
   const [selectedForecastHour, setSelectedForecastHour] = useState<number | null>(() =>
     forecastHourFromUrl([]),
