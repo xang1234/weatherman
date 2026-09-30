@@ -68,6 +68,13 @@ export interface TileManagerOptions {
  */
 let _nextManagerId = 0
 
+/**
+ * How long the dataset replaced by setLayer(…, keepStale) stays available as
+ * a stand-in. Bounded so a tile that never arrives cannot leave the old
+ * hour on screen under the new hour's label.
+ */
+const STALE_FALLBACK_MS = 4000
+
 interface DatasetConfig {
   model: string
   runId: string
@@ -99,6 +106,10 @@ export class TileManager {
 
   /** Dataset caches keyed by "model/run/layer/hour". */
   private _datasets = new Map<string, DatasetState>()
+
+  /** Dataset shown before the last setLayer(), usable until _staleUntil. */
+  private _staleKey: string | null = null
+  private _staleUntil = 0
 
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
@@ -133,8 +144,13 @@ export class TileManager {
   /**
    * Set the current dataset to fetch tiles for.
    * Switching datasets reuses any cached tiles already kept for that key.
+   *
+   * @param keepStale Keep the replaced dataset readable through
+   *   getTexture(…, true) for a few seconds, so the caller can go on drawing
+   *   it while the new one loads. Only honoured when just the hour or run
+   *   changes — another layer's tiles would be drawn with the wrong ramp.
    */
-  setLayer(model: string, runId: string, layer: string, forecastHour: number): void {
+  setLayer(model: string, runId: string, layer: string, forecastHour: number, keepStale = false): void {
     if (
       model === this._model &&
       runId === this._runId &&
@@ -143,6 +159,19 @@ export class TileManager {
     ) {
       return
     }
+    if (!keepStale || model !== this._model || layer !== this._layer) {
+      this._staleKey = null
+    } else if (this._staleState() == null) {
+      // The dataset being replaced had taken over the screen (its own stand-in
+      // was dropped or timed out), so it becomes the stand-in.
+      const previous = this._currentState()
+      const shown = previous != null && [...previous.tiles.values()].some((t) => t.state === 'loaded')
+      this._staleKey = shown ? this._datasetKey(previous.config) : null
+      this._staleUntil = performance.now() + STALE_FALLBACK_MS
+    }
+    // Otherwise a stand-in is still up (rapid scrubbing A→B→C with B not yet
+    // loaded): A is what the user is looking at, so keep it rather than
+    // promoting a partly loaded B. Its time limit is not extended.
     this._model = model
     this._runId = runId
     this._layer = layer
@@ -200,12 +229,26 @@ export class TileManager {
     }
   }
 
+  /** Whether the dataset replaced by the last setLayer() can still be drawn. */
+  get hasStale(): boolean {
+    return this._staleState() != null
+  }
+
+  /** Forget the replaced dataset — call once the current one has taken over. */
+  dropStale(): void {
+    this._staleKey = null
+  }
+
   /**
    * Get the texture for a tile, or null if not yet loaded.
    * Updates the LRU access counter.
+   *
+   * @param stale Read from the dataset replaced by the last setLayer()
+   *   instead of the current one (see setLayer's keepStale).
    */
-  getTexture(z: number, x: number, y: number): WebGLTexture | null {
-    const entry = this._currentState()?.tiles.get(tileKey(z, x, y))
+  getTexture(z: number, x: number, y: number, stale = false): WebGLTexture | null {
+    const state = stale ? this._staleState() : this._currentState()
+    const entry = state?.tiles.get(tileKey(z, x, y))
     if (!entry || entry.state !== 'loaded') return null
     entry.lastAccess = ++this._accessCounter
     return entry.texture
@@ -251,6 +294,7 @@ export class TileManager {
       this._disposeDatasetState(datasetKey, state)
     }
     this._datasets.clear()
+    this._staleKey = null
     this._accessCounter = 0
   }
 
@@ -279,6 +323,11 @@ export class TileManager {
       layer: this._layer,
       forecastHour: this._forecastHour,
     })
+  }
+
+  private _staleState(): DatasetState | null {
+    if (!this._staleKey || performance.now() > this._staleUntil) return null
+    return this._datasets.get(this._staleKey) ?? null
   }
 
   private _currentState(): DatasetState | null {
