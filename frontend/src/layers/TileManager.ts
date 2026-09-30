@@ -847,6 +847,18 @@ export function computePanPrefetchTiles(
 // ── Visible tile computation ─────────────────────────────────────
 // Extracted from useWeatherLayer for reuse by the GL pipeline.
 
+/**
+ * Highest zoom with pre-generated data tiles. Must match MAX_DATA_TILE_ZOOM in
+ * src/weatherman/processing/data_tiles.py — above it every tile is a TiTiler
+ * round trip that only upsamples the 0.25° grid, which the shaders do anyway.
+ */
+export const MAX_DATA_TILE_ZOOM = 5
+
+/** Data-tile zoom level to request for a given map zoom. */
+export function dataTileZoom(mapZoom: number): number {
+  return Math.max(0, Math.min(MAX_DATA_TILE_ZOOM, Math.floor(mapZoom)))
+}
+
 function wrapLon(lng: number): number {
   return ((lng + 180) % 360 + 360) % 360 - 180
 }

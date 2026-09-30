@@ -248,3 +248,26 @@ test('wind atlas ignores delayed loads from a scrubbed-away forecast hour', asyn
 
   expect(countersAfterLateLoads).toEqual(countersBeforeLateLoads)
 })
+
+test('data tiles are never requested above the pre-generated max zoom', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const zooms = new Set<number>()
+  page.on('request', (request) => {
+    const match = request.url().match(/\/data\/(\d+)\/\d+\/\d+\.(png|bin)/)
+    if (match) zooms.add(Number(match[1]))
+  })
+
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  // Map starts at zoom 3; keyboard-zoom to 8, well past the z5 data-tile cap.
+  await page.locator('.maplibregl-canvas').focus()
+  for (let i = 0; i < 5; i++) {
+    await page.keyboard.press('Equal')
+    await page.waitForTimeout(500)
+  }
+
+  expect(Math.max(...zooms)).toBe(5)
+})

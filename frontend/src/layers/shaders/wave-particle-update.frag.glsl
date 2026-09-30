@@ -71,6 +71,40 @@ float decodeTile(vec4 texel) {
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
+// Bilinear sample of an atlas texture (see particle-update.frag.glsl).
+// Nodata where the nearest texel is nodata, so dashes never creep onto land.
+float sampleAtlas(sampler2D tex, vec2 uv) {
+    ivec2 size = textureSize(tex, 0);
+    vec2 tc = uv * vec2(size) - 0.5;
+    ivec2 i0 = clamp(ivec2(floor(tc)), ivec2(0), size - 1);
+    ivec2 i1 = min(i0 + 1, size - 1);
+    vec2 f = clamp(tc - vec2(i0), 0.0, 1.0);
+
+    float vals[4] = float[4](
+        decodeTile(texelFetch(tex, i0, 0)),
+        decodeTile(texelFetch(tex, ivec2(i1.x, i0.y), 0)),
+        decodeTile(texelFetch(tex, ivec2(i0.x, i1.y), 0)),
+        decodeTile(texelFetch(tex, i1, 0))
+    );
+    if (isNodata(vals[int(step(0.5, f.x)) + 2 * int(step(0.5, f.y))])) return NODATA;
+
+    float weights[4] = float[4](
+        (1.0 - f.x) * (1.0 - f.y),
+        f.x * (1.0 - f.y),
+        (1.0 - f.x) * f.y,
+        f.x * f.y
+    );
+    float total = 0.0;
+    float totalWeight = 0.0;
+    for (int i = 0; i < 4; i++) {
+        if (!isNodata(vals[i])) {
+            total += vals[i] * weights[i];
+            totalWeight += weights[i];
+        }
+    }
+    return totalWeight > 0.0 ? total / totalWeight : NODATA;
+}
+
 bool atlasLookup(vec2 pos, out vec2 atlasUV) {
     vec2 tilePos = pos * u_atlasZoom - vec2(u_atlasOriginX, u_atlasOriginY);
     if (
@@ -91,7 +125,7 @@ float decodePhysical(
     float valueMin,
     float valueMax
 ) {
-    float value = decodeTile(texture(tex, atlasUV));
+    float value = sampleAtlas(tex, atlasUV);
     if (isNodata(value)) return NODATA;
     if (u_isFloat16 == 0) {
         value = value * (valueMax - valueMin) + valueMin;

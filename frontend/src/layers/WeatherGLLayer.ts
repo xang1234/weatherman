@@ -44,6 +44,7 @@ import {
   PanVelocityTracker,
   computeVisibleTiles,
   computePanPrefetchTiles,
+  dataTileZoom,
   type TileCoord,
   type TileFormat,
 } from './TileManager'
@@ -247,7 +248,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     const isVector = this._isVector
 
     // Compute visible tiles from current map viewport
-    const zoom = Math.max(0, Math.min(8, Math.floor(this._map.getZoom())))
+    const zoom = dataTileZoom(this._map.getZoom())
     const bounds = this._map.getBounds()
     const visibleCoords = computeVisibleTiles({
       west: bounds.getWest(),
@@ -495,7 +496,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3])
 
     // Compute zoom-dependent blur radius: z3→3.0, z4→2.25, z5→1.5, z6→0.75, z7+→0.0
-    const blurRadius = Math.max(0, Math.min(3, (7 - zoom) * 0.75))
+    // Uses the map zoom, not the (capped) data-tile zoom.
+    const blurRadius = Math.max(0, Math.min(3, (7 - Math.floor(this._map!.getZoom())) * 0.75))
 
     // Enable premultiplied-alpha blending for compositing over the basemap
     gl.enable(gl.BLEND)
