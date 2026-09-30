@@ -8,7 +8,7 @@
  * Screen speed of a wind particle in a reference 10 m/s wind, in CSS pixels
  * per second. Independent of zoom and of frame rate.
  */
-const TARGET_SPEED_PX_PER_S = 30
+const TARGET_SPEED_PX_PER_S = 45
 /** Reference wind speed (m/s) for TARGET_SPEED_PX_PER_S. */
 const REF_WIND_MPS = 10.0
 

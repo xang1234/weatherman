@@ -10,9 +10,9 @@
  *     that packs all visible tiles into a single texture per component.
  *
  *   Pass 2 — Trail Composite (ping-pong)
- *     Bind trail write FBO. Draw the previous trail texture at 95% opacity
- *     (exponential decay ≈ 2s fade at 60fps). Then draw particles on top
- *     as GL_POINTS using gl_VertexID to read from the state texture.
+ *     Bind trail write FBO. Draw the previous trail texture, faded. Then
+ *     draw each particle on top as a segment from its previous position to
+ *     its current one (both state textures, addressed by gl_VertexID).
  *
  *   Pass 3 — Map Composite
  *     Restore MapLibre's FBO. Draw the trail texture as a screen-aligned
@@ -57,13 +57,14 @@ import { ensureParticleDebugState, type ParticleDebugState } from './particleDeb
 
 /** Default particles per axis (used if no stateSize option and detection unavailable). */
 const DEFAULT_STATE_SIZE = 50
-/** Trail fade factor per 1/60 s. 0.96^113 ≈ 0.01 → ~2s silky comet trails (Windy-style). */
-const TRAIL_FADE = 0.96
+/** Trail fade factor per 1/60 s. With the speed in particle-motion.ts a trail lasts
+ *  about 1.2 s and is about 55 px long in a 10 m/s wind. */
+const TRAIL_FADE = 0.97
 /** Maximum expected wind speed (m/s) for normalizing speed → alpha in the draw shader. */
 const SPEED_MAX = 50.0
 
-/** Fixed point size in CSS pixels — zoom-independent. */
-const POINT_SIZE = 1.7
+/** Trail width in drawing-buffer pixels — zoom-independent. */
+const LINE_WIDTH = 1.7
 
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
@@ -174,8 +175,10 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   // Draw uniforms
   private _uDrawStateTex: WebGLUniformLocation | null = null
+  private _uDrawPrevStateTex: WebGLUniformLocation | null = null
   private _uDrawMatrix: WebGLUniformLocation | null = null
-  private _uDrawPointSize: WebGLUniformLocation | null = null
+  private _uDrawViewport: WebGLUniformLocation | null = null
+  private _uDrawLineWidth: WebGLUniformLocation | null = null
   private _uDrawSpeedMax: WebGLUniformLocation | null = null
 
   // ── Trail composite pass ────────────────────────────────────────────
@@ -505,13 +508,19 @@ export class WindParticleLayer implements CustomLayerInterface {
       gl.bindVertexArray(null)
     }
 
-    // 2b: Draw particles as GL_POINTS — trail fade shows movement direction
+    // 2b: Draw each particle as a segment from its position before this
+    // frame's update to its position after it. Segments join up frame after
+    // frame, so a trail stays continuous however far a particle moves.
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures![this._stateReadIndex])
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, this._stateTextures![1 - this._stateReadIndex])
 
     gl.useProgram(this._drawProgram.program)
     gl.uniform1i(this._uDrawStateTex, 0)
-    gl.uniform1f(this._uDrawPointSize, POINT_SIZE)
+    gl.uniform1i(this._uDrawPrevStateTex, 1)
+    gl.uniform2f(this._uDrawViewport, this._trailWidth, this._trailHeight)
+    gl.uniform1f(this._uDrawLineWidth, LINE_WIDTH)
     gl.uniform1f(this._uDrawSpeedMax, SPEED_MAX)
 
     // MapLibre's modelViewProjectionMatrix transforms from world coordinates
@@ -527,9 +536,13 @@ export class WindParticleLayer implements CustomLayerInterface {
     }
     gl.uniformMatrix4fv(this._uDrawMatrix, false, mercatorMatrix)
 
+    // MAX instead of adding: consecutive segments overlap at their round
+    // ends, and summing there would bead the trail.
+    gl.blendEquation(gl.MAX)
     gl.bindVertexArray(this._drawVao)
-    gl.drawArrays(gl.POINTS, 0, this._particleCount)
+    gl.drawArrays(gl.TRIANGLES, 0, this._particleCount * 6)
     gl.bindVertexArray(null)
+    gl.blendEquation(gl.FUNC_ADD)
 
     this._trailReadIndex = trailWrite
 
@@ -749,8 +762,10 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     const dp = this._drawProgram.program
     this._uDrawStateTex = gl.getUniformLocation(dp, 'u_stateTex')
+    this._uDrawPrevStateTex = gl.getUniformLocation(dp, 'u_prevStateTex')
     this._uDrawMatrix = gl.getUniformLocation(dp, 'u_matrix')
-    this._uDrawPointSize = gl.getUniformLocation(dp, 'u_pointSize')
+    this._uDrawViewport = gl.getUniformLocation(dp, 'u_viewport')
+    this._uDrawLineWidth = gl.getUniformLocation(dp, 'u_lineWidth')
     this._uDrawSpeedMax = gl.getUniformLocation(dp, 'u_speedMax')
 
     const cp = this._compositeProgram.program
@@ -1259,8 +1274,10 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._uUpdateAtlasCols = null
     this._uUpdateAtlasRows = null
     this._uDrawStateTex = null
+    this._uDrawPrevStateTex = null
     this._uDrawMatrix = null
-    this._uDrawPointSize = null
+    this._uDrawViewport = null
+    this._uDrawLineWidth = null
     this._uDrawSpeedMax = null
     this._uCompositeTexture = null
     this._uCompositeOpacity = null

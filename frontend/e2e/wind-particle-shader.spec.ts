@@ -147,8 +147,9 @@ test('wind particles: speed per second, bulk respawn and missing data', async ({
     speedScale: windSpeedScale(WORLD_SIZE),
   })
 
-  // Same distance per second whatever the frame rate (#32): 30 px for a 10 m/s wind.
-  for (const pixels of result.pixelsPerSecond) expect(pixels).toBeCloseTo(30, 0)
+  // Same distance per second whatever the frame rate (#32).
+  const expectedPixels = windSpeedScale(WORLD_SIZE) * 10 * WORLD_SIZE // 10 m/s for one second
+  for (const pixels of result.pixelsPerSecond) expect(pixels).toBeCloseTo(expectedPixels, 0)
 
   // Particles respawned together get different ages, so they do not expire together (#31).
   // A uniform spread over [0,1) has a standard deviation of 0.289.
@@ -163,7 +164,7 @@ test('wind trail lasts the same time at any frame rate', () => {
   // Decay of a full-brightness trail pixel in an RGBA8 buffer, the way the
   // composite shader and the framebuffer do it: multiply, subtract, round.
   const lifetimeSeconds = (fps: number) => {
-    const decay = createTrailDecay(0.96)
+    const decay = createTrailDecay(0.97)
     let level = 255
     let frames = 0
     while (level > 0 && frames < fps * 10) {
