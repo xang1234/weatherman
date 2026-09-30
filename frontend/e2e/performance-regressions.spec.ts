@@ -302,3 +302,37 @@ test('weather layer draws stand-in tiles while a new zoom level loads', async ({
   await expect.poll(async () => (await weatherDebug())?.fallback, { timeout: 10_000 }).toBe(0)
   expect((await weatherDebug())?.drawn).toBeGreaterThan(0)
 })
+
+test('zooming out two levels draws cached grandchildren', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Only z5 ever loads, so after 5 → 3 the nearest cached tiles are two levels down.
+  await page.route(/\/tiles\/gfs\/.*\/data\/[34]\/\d+\/\d+\.png/, (route) => route.abort())
+
+  const weatherDebug = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return debugState?.weather as { drawn: number; fallback: number } | undefined
+  })
+
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+
+  const canvas = page.locator('.maplibregl-canvas')
+  await canvas.focus()
+  await page.keyboard.press('Equal')
+  await page.waitForTimeout(700)
+  await page.keyboard.press('Equal')
+  await expect.poll(async () => {
+    const state = await weatherDebug()
+    return state != null && state.drawn > 0 && state.fallback === 0
+  }, { timeout: 15_000 }).toBe(true)
+
+  await page.keyboard.press('Minus')
+  await page.waitForTimeout(700)
+  await page.keyboard.press('Minus')
+  await page.waitForTimeout(1_500)
+
+  const atZoom3 = await weatherDebug()
+  expect(atZoom3?.drawn).toBeGreaterThan(0)
+  expect(atZoom3?.fallback).toBe(atZoom3?.drawn)
+})

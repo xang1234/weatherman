@@ -371,21 +371,30 @@ export class WeatherGLLayer implements CustomLayerInterface {
         continue
       }
 
-      if (coord.z >= MAX_DATA_TILE_ZOOM) continue
-      for (let i = 0; i < 4; i++) {
-        const cz = coord.z + 1
-        const cx = coord.x * 2 + (i & 1)
-        const cy = coord.y * 2 + (i >> 1)
-        const texT0 = tm.getTexture(cz, cx, cy)
-        const texV = isVector ? tmV?.getTexture(cz, cx, cy) ?? null : null
-        if (!texT0 || (isVector && !texV)) continue
-        tilesToDraw.push({
-          z: cz, x: cx, y: cy, wrap: coord.wrap,
-          uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
-          texT0, texV, texT1: null, texVT1: null,
-        })
-        fallbackDraws++
+      // Each quadrant is covered by its loaded child, or failing that by that
+      // child's own descendants — a zoom-out can skip levels, leaving only
+      // grandchildren cached.
+      const pushDescendants = (z: number, x: number, y: number) => {
+        if (z >= MAX_DATA_TILE_ZOOM) return
+        for (let i = 0; i < 4; i++) {
+          const cz = z + 1
+          const cx = x * 2 + (i & 1)
+          const cy = y * 2 + (i >> 1)
+          const texT0 = tm.getTexture(cz, cx, cy)
+          const texV = isVector ? tmV?.getTexture(cz, cx, cy) ?? null : null
+          if (!texT0 || (isVector && !texV)) {
+            pushDescendants(cz, cx, cy)
+            continue
+          }
+          tilesToDraw.push({
+            z: cz, x: cx, y: cy, wrap: coord.wrap,
+            uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
+            texT0, texV, texT1: null, texVT1: null,
+          })
+          fallbackDraws++
+        }
       }
+      pushDescendants(coord.z, coord.x, coord.y)
     }
 
     this._debug.drawn = tilesToDraw.length
