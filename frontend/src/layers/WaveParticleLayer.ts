@@ -31,6 +31,7 @@ import {
   PanVelocityTracker,
   computeVisibleTiles,
   computePanPrefetchTiles,
+  dataTileZoom,
   type TileCoord,
   type TileFormat,
 } from './TileManager'
@@ -275,7 +276,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
       }
     }
 
-    const zoom = Math.max(0, Math.min(8, Math.floor(this._map.getZoom())))
+    const zoom = dataTileZoom(this._map.getZoom())
     const mapBounds = this._map.getBounds()
     const visibleCoords = computeVisibleTiles({
       west: mapBounds.getWest(),

@@ -92,6 +92,43 @@ float decodeWind(vec4 texel) {
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
+// Bilinear sample of an atlas texture. Atlases are GL_NEAREST (PNG tiles pack
+// 16 bits across two channels, so hardware filtering would blend encoded
+// bytes): fetch the 4 texels, decode, then interpolate. Data tiles stop at z5,
+// so above that one texel spans many screen pixels and nearest would be blocky.
+// Nodata where the nearest texel is nodata; nodata neighbours are skipped.
+float sampleAtlas(sampler2D tex, vec2 uv) {
+    ivec2 size = textureSize(tex, 0);
+    vec2 tc = uv * vec2(size) - 0.5;
+    ivec2 i0 = clamp(ivec2(floor(tc)), ivec2(0), size - 1);
+    ivec2 i1 = min(i0 + 1, size - 1);
+    vec2 f = clamp(tc - vec2(i0), 0.0, 1.0);
+
+    float vals[4] = float[4](
+        decodeWind(texelFetch(tex, i0, 0)),
+        decodeWind(texelFetch(tex, ivec2(i1.x, i0.y), 0)),
+        decodeWind(texelFetch(tex, ivec2(i0.x, i1.y), 0)),
+        decodeWind(texelFetch(tex, i1, 0))
+    );
+    if (isNodata(vals[int(step(0.5, f.x)) + 2 * int(step(0.5, f.y))])) return NODATA;
+
+    float weights[4] = float[4](
+        (1.0 - f.x) * (1.0 - f.y),
+        f.x * (1.0 - f.y),
+        (1.0 - f.x) * f.y,
+        f.x * f.y
+    );
+    float total = 0.0;
+    float totalWeight = 0.0;
+    for (int i = 0; i < 4; i++) {
+        if (!isNodata(vals[i])) {
+            total += vals[i] * weights[i];
+            totalWeight += weights[i];
+        }
+    }
+    return totalWeight > 0.0 ? total / totalWeight : NODATA;
+}
+
 // Sample wind vector at a mercator position using the tile atlas.
 // Converts mercator [0,1] → atlas UV by computing which tile the position
 // falls in, then mapping to the corresponding region within the packed atlas.
@@ -110,14 +147,14 @@ vec2 sampleWind(vec2 pos) {
     // Atlas UV: fractional position within the packed atlas texture
     vec2 atlasUV = tilePos / vec2(u_atlasCols, u_atlasRows);
 
-    float u0 = decodeWind(texture(u_windU, atlasUV));
-    float v0 = decodeWind(texture(u_windV, atlasUV));
+    float u0 = sampleAtlas(u_windU, atlasUV);
+    float v0 = sampleAtlas(u_windV, atlasUV);
 
     if (isNodata(u0) || isNodata(v0)) return vec2(0.0);
 
     if (u_temporalMix > 0.0) {
-        float u1 = decodeWind(texture(u_windUT1, atlasUV));
-        float v1 = decodeWind(texture(u_windVT1, atlasUV));
+        float u1 = sampleAtlas(u_windUT1, atlasUV);
+        float v1 = sampleAtlas(u_windVT1, atlasUV);
         // If T1 is nodata, use T0 only
         if (!isNodata(u1) && !isNodata(v1)) {
             u0 = mix(u0, u1, u_temporalMix);
