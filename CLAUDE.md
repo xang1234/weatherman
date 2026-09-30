@@ -27,6 +27,12 @@
 - **Package manager**: npm
 - **Path aliases**: `@/` maps to `frontend/src/` (configured in tsconfig + vite)
 
+## Running the app locally
+
+- `./scripts/dev.sh` starts TiTiler (:8080), the backend (:8000) and the Vite dev server with hot reload; Ctrl+C stops all three
+- First run fetches sample weather data into `.data/` (latest GFS cycle, hours 0/3/6, ~3 min, ~2 GB); later runs start in seconds
+- The frontend URL is whatever Vite prints (`http://127.0.0.1:5173` unless that port is taken)
+
 ## Testing
 
 - Backend: `uv run pytest` (pytest with coverage plugin available)

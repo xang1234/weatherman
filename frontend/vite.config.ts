@@ -26,6 +26,13 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      // Protomaps daily builds only send CORS headers to a few localhost
+      // origins; proxying keeps the basemap same-origin on any dev port.
+      '/basemap': {
+        target: 'https://build.protomaps.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/basemap/, ''),
+      },
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,

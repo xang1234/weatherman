@@ -16,9 +16,7 @@ Usage:
     uv run python scripts/run_pipeline.py --data-dir /tmp/wx-data
 
 After running, start the stack:
-    uv run python scripts/run_titiler.py              # TiTiler on :8080
-    WEATHERMAN_DATA_DIR=.data TITILER_COG_ROOT=.data uv run python -m weatherman
-    cd frontend && npx vite dev
+    ./scripts/dev.sh
 """
 
 from __future__ import annotations
@@ -170,6 +168,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=2,
         help="Max runs to keep per model (default: 2 = current + 1 previous).",
+    )
+    parser.add_argument(
+        "--tile-formats",
+        default="png,f16",
+        help=(
+            "Comma-separated data-tile formats to pre-generate (default: png,f16). "
+            "f16 is ~70%% of a run's disk use and only read when the frontend "
+            "sets VITE_USE_FLOAT16_TILES=true."
+        ),
     )
     return parser.parse_args()
 
@@ -335,6 +342,7 @@ def step_generate_data_tiles(
     layout: StorageLayout,
     generated_layers: set[str],
     max_zoom: int = MAX_DATA_TILE_ZOOM,
+    tile_formats: tuple[str, ...] = ("png", "f16"),
 ) -> int:
     """Pre-generate static data tiles for each layer/hour.
 
@@ -361,7 +369,7 @@ def step_generate_data_tiles(
             if not cog_path.exists():
                 continue
 
-            for tile_format in ("png", "f16"):
+            for tile_format in tile_formats:
                 count = 0
                 tiles = generate_all_data_tiles(
                     str(cog_path),
@@ -564,6 +572,9 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     forecast_hours = [int(h.strip()) for h in args.hours.split(",")]
+    tile_formats = tuple(f.strip() for f in args.tile_formats.split(","))
+    if unknown := set(tile_formats) - {"png", "f16"}:
+        sys.exit(f"--tile-formats: unknown format(s) {sorted(unknown)} (expected png, f16)")
 
     # Resolve run ID
     if args.run_id:
@@ -615,6 +626,7 @@ def main() -> None:
     step_generate_zarr(run_id, forecast_hours, grib2_dir, data_dir, layout)
     step_generate_data_tiles(
         run_id, forecast_hours, data_dir, store, layout, generated_layers,
+        tile_formats=tile_formats,
     )
     step_write_manifest(
         run_id, forecast_hours, store, layout, generated_layers,
@@ -636,15 +648,7 @@ def main() -> None:
     logger.info("  Catalog:  %s/%s", data_dir, layout.catalog_path)
     logger.info("")
     logger.info("To view weather on the map:")
-    logger.info("  1. uv run python scripts/run_titiler.py")
-    logger.info(
-        "  2. WEATHERMAN_DATA_DIR=%s TITILER_COG_ROOT=%s"
-        " uv run python -m weatherman",
-        data_dir,
-        data_dir,
-    )
-    logger.info("  3. cd frontend && npx vite dev")
-    logger.info("  4. Open http://localhost:5173 → select a weather layer")
+    logger.info("  WEATHERMAN_DATA_DIR=%s ./scripts/dev.sh", data_dir.resolve())
     logger.info("=" * 60)
 
 

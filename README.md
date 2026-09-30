@@ -43,18 +43,25 @@ For Neptune-backed AIS ingestion and live streaming, see [docs/ais-neptune.md](d
 
 ## Development
 
-**Backend**
+**Run the app locally (no Docker)**
 
 ```bash
-uv run pytest                         # run tests
-uv run python -m weatherman.main      # start API server
+(cd frontend && npm install)   # once
+./scripts/dev.sh
 ```
 
-**Frontend**
+`dev.sh` starts TiTiler, the backend and the Vite dev server (hot reload), then prints the frontend URL. On first run, when `.data/` has no weather data, it fetches a sample from NOAA: the latest GFS cycle, forecast hours 0, 3 and 6 (about 1 minute and 0.6 GB per hour). Later runs reuse it and start in a few seconds.
 
 ```bash
-cd frontend
-npm install
+SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh                           # more hours on first run
+uv run python scripts/run_pipeline.py --hours 0,3,6 --max-runs 1 \
+  --tile-formats png                                               # refresh to the newest cycle
+```
+
+**Tests**
+
+```bash
+uv run pytest                  # backend
 ```
 
 > **Note:** System Node is v14 (too old). Use the nvm-managed v22 by prefixing commands:
