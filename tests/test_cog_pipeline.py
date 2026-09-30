@@ -324,8 +324,32 @@ class TestGrib2ToCog:
             filled_at_boundary = np.isfinite(result[:, boundary_col]).sum()
             assert filled_at_boundary > 0, "Coastal fill did not extend into land"
 
+    def test_input_with_grib_style_crs_keeps_its_transform(self, tmp_path: Path):
+        """A GRIB's CRS is a sphere, not EPSG:4326 — its transform must survive.
+
+        GDAL georeferences the 0.25° grid as cell centres (-180.125…179.875).
+        Replacing that with -180…180 shifts every value half a cell east.
+        """
+        path = tmp_path / "sphere.tif"
+        width, height = 1440, 721
+        transform = from_bounds(-180.125, -90.125, 179.875, 90.125, width, height)
+        with rasterio.open(
+            path, "w", driver="GTiff", dtype="float32", count=1,
+            width=width, height=height,
+            crs="+proj=longlat +R=6371229 +no_defs", transform=transform,
+        ) as dst:
+            dst.write(np.zeros((height, width), dtype=np.float32), 1)
+
+        output = tmp_path / "out.tif"
+        grib2_to_cog(path, output)
+
+        with rasterio.open(output) as ds:
+            assert ds.crs.to_epsg() == 4326
+            assert tuple(ds.bounds) == pytest.approx((-180.125, -90.125, 179.875, 90.125))
+            assert ds.res == pytest.approx((0.25, 0.25))
+
     def test_input_without_crs_gets_gfs_transform(self, tmp_path: Path):
-        """GRIB2 files may lack CRS metadata — pipeline applies GFS transform."""
+        """Without any CRS the input is taken to be a global lat/lon point grid."""
         path = tmp_path / "no_crs.grib2"
         width, height = 72, 37
         data = np.zeros((height, width), dtype=np.float32)
@@ -347,12 +371,9 @@ class TestGrib2ToCog:
 
         with rasterio.open(output) as ds:
             assert ds.crs.to_epsg() == 4326
-            # Verify the transform covers the global extent
-            bounds = ds.bounds
-            assert bounds.left == pytest.approx(-180.0)
-            assert bounds.bottom == pytest.approx(-90.0)
-            assert bounds.right == pytest.approx(180.0)
-            assert bounds.top == pytest.approx(90.0)
+            # 72 x 37 points = a 5 degree grid from -180 and pole to pole, so
+            # the cells reach half a cell (2.5 degrees) beyond the points.
+            assert tuple(ds.bounds) == pytest.approx((-182.5, -92.5, 177.5, 92.5))
 
 
 # ---------------------------------------------------------------------------

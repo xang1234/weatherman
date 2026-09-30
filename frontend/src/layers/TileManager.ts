@@ -43,7 +43,7 @@ export interface TileCoord {
   z: number
   x: number  // canonical tile X [0, n-1] — used for fetching and cache lookup
   y: number
-  wrap: number  // world copy offset: 0 = primary, 1 = next copy east
+  wrap: number  // world copy to draw on: 0 = primary, 1 = next copy east, -1 = next copy west
 }
 
 export interface TileManagerOptions {
@@ -943,49 +943,43 @@ export function dataTileZoom(mapZoom: number): number {
   return Math.max(0, Math.min(MAX_DATA_TILE_ZOOM, Math.floor(mapZoom)))
 }
 
-function wrapLon(lng: number): number {
-  return ((lng + 180) % 360 + 360) % 360 - 180
-}
-
-function lngLatToTile(lng: number, lat: number, z: number): { x: number; y: number } {
+/** Tile row containing a latitude, clamped to the valid range. */
+function latToTileY(lat: number, z: number): number {
   const n = 2 ** z
-  const wrappedLng = wrapLon(lng)
-  const x = Math.floor(((wrappedLng + 180) / 360) * n)
   const latRad = (lat * Math.PI) / 180
   const merc = Math.log(Math.tan(Math.PI / 4 + latRad / 2))
   const y = Math.floor(((1 - merc / Math.PI) / 2) * n)
-  return {
-    x: Math.max(0, Math.min(n - 1, x)),
-    y: Math.max(0, Math.min(n - 1, y)),
-  }
+  return Math.max(0, Math.min(n - 1, y))
 }
 
 /**
  * Compute visible tile coordinates for a given map viewport and zoom level.
- * Handles antimeridian wrapping.
+ *
+ * MapLibre reports the viewport's longitudes unwrapped around the map centre:
+ * west can be below -180 and east above 180, and the span can exceed 360 when
+ * several copies of the world are on screen. Each tile column is therefore
+ * returned with the world copy (`wrap`) it has to be drawn on: -1 for the
+ * copy west of the primary world, 1 for the one east of it, and so on.
  */
 export function computeVisibleTiles(
   bounds: { west: number; north: number; east: number; south: number },
   z: number,
 ): TileCoord[] {
-  const northWest = lngLatToTile(bounds.west, bounds.north, z)
-  const southEast = lngLatToTile(bounds.east, bounds.south, z)
   const n = 2 ** z
-  const xs: { x: number; wrap: number }[] = []
-
-  if (northWest.x <= southEast.x) {
-    // Normal: no wrapping
-    for (let x = northWest.x; x <= southEast.x; x++) xs.push({ x, wrap: 0 })
-  } else {
-    // Antimeridian crossing: east hemisphere tiles are primary, west hemisphere tiles are wrap=1
-    for (let x = northWest.x; x < n; x++) xs.push({ x, wrap: 0 })
-    for (let x = 0; x <= southEast.x; x++) xs.push({ x, wrap: 1 })
-  }
+  const west = bounds.west
+  const east = bounds.east < west ? bounds.east + 360 : bounds.east
+  // Column index counted continuously across world copies (can be < 0 or >= n)
+  const firstColumn = Math.floor(((west + 180) / 360) * n)
+  const lastColumn = Math.floor(((east + 180) / 360) * n)
+  const yA = latToTileY(bounds.north, z)
+  const yB = latToTileY(bounds.south, z)
+  const yStart = Math.min(yA, yB)
+  const yEnd = Math.max(yA, yB)
 
   const tiles: TileCoord[] = []
-  const yStart = Math.min(northWest.y, southEast.y)
-  const yEnd = Math.max(northWest.y, southEast.y)
-  for (const { x, wrap } of xs) {
+  for (let column = firstColumn; column <= lastColumn; column++) {
+    const wrap = Math.floor(column / n)
+    const x = column - wrap * n
     for (let y = yStart; y <= yEnd; y++) {
       tiles.push({ z, x, y, wrap })
     }

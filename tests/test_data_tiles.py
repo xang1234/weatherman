@@ -171,6 +171,80 @@ class TestGenerateDataTile:
 # -- generate_all_data_tiles tests --
 
 
+def _global_point_grid_cog(path: str, field) -> None:
+    """Write a 1 degree global point grid (like GFS: first column at -180, rows on the poles)."""
+    lon = np.arange(-180.0, 180.0, 1.0)
+    lat = np.arange(90.0, -90.5, -1.0)
+    values = field(*np.meshgrid(lon, lat)).astype(np.float32)
+    transform = rasterio.transform.from_bounds(-180.5, -90.5, 179.5, 90.5, lon.size, lat.size)
+    with rasterio.open(
+        path, "w", driver="GTiff", height=lat.size, width=lon.size, count=1,
+        dtype="float32", crs="EPSG:4326", transform=transform,
+    ) as dst:
+        dst.write(values, 1)
+
+
+def _smooth_field(lon, lat):
+    """Smooth, and continuous across the antimeridian (period 360 degrees in lon)."""
+    return 20.0 * np.sin(np.radians(2 * lon + 30.0)) * np.cos(np.radians(lat))
+
+
+def _decode_tile(cog_path: str, z: int, x: int, y: int) -> np.ndarray:
+    rgba = np.array(Image.open(io.BytesIO(generate_data_tile(cog_path, z, x, y, -50.0, 50.0))))
+    values, mask = decode_rgba_to_float(rgba, -50.0, 50.0)
+    assert not mask.any()
+    return values
+
+
+class TestDataTileAccuracy:
+    def test_tile_values_match_the_source_grid(self, tmp_path: Path):
+        """Each tile pixel is the bilinear interpolation of the source grid there.
+
+        The field is noise, so anything that warps through a coarser
+        intermediate grid (and returns a blurred field) is far off.
+        """
+        rng = np.random.default_rng(7)
+        noise = rng.uniform(-30.0, 30.0, size=(181, 360)).astype(np.float32)
+        cog_path = str(tmp_path / "noise.tif")
+        _global_point_grid_cog(cog_path, lambda lon, lat: noise)
+
+        z, x, y = 3, 5, 2
+        values = _decode_tile(cog_path, z, x, y)
+
+        # Position of every tile pixel centre, as fractional (row, col) of the
+        # 1 degree grid whose point (0, 0) is at 90N, 180W.
+        west, south, east, north = tile_bounds_3857(z, x, y)
+        world = 20037508.342789244
+        mx = west + (np.arange(256) + 0.5) * (east - west) / 256
+        my = north - (np.arange(256) + 0.5) * (north - south) / 256
+        col = mx / world * 180.0 + 180.0
+        row = 90.0 - np.degrees(2 * np.arctan(np.exp(my / world * np.pi)) - np.pi / 2)
+        c0, r0 = np.floor(col).astype(int), np.floor(row).astype(int)
+        fc, fr = (col - c0)[None, :], (row - r0)[:, None]
+        at = lambda r, c: noise[r[:, None], (c % 360)[None, :]]
+        expected = (
+            (at(r0, c0) * (1 - fc) + at(r0, c0 + 1) * fc) * (1 - fr)
+            + (at(r0 + 1, c0) * (1 - fc) + at(r0 + 1, c0 + 1) * fc) * fr
+        )
+
+        # 16-bit encoding over a 100-unit range quantises to 0.0015.
+        assert np.abs(values - expected).max() < 0.01
+
+    def test_field_is_continuous_across_the_antimeridian(self, tmp_path: Path):
+        """The step between the tiles either side of ±180° is an ordinary one."""
+        cog_path = str(tmp_path / "field.tif")
+        _global_point_grid_cog(cog_path, _smooth_field)
+
+        z, y = 3, 3
+        last = _decode_tile(cog_path, z, 2**z - 1, y)   # ends at 180°E
+        first = _decode_tile(cog_path, z, 0, y)         # starts at 180°W
+
+        step_across = np.abs(last[:, -1] - first[:, 0]).max()
+        step_within = np.abs(last[:, -1] - last[:, -2]).max()
+        assert step_within > 0, "field must vary right up to the antimeridian"
+        assert step_across < 2 * step_within
+
+
 class TestGenerateAllDataTiles:
     def test_tile_count_z0_to_z2(self):
         """z0–z2 should yield 1 + 4 + 16 = 21 tiles."""
