@@ -56,6 +56,7 @@ export function ForecastControls({
       </button>
       <input
         type="range"
+        aria-label="Forecast hour"
         min={0}
         max={forecastHours.length - 1}
         step={1}

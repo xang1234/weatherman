@@ -17,7 +17,7 @@ import { useVoyageCorridor } from '@/hooks/useVoyageCorridor'
 import { useSSE } from '@/hooks/useSSE'
 import { DataAgeIndicator } from '@/components/DataAgeIndicator'
 import { ForecastControls } from '@/components/ForecastControls'
-import { LayerPanel } from '@/components/LayerPanel'
+import { LayerPanel, type OverlayId, type OverlayState } from '@/components/LayerPanel'
 import { ModelSelector, type ModelId } from '@/components/ModelSelector'
 import { VoyageDrawButton } from '@/components/VoyageDrawButton'
 import { VoyageWeatherPanel } from '@/components/VoyageWeatherPanel'
@@ -43,8 +43,14 @@ export function MapView() {
   const sse = useSSE()
   const latestAISDate = useLatestAISDate()
   const dataAge = useDataAge({ model, version: sse.weatherVersion })
-  const opacity = 0.9
+  const [opacity, setOpacity] = useState(0.9)
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
+  // Overlays drawn over the colour layer. `on: null` follows the colour layer
+  // (wind particles with wind speed, dashes with wave height) until toggled.
+  const [overlays, setOverlays] = useState<Record<OverlayId, OverlayState>>({
+    wind: { on: null, opacity: 0.6 },
+    waves: { on: null, opacity: 0.8 },
+  })
   const [selectedForecastHour, setSelectedForecastHour] = useState<number | null>(() =>
     forecastHourFromUrl([]),
   )
@@ -59,6 +65,10 @@ export function MapView() {
     activeLayerId && layers.some((l) => l.id === activeLayerId)
       ? activeLayerId
       : layers[0]?.id ?? null
+  const windOn = overlays.wind.on ?? resolvedLayerId === 'wind_speed'
+  const wavesOn = overlays.waves.on ?? resolvedLayerId === 'wave_height'
+  const updateOverlay = (id: OverlayId, change: Partial<OverlayState>) =>
+    setOverlays((current) => ({ ...current, [id]: { ...current[id], ...change } }))
   const forecastHours = manifest?.forecast_hours ?? EMPTY_FORECAST_HOURS
   const forecastHour = (
     selectedForecastHour != null && forecastHours.includes(selectedForecastHour)
@@ -208,11 +218,11 @@ export function MapView() {
   const windParticles = useWindParticles({
     map,
     isLoaded,
-    layer: resolvedLayerId ?? '',
+    enabled: windOn,
+    opacity: overlays.wind.opacity,
     model,
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
-    visible: resolvedLayerId === 'wind_speed',
     isPlaying,
   })
 
@@ -223,11 +233,11 @@ export function MapView() {
   const waveParticles = useWaveParticles({
     map,
     isLoaded,
-    layer: resolvedLayerId ?? '',
+    enabled: wavesOn,
+    opacity: overlays.waves.opacity,
     model,
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
-    visible: resolvedLayerId === 'wave_height',
     isPlaying,
   })
 
@@ -284,6 +294,13 @@ export function MapView() {
           layers={layers}
           activeLayerId={resolvedLayerId}
           onSelect={setActiveLayerId}
+          opacity={opacity}
+          onOpacityChange={setOpacity}
+          overlays={[
+            { id: 'wind', label: 'Wind particles', on: windOn, opacity: overlays.wind.opacity },
+            { id: 'waves', label: 'Wave dashes', on: wavesOn, opacity: overlays.waves.opacity },
+          ]}
+          onOverlayChange={updateOverlay}
         />
       )}
       <ForecastControls

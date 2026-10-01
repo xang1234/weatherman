@@ -6,7 +6,7 @@
  * is auto-adapted to the device GPU (16K-262K particles).
  * Particles are advected by the actual wind field and leave fading trails.
  *
- * Only active when the current weather layer is wind_speed.
+ * An overlay: drawn over whichever colour layer is selected, while enabled.
  */
 
 import { useEffect, useRef } from 'react'
@@ -18,13 +18,13 @@ import { COLOR_RAMPS } from '@/layers/color-ramps'
 export interface UseWindParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
   isLoaded: boolean
-  /** Current weather layer ID (particles only active for 'wind_speed'). */
-  layer: string
+  /** Whether the particles are shown. */
+  enabled: boolean
+  /** Particle opacity 0-1. */
+  opacity: number
   model: string
   runId: string | null
   forecastHour: number
-  /** Whether the weather overlay is visible. */
-  visible?: boolean
   /** When true, skip the config effect to avoid nuking tile caches during playback. */
   isPlaying?: boolean
 }
@@ -38,17 +38,17 @@ export interface WindParticleHandle {
 export function useWindParticles({
   map,
   isLoaded,
-  layer,
+  enabled,
+  opacity,
   model,
   runId,
   forecastHour,
-  visible = true,
   isPlaying = false,
 }: UseWindParticlesOptions): WindParticleHandle {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WindParticleLayer | null>(null)
-  const isWindLayer = layer === 'wind_speed'
-  const isActive = isWindLayer && visible
+  const configuredRunRef = useRef<string | null>(null)
+  const isActive = enabled
 
   // Create the particle layer once when the map is ready.
   useEffect(() => {
@@ -63,6 +63,7 @@ export function useWindParticles({
       tileFormat,
     })
     layerRef.current = particleLayer
+    configuredRunRef.current = null
 
     // Vector basemap: directly above the weather overlay (added first, same
     // insertion point) and below the fills, lines, labels and AIS — the
@@ -84,21 +85,28 @@ export function useWindParticles({
     const pl = layerRef.current
     if (!pl) return
     pl.setActive(isActive)
-    pl.setOpacity(isActive ? 0.6 : 0)
-  }, [isActive, isLoaded])
+    pl.setOpacity(isActive ? opacity : 0)
+  }, [isActive, opacity, isLoaded])
 
   // Update wind config when dataset changes or layer is (re)created.
-  // During playback, skip — the RAF loop drives temporal blending imperatively
-  // and calling setWindConfig would nuke the tile cache via TileManager.setLayer().
+  // During playback the RAF loop drives the hour imperatively and calling
+  // setWindConfig each step would nuke the tile cache via TileManager.setLayer(),
+  // so it only runs then if this run was never configured (enabled mid-play).
   useEffect(() => {
-    if (isPlaying) return
     const pl = layerRef.current
-    if (!pl || !runId || !isWindLayer) return
+    if (!enabled) {
+      // Re-enabling must configure again: the hour has moved on meanwhile.
+      configuredRunRef.current = null
+      return
+    }
+    if (!pl || !runId) return
+    if (isPlaying && configuredRunRef.current === runId) return
 
     const ramp = COLOR_RAMPS['wind_speed']
     const max = ramp?.valueMax ?? 50
     pl.setWindConfig(model, runId, forecastHour, -max, max)
-  }, [model, runId, forecastHour, isWindLayer, isLoaded, isPlaying])
+    configuredRunRef.current = runId
+  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying])
 
   // Return imperative handle for playback integration
   const handle: WindParticleHandle = {

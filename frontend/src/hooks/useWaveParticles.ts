@@ -6,7 +6,7 @@
  * direction-vector data tiles. This avoids the density-clumping artifact
  * from the previous long-lived tracer model.
  *
- * Only active when the current weather layer is wave_height.
+ * An overlay: drawn over whichever colour layer is selected, while enabled.
  */
 
 import { useEffect, useRef } from 'react'
@@ -17,13 +17,13 @@ import { particleInsertBeforeId } from './useWebGLWeatherLayer'
 export interface UseWaveParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
   isLoaded: boolean
-  /** Current weather layer ID (particles only active for 'wave_height'). */
-  layer: string
+  /** Whether the dashes are shown. */
+  enabled: boolean
+  /** Dash opacity 0-1. */
+  opacity: number
   model: string
   runId: string | null
   forecastHour: number
-  /** Whether the weather overlay is visible. */
-  visible?: boolean
   /** When true, skip the config effect to avoid nuking tile caches during playback. */
   isPlaying?: boolean
 }
@@ -37,17 +37,17 @@ export interface WaveParticleHandle {
 export function useWaveParticles({
   map,
   isLoaded,
-  layer,
+  enabled,
+  opacity,
   model,
   runId,
   forecastHour,
-  visible = true,
   isPlaying = false,
 }: UseWaveParticlesOptions): WaveParticleHandle {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WaveParticleLayer | null>(null)
-  const isWaveLayer = layer === 'wave_height'
-  const isActive = isWaveLayer && visible
+  const configuredRunRef = useRef<string | null>(null)
+  const isActive = enabled
 
   // Create the particle layer once when the map is ready.
   useEffect(() => {
@@ -61,6 +61,7 @@ export function useWaveParticles({
       tileFormat,
     })
     layerRef.current = particleLayer
+    configuredRunRef.current = null
 
     // Vector basemap: directly above the weather overlay (added first, same
     // insertion point) and below the fills, lines, labels and AIS — the
@@ -82,19 +83,26 @@ export function useWaveParticles({
     const pl = layerRef.current
     if (!pl) return
     pl.setActive(isActive)
-    pl.setOpacity(isActive ? 0.8 : 0)
-  }, [isActive, isLoaded])
+    pl.setOpacity(isActive ? opacity : 0)
+  }, [isActive, opacity, isLoaded])
 
   // Update wave config when dataset changes or layer is (re)created.
-  // During playback, skip — the RAF loop drives temporal blending imperatively
-  // and calling setWaveConfig would nuke the tile cache via TileManager.setLayer().
+  // During playback the RAF loop drives the hour imperatively and calling
+  // setWaveConfig each step would nuke the tile cache via TileManager.setLayer(),
+  // so it only runs then if this run was never configured (enabled mid-play).
   useEffect(() => {
-    if (isPlaying) return
     const pl = layerRef.current
-    if (!pl || !runId || !isWaveLayer) return
+    if (!enabled) {
+      // Re-enabling must configure again: the hour has moved on meanwhile.
+      configuredRunRef.current = null
+      return
+    }
+    if (!pl || !runId) return
+    if (isPlaying && configuredRunRef.current === runId) return
 
     pl.setWaveConfig(model, runId, forecastHour)
-  }, [model, runId, forecastHour, isWaveLayer, isLoaded, isPlaying])
+    configuredRunRef.current = runId
+  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying])
 
   // Return imperative handle for playback integration
   const handle: WaveParticleHandle = {

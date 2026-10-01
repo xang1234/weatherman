@@ -1,17 +1,39 @@
-import { useMemo } from 'react'
+import { useMemo, type CSSProperties } from 'react'
 import type { LayerConfig } from '@/types/manifest'
+
+export type OverlayId = 'wind' | 'waves'
+
+export interface OverlayState {
+  /** Shown or not; null follows the colour layer until the user toggles it. */
+  on: boolean | null
+  opacity: number
+}
 
 export interface LayerPanelProps {
   layers: LayerConfig[]
   activeLayerId: string | null
   onSelect: (layerId: string) => void
+  /** Opacity of the colour layer. */
+  opacity: number
+  onOpacityChange: (opacity: number) => void
+  /** Animated layers drawn over the colour layer, each toggled on its own. */
+  overlays: { id: OverlayId; label: string; on: boolean; opacity: number }[]
+  onOverlayChange: (id: OverlayId, change: Partial<OverlayState>) => void
 }
 
 function formatRange(min: number, max: number, unit: string): string {
   return `${min}–${max} ${unit}`
 }
 
-export function LayerPanel({ layers, activeLayerId, onSelect }: LayerPanelProps) {
+export function LayerPanel({
+  layers,
+  activeLayerId,
+  onSelect,
+  opacity,
+  onOpacityChange,
+  overlays,
+  onOverlayChange,
+}: LayerPanelProps) {
   if (layers.length === 0) return null
 
   const activeLayer = layers.find((l) => l.id === activeLayerId) ?? null
@@ -38,20 +60,7 @@ export function LayerPanel({ layers, activeLayerId, onSelect }: LayerPanelProps)
         userSelect: 'none',
       }}
     >
-      {/* Header */}
-      <div
-        style={{
-          padding: '2px 12px 6px',
-          fontSize: 11,
-          color: '#8b949e',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          borderBottom: '1px solid rgba(48, 54, 61, 0.6)',
-          marginBottom: 4,
-        }}
-      >
-        Layers
-      </div>
+      <div style={sectionHeaderStyle}>Layers</div>
 
       {/* Layer buttons */}
       {layers.map((layer) => {
@@ -85,10 +94,70 @@ export function LayerPanel({ layers, activeLayerId, onSelect }: LayerPanelProps)
         )
       })}
 
+      <OpacitySlider label="Opacity" value={opacity} onChange={onOpacityChange} />
+
       {/* Legend section */}
       {hasLegend && activeLayer && (
         <LegendSection layer={activeLayer} />
       )}
+
+      <div style={{ ...sectionHeaderStyle, marginTop: 8, borderTop: '1px solid rgba(48, 54, 61, 0.6)', paddingTop: 8 }}>
+        Overlays
+      </div>
+      {overlays.map((overlay) => (
+        <div key={overlay.id} style={{ padding: '2px 0' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={overlay.on}
+              onChange={(e) => onOverlayChange(overlay.id, { on: e.target.checked })}
+              style={{ accentColor: '#58a6ff', margin: 0 }}
+            />
+            {overlay.label}
+          </label>
+          {overlay.on && (
+            <OpacitySlider
+              label={`${overlay.label} opacity`}
+              value={overlay.opacity}
+              onChange={(value) => onOverlayChange(overlay.id, { opacity: value })}
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+const sectionHeaderStyle: CSSProperties = {
+  padding: '2px 12px 6px',
+  fontSize: 11,
+  color: '#8b949e',
+  textTransform: 'uppercase',
+  letterSpacing: '0.05em',
+  borderBottom: '1px solid rgba(48, 54, 61, 0.6)',
+  marginBottom: 4,
+}
+
+function OpacitySlider({ label, value, onChange }: {
+  label: string
+  value: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px', fontSize: 11, color: '#8b949e' }}>
+      <input
+        type="range"
+        aria-label={label}
+        min={0}
+        max={1}
+        step={0.05}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ flex: 1, minWidth: 0, accentColor: '#58a6ff' }}
+      />
+      <span style={{ width: 30, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+        {Math.round(value * 100)}%
+      </span>
     </div>
   )
 }

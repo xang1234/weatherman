@@ -741,6 +741,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
   /** Update opacity at runtime. */
   setOpacity(opacity: number): void {
     this._opacity = opacity
+    this._debug.opacity = opacity
     this._map?.triggerRepaint()
   }
 

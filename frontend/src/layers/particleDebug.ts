@@ -7,6 +7,10 @@ export interface ParticleDebugState {
   atlasClears: number
   atlasFlushes: number
   pendingDirtyTiles: number
+  /** Opacity last set on the layer. */
+  opacity?: number
+  /** Wind only: forecast hour of the current (T0) tiles. */
+  hour?: number
   /** Wind only: particles drawn in the last frame. */
   drawnParticles?: number
   /** Wave only: the last frame needed more grid cells than there are dash slots. */
@@ -21,6 +25,8 @@ export interface WeatherDebugState {
   fallback: number
   /** Forecast hour the current (T0) tiles are fetched for. */
   hour?: number
+  /** Opacity last set on the layer. */
+  opacity?: number
   /** Frames that redrew the tiles into the offscreen buffer. */
   tilePasses: number
   /** Frames that composited the buffer onto the map. */
