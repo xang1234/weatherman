@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { formatForecastDateTime, formatLatLon } from '@/utils/format'
+import { formatForecastDateTime, formatLatLon, formatWithUnit } from '@/utils/format'
 import type { WeatherInspectorState } from '@/hooks/useWeatherInspector'
 import type { CoverageParameter } from '@/types/edr'
 
@@ -138,8 +138,7 @@ function parameterLabel(variable: string, parameter?: CoverageParameter) {
 
 function formatValue(value: number | null | undefined, parameter?: CoverageParameter) {
   if (value == null) return 'N/A'
-  const unit = parameter?.unit?.symbol
-  return `${value.toFixed(2)}${unit ? ` ${unit}` : ''}`
+  return formatWithUnit(value, parameter?.unit?.symbol, 2)
 }
 
 function MiniChart({

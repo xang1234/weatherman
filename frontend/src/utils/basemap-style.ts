@@ -23,6 +23,9 @@ const USE_PMTILES =
   RAW_BASEMAP_URL.endsWith('.pmtiles') ||
   RAW_BASEMAP_URL.startsWith('pmtiles://')
 
+/** Fonts for map text: basemap labels, and isobar labels on either basemap. */
+const GLYPHS = 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf'
+
 /**
  * Raster basemap opacity when weather overlay is active. Higher than the fill
  * dim because raster tiles carry labels baked-in; over-dimming makes labels
@@ -50,8 +53,7 @@ const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
 export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
   ? {
       version: 8,
-      glyphs:
-        'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf',
+      glyphs: GLYPHS,
       sources: {
         protomaps: {
           type: 'vector',
@@ -147,6 +149,7 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
   : {
       // Raster tile fallback for local development
       version: 8,
+      glyphs: GLYPHS,
       sources: {
         carto: {
           type: 'raster',

@@ -305,6 +305,37 @@ test('an overlay re-enabled during playback picks up the current hour', async ({
   release['6']()
 })
 
+test('isobars overlay loads the shown hour and prefetches the next', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    requested.push(new URL(route.request().url()).pathname.split('/').pop()!)
+    return route.fulfill({
+      json: {
+        type: 'FeatureCollection',
+        features: [
+          { type: 'Feature', geometry: { type: 'LineString', coordinates: [[-40, 30], [-20, 35]] }, properties: { kind: 'isobar', hpa: 1012 } },
+          { type: 'Feature', geometry: { type: 'Point', coordinates: [-30, 40] }, properties: { kind: 'low', hpa: 996 } },
+        ],
+      },
+    })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+
+  // Off by default: nothing fetched (#23).
+  await expect(isobars).not.toBeChecked()
+  await page.waitForTimeout(500)
+  expect(requested).toEqual([])
+
+  await isobars.check()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '3'])
+
+  await page.locator('button').filter({ hasText: '❯' }).click()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '3', '6'])
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

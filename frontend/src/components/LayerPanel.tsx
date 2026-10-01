@@ -1,7 +1,7 @@
 import { useMemo, type CSSProperties } from 'react'
 import type { LayerConfig } from '@/types/manifest'
 
-export type OverlayId = 'wind' | 'waves'
+export type OverlayId = 'wind' | 'waves' | 'isobars'
 
 export interface OverlayState {
   /** Shown or not; null follows the colour layer until the user toggles it. */
