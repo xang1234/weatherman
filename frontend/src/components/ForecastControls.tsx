@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react'
+import { formatForecastDateTime } from '@/utils/format'
 
 export interface ForecastControlsProps {
   cycleTime: string | null
@@ -64,28 +65,6 @@ export function ForecastControls({
       />
     </div>
   )
-}
-
-const FORECAST_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
-  weekday: 'short',
-  month: 'short',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-  timeZone: 'UTC',
-})
-
-function formatForecastDateTime(
-  cycleTime: string | null,
-  forecastHour: number,
-): string {
-  const cycleDate = cycleTime ? new Date(cycleTime) : null
-  if (!cycleDate || Number.isNaN(cycleDate.getTime())) {
-    return `F${forecastHour.toString().padStart(3, '0')}`
-  }
-  const validDate = new Date(cycleDate.getTime() + forecastHour * 60 * 60 * 1000)
-  return FORECAST_DATE_FORMATTER.format(validDate)
 }
 
 const barStyle: CSSProperties = {

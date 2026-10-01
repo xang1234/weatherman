@@ -1,13 +1,16 @@
 import type { CSSProperties } from 'react'
+import { formatForecastDateTime, formatLatLon } from '@/utils/format'
 import type { WeatherInspectorState } from '@/hooks/useWeatherInspector'
 import type { CoverageParameter } from '@/types/edr'
 
 export interface WeatherInspectorProps {
   inspector: WeatherInspectorState
   forecastHour: number | null
+  /** Run cycle time, for labelling the hour the way the forecast bar does. */
+  cycleTime: string | null
 }
 
-export function WeatherInspector({ inspector, forecastHour }: WeatherInspectorProps) {
+export function WeatherInspector({ inspector, forecastHour, cycleTime }: WeatherInspectorProps) {
   if (!inspector.point) return null
 
   const times = inspector.data?.domain.axes.t.values ?? []
@@ -46,7 +49,7 @@ export function WeatherInspector({ inspector, forecastHour }: WeatherInspectorPr
             Weather Inspector
           </div>
           <div style={{ marginTop: 4, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-            {inspector.point.lat.toFixed(4)}, {inspector.point.lon.toFixed(4)}
+            {formatLatLon(inspector.point.lat, inspector.point.lon, 4)}
           </div>
         </div>
         <button type="button" onClick={inspector.clear} style={closeButtonStyle}>
@@ -105,7 +108,7 @@ export function WeatherInspector({ inspector, forecastHour }: WeatherInspectorPr
           {hourIndex >= 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 6 }}>
-                Current values at F{forecastHour?.toString().padStart(3, '0')}
+                Current values at {forecastHour != null && formatForecastDateTime(cycleTime, forecastHour)}
               </div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <tbody>

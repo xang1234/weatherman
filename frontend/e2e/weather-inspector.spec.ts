@@ -20,7 +20,7 @@ test('clicking the map opens weather inspector with EDR data', async ({ page }) 
   await expect(page.getByText('Weather Inspector')).toBeVisible({ timeout: 5_000 })
 
   // Should show coordinates
-  const coordText = page.locator('div').filter({ hasText: /^-?\d+\.\d+, -?\d+\.\d+$/ })
+  const coordText = page.locator('div').filter({ hasText: /^\d+\.\d{4}°[NS], \d+\.\d{4}°[EW]$/ })
   await expect(coordText.first()).toBeVisible()
 })
 
@@ -40,8 +40,8 @@ test('inspector shows variable tabs and values table', async ({ page }) => {
   await expect(inspector.getByRole('button', { name: 'Temperature (2m)', exact: true })).toBeVisible()
   await expect(inspector.getByRole('button', { name: 'Wind Speed (10m)', exact: true })).toBeVisible()
 
-  // Should show "Current values at F000" section with table
-  await expect(page.getByText('Current values at F000')).toBeVisible()
+  // Current values are labelled with the valid time, like the forecast bar
+  await expect(page.getByText(`Current values at ${forecastLabel(0)}`)).toBeVisible()
 
   // Table should contain formatted values with units
   await expect(page.getByText('280.50 K')).toBeVisible()
@@ -78,4 +78,18 @@ test('close button dismisses inspector', async ({ page }) => {
 
   // Inspector should disappear
   await expect(page.getByText('Weather Inspector')).not.toBeVisible()
+})
+
+test('hover readout shows hemispheres and the valid time', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
+
+  const canvas = page.locator('canvas.maplibregl-canvas')
+  await canvas.hover({ position: { x: 400, y: 300 } })
+  await canvas.hover({ position: { x: 410, y: 305 } })
+
+  const hud = page.getByTestId('weather-hover-hud')
+  await expect(hud).toBeVisible()
+  await expect(hud).toContainText(/\d+\.\d{2}°[NS], \d+\.\d{2}°[EW]/)
+  await expect(hud).toContainText(forecastLabel(0))
 })
