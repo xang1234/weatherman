@@ -194,8 +194,9 @@ test('the weather tile pass does not rerun on a steady view while particles anim
 test('weather is drawn while the basemap is still loading', async ({ page }) => {
   await mockPerformanceRoutes(page)
   // Basemap tiles that never arrive used to hold the whole app behind
-  // "Loading map..." (#51).
-  await page.route(/basemaps\.cartocdn\.com|\/basemap\//, () => new Promise(() => {}))
+  // "Loading map..." (#51). Covers each basemap the build can use: the default
+  // Protomaps PMTiles, the dev proxy to it, and the CARTO raster fallback.
+  await page.route(/build\.protomaps\.com|\/basemap\/|basemaps\.cartocdn\.com/, () => new Promise(() => {}))
   await page.goto('/')
 
   await page.waitForFunction(() => {
