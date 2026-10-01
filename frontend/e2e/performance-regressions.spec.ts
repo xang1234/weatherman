@@ -352,6 +352,36 @@ test('isobars on the last hour prefetch the first, where playback wraps to', asy
   await expect.poll(() => [...requested].sort()).toEqual(['0', '6'])
 })
 
+test('isobars are cleared while a jumped-to hour loads', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  let releaseHour6!: () => void
+  const hour6Released = new Promise<void>((resolve) => { releaseHour6 = resolve })
+  const line = (hpa: number) => ({
+    type: 'Feature', geometry: { type: 'LineString', coordinates: [[-40, 30], [-20, 35]] }, properties: { kind: 'isobar', hpa },
+  })
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, async (route) => {
+    const hour = new URL(route.request().url()).pathname.split('/').pop()!
+    if (hour === '6') await hour6Released
+    // Hour 0 has two isobars, the others one, so the counts tell them apart.
+    return route.fulfill({ json: { type: 'FeatureCollection', features: hour === '0' ? [line(1012), line(1016)] : [line(1008)] } })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+  const shown = () => page.evaluate(() =>
+    (window as unknown as { __weathermanDebug?: { isobars?: { features: number } } }).__weathermanDebug?.isobars?.features)
+
+  await isobars.check()
+  await expect.poll(shown).toBe(2)
+
+  // Jump past the prefetched hour 3 to hour 6, which is held back: hour 0's
+  // isobars must not stay up under hour 6's label.
+  await page.locator('input[aria-label="Forecast hour"]').fill('2')
+  await expect.poll(shown).toBe(0)
+  releaseHour6()
+  await expect.poll(shown).toBe(1)
+})
+
 test('isobars retry an hour that failed with a server error', async ({ page }) => {
   await mockPerformanceRoutes(page)
   const requested: string[] = []

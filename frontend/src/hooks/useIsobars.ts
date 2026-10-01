@@ -9,6 +9,7 @@
 
 import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
+import { ensureIsobarsDebugState } from '@/layers/particleDebug'
 
 const SOURCE_ID = 'isobars'
 const LINE_LAYER = 'isobars-line'
@@ -41,7 +42,8 @@ export function useIsobars({
   forecastHours,
 }: UseIsobarsOptions): void {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
-  const cacheRef = useRef(new Map<string, Promise<GeoJSON.FeatureCollection>>())
+  // Per hour: the request, and its result once it has arrived.
+  const cacheRef = useRef(new Map<string, { promise: Promise<GeoJSON.FeatureCollection>; data?: GeoJSON.FeatureCollection }>())
 
   // Source and layers, once per map.
   useEffect(() => {
@@ -124,18 +126,22 @@ export function useIsobars({
       const key = `${model}|${runId}|${hour}`
       let entry = cache.get(key)
       if (!entry) {
-        entry = fetch(`${apiBase}/api/contours/${model}/${runId}/prmsl/${hour}`)
-          // A 404 (no pressure field in this run) stays cached; any other
-          // failure is dropped so the hour is fetched again next time.
-          .then((res) => {
-            if (res.ok) return res.json() as Promise<GeoJSON.FeatureCollection>
-            if (res.status === 404) return EMPTY
-            throw new Error(`HTTP ${res.status}`)
-          })
-          .catch(() => {
-            cache.delete(key)
-            return EMPTY
-          })
+        const created: { promise: Promise<GeoJSON.FeatureCollection>; data?: GeoJSON.FeatureCollection } = {
+          promise: fetch(`${apiBase}/api/contours/${model}/${runId}/prmsl/${hour}`)
+            // A 404 (no pressure field in this run) stays cached; any other
+            // failure is dropped so the hour is fetched again next time.
+            .then((res) => {
+              if (res.ok) return res.json() as Promise<GeoJSON.FeatureCollection>
+              if (res.status === 404) return EMPTY
+              throw new Error(`HTTP ${res.status}`)
+            })
+            .then((data) => (created.data = data))
+            .catch(() => {
+              cache.delete(key)
+              return EMPTY
+            }),
+        }
+        entry = created
         cache.set(key, entry)
         // ponytail: FIFO eviction; an LRU only matters with far more hours.
         if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value!)
@@ -144,9 +150,20 @@ export function useIsobars({
     }
 
     let current = true
-    load(forecastHour).then((data) => {
-      if (current) (m.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(data)
-    })
+    const source = m.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined
+    const show = (data: GeoJSON.FeatureCollection) => {
+      source?.setData(data)
+      ensureIsobarsDebugState().features = data.features.length
+    }
+    const entry = load(forecastHour)
+    if (entry.data) {
+      show(entry.data)
+    } else {
+      // Not loaded yet: clear rather than leave another hour's (or run's)
+      // isobars under this hour's label while it loads.
+      show(EMPTY)
+      entry.promise.then((data) => { if (current) show(data) })
+    }
     // Wraps like playback does: from the last hour it goes back to the first.
     const next = forecastHours[(forecastHours.indexOf(forecastHour) + 1) % forecastHours.length]
     if (next != null && next !== forecastHour) void load(next)

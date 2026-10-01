@@ -10,7 +10,7 @@ import zarr
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from weatherman.edr.contours import _isobars_json, router
+from weatherman.edr.contours import _accepts_gzip, _isobars_json, router
 from weatherman.edr.position import init_edr_service, shutdown_edr_service
 from weatherman.processing.contours import INTERVAL_HPA, isobars_geojson
 from weatherman.storage.catalog import RunCatalog
@@ -118,3 +118,18 @@ def test_endpoint_gzips_when_accepted(client: TestClient):
 def test_endpoint_404s(client: TestClient):
     assert client.get("/api/contours/gfs/20260306T00Z/prmsl/9").status_code == 404
     assert client.get("/api/contours/gfs/20991231T00Z/prmsl/0").status_code == 404
+
+
+@pytest.mark.parametrize(("header", "expected"), [
+    ("gzip", True),
+    ("gzip, deflate, br", True),
+    ("br;q=1.0, gzip;q=0.8", True),
+    ("*", True),
+    (None, False),
+    ("identity", False),
+    ("gzip;q=0", False),
+    ("*;q=1, gzip;q=0", False),
+    ("gzip;q=0.0, *", False),
+])
+def test_accepts_gzip(header, expected):
+    assert _accepts_gzip(header) is expected

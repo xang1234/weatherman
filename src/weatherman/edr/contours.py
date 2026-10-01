@@ -44,6 +44,24 @@ def _isobars_json(model: str, run_id: str, forecast_hour: int) -> bytes:
     return json.dumps(geojson, separators=(",", ":")).encode()
 
 
+def _accepts_gzip(accept_encoding: str | None) -> bool:
+    """Whether Accept-Encoding allows gzip: listed (or *) with q > 0."""
+    quality: dict[str, float] = {}
+    for part in (accept_encoding or "").split(","):
+        name, *params = (p.strip() for p in part.split(";"))
+        q = 1.0
+        for param in params:
+            key, _, value = param.partition("=")
+            if key.strip().lower() == "q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = 0.0
+        quality[name.lower()] = q
+    # An explicit gzip entry wins over the wildcard.
+    return quality.get("gzip", quality.get("*", 0.0)) > 0
+
+
 @router.get(
     "/{model}/{run_id}/prmsl/{forecast_hour}",
     summary="Isobars and H/L centres for one forecast hour (GeoJSON)",
@@ -65,7 +83,7 @@ def isobars(
     # A literal run never changes; "latest" moves on with each new run.
     cache_control = _LATEST_CACHE_CONTROL if is_latest else _IMMUTABLE_CACHE_CONTROL
     headers = {"Cache-Control": cache_control, "Vary": "Accept-Encoding"}
-    if accept_encoding and "gzip" in accept_encoding:
+    if _accepts_gzip(accept_encoding):
         return Response(gzip.compress(body), media_type="application/geo+json",
                         headers={**headers, "Content-Encoding": "gzip"})
     return Response(body, media_type="application/geo+json", headers=headers)
