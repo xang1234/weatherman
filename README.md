@@ -15,7 +15,7 @@ GFS and GEFS forecasts, rendered on the GPU over a vector basemap, with the ship
 - **Voyage corridor** — draw a route and get a distance × forecast-hour profile of waves, wind or temperature along it.
 - **AIS vessels** — vessel positions as vector tiles, with a popup for MMSI, type, speed, destination and recent track.
 - **Point readout** — hover anywhere to read every variable at that position and time.
-- **Live updates** — new forecast runs and AIS refreshes are pushed to the browser over SSE, with no polling.
+- **Live updates** — new forecast runs and AIS refreshes are pushed to the browser over SSE, so the map refreshes as soon as data lands.
 
 <table>
   <tr>
@@ -30,7 +30,7 @@ GFS and GEFS forecasts, rendered on the GPU over a vector basemap, with the ship
 
 ## Quickstart
 
-**Local (no Docker):** needs [uv](https://docs.astral.sh/uv/) and Node ≥ 20.
+**Local (no Docker):** needs [uv](https://docs.astral.sh/uv/) and Node 20.19+ or 22.12+.
 
 ```bash
 (cd frontend && npm install)   # once
