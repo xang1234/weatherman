@@ -4,8 +4,8 @@
 
 GFS and GEFS forecasts, rendered on the GPU over a vector basemap, with the ships underneath.
 
-![Wind particles flowing over the North Atlantic](docs/wind.gif)
-*GPU wind particles over the wind-speed field, scrubbing through forecast hours*
+![Wind particles over the North Atlantic, with a cyclone south of Iceland and a tropical cyclone off Mexico](docs/wind.gif)
+*GPU wind particles over 10 m wind speed: a North Atlantic storm and a Pacific tropical cyclone (GFS, 30 Sep 2026)*
 
 ## Features
 
