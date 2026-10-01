@@ -14,7 +14,9 @@ from weatherman.processing.zarr_writer import grib2_dir_to_zarr
 from weatherman.storage.zarr_schema import GridResolution
 
 
-def _write_fake_grib2(path: Path, width: int, height: int, value: float) -> None:
+def _write_fake_grib2(
+    path: Path, width: int, height: int, value: float, grib_unit: str | None = None,
+) -> None:
     """Write a minimal GeoTIFF that mimics a GFS GRIB2 file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     transform = from_bounds(0, -90, 360, 90, width, height)
@@ -31,6 +33,8 @@ def _write_fake_grib2(path: Path, width: int, height: int, value: float) -> None
         transform=transform,
     ) as dst:
         dst.write(data, 1)
+        if grib_unit:
+            dst.update_tags(1, GRIB_UNIT=grib_unit)
 
 
 @pytest.fixture
@@ -105,6 +109,18 @@ def test_zarr_variable_metadata(grib2_dir: Path, tmp_path: Path) -> None:
     root = zarr.open_group(str(zarr_path), mode="r")
     assert root["tmp_2m"].attrs["long_name"] == "Temperature at 2m above ground"
     assert root["tmp_2m"].attrs["units"] == "K"
+
+
+def test_units_follow_gdal_celsius_conversion(tmp_path: Path) -> None:
+    """GDAL reads GRIB temperature as Celsius; the store must say so (#65)."""
+    grid = GridResolution.GFS_025
+    base = tmp_path / "grib2"
+    _write_fake_grib2(base / "tmp_2m" / "f000.grib2", grid.lon_count, grid.lat_count, 25.0, "[C]")
+    zarr_path = tmp_path / "output.zarr"
+    grib2_dir_to_zarr(base, zarr_path, [0])
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    assert root["tmp_2m"].attrs["units"] == "°C"
 
 
 def test_missing_variable_skipped(tmp_path: Path) -> None:

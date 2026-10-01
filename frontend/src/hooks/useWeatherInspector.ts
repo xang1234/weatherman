@@ -94,7 +94,8 @@ export function useWeatherInspector({
         : []
       if (vesselFeatures.length > 0) return
 
-      setPoint({ lon: e.lngLat.lng, lat: e.lngLat.lat })
+      const lngLat = e.lngLat.wrap()
+      setPoint({ lon: lngLat.lng, lat: lngLat.lat })
     }
 
     activeMap.on('click', onClick)

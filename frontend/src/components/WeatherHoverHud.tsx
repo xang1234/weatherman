@@ -1,10 +1,13 @@
 import type { CSSProperties } from 'react'
 import type { HoverProbeState } from '@/hooks/useHoverProbe'
 import type { CoverageParameter } from '@/types/edr'
+import { formatForecastDateTime, formatLatLon } from '@/utils/format'
 
 export interface WeatherHoverHudProps {
   probe: HoverProbeState
   forecastHour: number | null
+  /** Run cycle time, for labelling the hour the way the forecast bar does. */
+  cycleTime: string | null
   /** Preferred variable to show first + emphasized (the currently active map layer). */
   activeVariable: string | null
 }
@@ -18,6 +21,7 @@ export interface WeatherHoverHudProps {
 export function WeatherHoverHud({
   probe,
   forecastHour,
+  cycleTime,
   activeVariable,
 }: WeatherHoverHudProps) {
   const { point, data, loading } = probe
@@ -35,9 +39,9 @@ export function WeatherHoverHud({
   return (
     <div style={style} data-testid="weather-hover-hud">
       <div style={coordStyle}>
-        {point.lngLat.lat.toFixed(2)}°, {point.lngLat.lng.toFixed(2)}°
+        {formatLatLon(point.lngLat.lat, point.lngLat.lng)}
         {forecastHour != null && (
-          <span style={hourStyle}>F{forecastHour.toString().padStart(3, '0')}</span>
+          <span style={hourStyle}>{formatForecastDateTime(cycleTime, forecastHour)}</span>
         )}
       </div>
 

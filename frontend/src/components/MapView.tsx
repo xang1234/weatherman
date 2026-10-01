@@ -262,10 +262,11 @@ export function MapView() {
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       <ModelSelector model={model} onChange={setModel} />
       {dataAge && <DataAgeIndicator state={dataAge} />}
-      <WeatherInspector inspector={inspector} forecastHour={forecastHour} />
+      <WeatherInspector inspector={inspector} forecastHour={forecastHour} cycleTime={manifest?.cycle_time ?? null} />
       <WeatherHoverHud
         probe={hoverProbe}
         forecastHour={forecastHour}
+        cycleTime={manifest?.cycle_time ?? null}
         activeVariable={resolvedLayerId}
       />
       <VoyageDrawButton route={voyageRoute} />

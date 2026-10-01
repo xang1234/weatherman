@@ -129,14 +129,18 @@ export function useHoverProbe({
       const currentModel = modelRef.current
       if (!currentRunId) return
 
+      // On a world copy east or west of the main one MapLibre reports
+      // longitudes past ±180; wrap so labels and cache keys agree.
+      const lngLat = e.lngLat.wrap()
+
       // Update cursor-following bubble immediately.
       const probePoint: HoverProbePoint = {
-        lngLat: { lng: e.lngLat.lng, lat: e.lngLat.lat },
+        lngLat: { lng: lngLat.lng, lat: lngLat.lat },
         screen: { x: e.point.x, y: e.point.y },
       }
       setPoint(probePoint)
 
-      const key = cacheKey(e.lngLat.lat, e.lngLat.lng, currentRunId)
+      const key = cacheKey(lngLat.lat, lngLat.lng, currentRunId)
       const cached = cacheRef.current.get(key)
       if (cached) {
         // Refresh LRU ordering.
@@ -158,8 +162,8 @@ export function useHoverProbe({
         currentController = controller
         const requestId = ++requestIdRef.current
 
-        const qLat = quantize(e.lngLat.lat)
-        const qLon = quantize(e.lngLat.lng)
+        const qLat = quantize(lngLat.lat)
+        const qLon = quantize(lngLat.lng)
         const params = new URLSearchParams({
           coords: `POINT(${qLon.toFixed(3)} ${qLat.toFixed(3)})`,
         })
