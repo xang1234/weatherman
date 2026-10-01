@@ -104,6 +104,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _waveDirUT1Manager: TileManager | null = null
   private _waveDirVT1Manager: TileManager | null = null
   private _waveConfigured = false
+  /** Data tiles of the last drawn frame. */
+  private _lastVisible: TileCoord[] = []
 
   private _model = ''
   private _runId = ''
@@ -361,7 +363,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[stateRead])
     gl.uniform1i(this._uUpdateStateTex, 0)
 
-    const hasT1 = this._forecastHourT1 >= 0 && this._temporalMix > 0
+    // Blend only once all of T1 is in, not tile by tile (#36).
+    const hasT1 = this._forecastHourT1 >= 0 && this._temporalMix > 0 && this._t1Covers(false)
 
     gl.activeTexture(gl.TEXTURE1)
     gl.bindTexture(gl.TEXTURE_2D, atlas ? this._atlasWaveH : null)
@@ -538,18 +541,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
 
   advanceForecastHour(newHour: number): void {
     if (
-      this._waveHeightT1Manager &&
-      this._waveHeightT1Manager.cacheSize > 0 &&
-      this._waveHeightT1Manager.currentForecastHour === newHour &&
-      this._wavePeriodT1Manager &&
-      this._wavePeriodT1Manager.cacheSize > 0 &&
-      this._wavePeriodT1Manager.currentForecastHour === newHour &&
-      this._waveDirUT1Manager &&
-      this._waveDirUT1Manager.cacheSize > 0 &&
-      this._waveDirUT1Manager.currentForecastHour === newHour &&
-      this._waveDirVT1Manager &&
-      this._waveDirVT1Manager.cacheSize > 0 &&
-      this._waveDirVT1Manager.currentForecastHour === newHour
+      this._t1Managers().every((m) => m?.currentForecastHour === newHour) &&
+      this._t1Covers(true)
     ) {
       ;[this._waveHeightManager, this._waveHeightT1Manager] = [this._waveHeightT1Manager, this._waveHeightManager]
       ;[this._wavePeriodManager, this._wavePeriodT1Manager] = [this._wavePeriodT1Manager, this._wavePeriodManager]
@@ -566,13 +559,21 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._map?.triggerRepaint()
   }
 
+  /**
+   * Whether the next hour has finished loading for the viewport (failed
+   * tiles count as finished). Always true while the layer is not drawn.
+   */
   isT1Ready(): boolean {
-    return (
-      (this._waveHeightT1Manager?.cacheSize ?? 0) > 0 &&
-      (this._wavePeriodT1Manager?.cacheSize ?? 0) > 0 &&
-      (this._waveDirUT1Manager?.cacheSize ?? 0) > 0 &&
-      (this._waveDirVT1Manager?.cacheSize ?? 0) > 0
-    )
+    return !this._active || this._forecastHourT1 < 0 || this._t1Covers(true)
+  }
+
+  private _t1Managers(): (TileManager | null)[] {
+    return [this._waveHeightT1Manager, this._wavePeriodT1Manager, this._waveDirUT1Manager, this._waveDirVT1Manager]
+  }
+
+  /** Whether T1 has every tile of the last drawn viewport loaded (or failed, with `orFailed`). */
+  private _t1Covers(orFailed: boolean): boolean {
+    return this._t1Managers().every((m) => m != null && m.allLoaded(this._lastVisible, orFailed))
   }
 
   get stateTexture(): WebGLTexture | null {
@@ -612,6 +613,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
   }
 
   private _updateManagers(visibleCoords: TileCoord[], prefetchCoords: TileCoord[]): void {
+    this._lastVisible = visibleCoords
     this._waveHeightManager?.updateVisibleTiles(visibleCoords, 0)
     this._wavePeriodManager?.updateVisibleTiles(visibleCoords, 0)
     this._waveDirUManager?.updateVisibleTiles(visibleCoords, 0)
@@ -622,7 +624,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
       this._waveDirUManager?.updateVisibleTiles(prefetchCoords, 2)
       this._waveDirVManager?.updateVisibleTiles(prefetchCoords, 2)
     }
-    if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
+    // T1 is fetched as soon as it is configured, so isT1Ready has something to wait for.
+    if (this._forecastHourT1 >= 0) {
       this._waveHeightT1Manager?.updateVisibleTiles(visibleCoords, 1)
       this._wavePeriodT1Manager?.updateVisibleTiles(visibleCoords, 1)
       this._waveDirUT1Manager?.updateVisibleTiles(visibleCoords, 1)

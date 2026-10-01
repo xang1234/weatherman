@@ -40,8 +40,10 @@ const MANIFEST_RESPONSE = {
 const TILE_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/transparent-256.png', import.meta.url))
 
 interface PerformanceRouteOptions {
-  delayedWindForecastHour?: number
-  delayedWindResponseMs?: number
+  /** Hold back data tiles of these layers (default wind U/V) for one forecast hour. */
+  delayedForecastHour?: number
+  delayedResponseMs?: number
+  delayedLayers?: string[]
 }
 
 async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOptions = {}) {
@@ -77,12 +79,12 @@ async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOption
     const url = new URL(route.request().url())
     const [, , , , layer, forecastHour] = url.pathname.split('/')
     if (
-      options.delayedWindForecastHour != null &&
-      options.delayedWindResponseMs != null &&
-      forecastHour === String(options.delayedWindForecastHour) &&
-      (layer === 'wind_u' || layer === 'wind_v')
+      options.delayedForecastHour != null &&
+      options.delayedResponseMs != null &&
+      forecastHour === String(options.delayedForecastHour) &&
+      (options.delayedLayers ?? ['wind_u', 'wind_v']).includes(layer)
     ) {
-      await new Promise((resolve) => setTimeout(resolve, options.delayedWindResponseMs))
+      await new Promise((resolve) => setTimeout(resolve, options.delayedResponseMs))
     }
     await route.fulfill({
       path: TILE_FIXTURE_PATH,
@@ -215,10 +217,39 @@ test('temperature playback advances while particle layers are inactive', async (
   await page.locator('button').filter({ hasText: '⏸' }).click()
 })
 
+test('pausing after a slow step shows the hour on the slider', async ({ page }) => {
+  // Hour 3 takes 3 s to arrive. Playback used to step the slider to hour 3
+  // after 1.2 s anyway, leaving the map on hour 0 if paused there (#36).
+  await mockPerformanceRoutes(page, {
+    delayedForecastHour: 3,
+    delayedResponseMs: 3_000,
+    delayedLayers: ['temperature'],
+  })
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+
+  const weatherHour = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return (debugState?.weather as { hour?: number } | undefined)?.hour
+  })
+  await expect.poll(weatherHour).toBe(0)
+
+  await page.locator('button').filter({ hasText: '▶' }).click()
+  await page.waitForFunction(() => {
+    const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
+    return slider?.value === '1'
+  }, undefined, { timeout: 10_000 })
+  await page.locator('button').filter({ hasText: '⏸' }).click()
+
+  await expect(page.locator('input[type="range"]')).toHaveValue('1')
+  await expect.poll(weatherHour).toBe(3)
+})
+
 test('wind atlas ignores delayed loads from a scrubbed-away forecast hour', async ({ page }) => {
   await mockPerformanceRoutes(page, {
-    delayedWindForecastHour: 3,
-    delayedWindResponseMs: 750,
+    delayedForecastHour: 3,
+    delayedResponseMs: 750,
   })
   await page.goto('/')
   await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })

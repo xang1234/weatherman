@@ -291,7 +291,6 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._tileManager.updateVisibleTiles(prefetchCoords, 2)
     }
     const wantT1 = this._forecastHourT1 >= 0 && this._tileManagerT1 != null
-    const blending = wantT1 && this._temporalMix > 0
     if (wantT1) {
       this._tileManagerT1!.updateVisibleTiles(visibleCoords, 1)
       if (prefetchCoords.length > 0) {
@@ -310,6 +309,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
         }
       }
     }
+    // Blend the whole viewport or none of it: tile by tile would show a
+    // checkerboard of hours while T1 loads (#36).
+    const blending = wantT1 && this._temporalMix > 0 && this._t1Covers(false)
 
     // Collect what to draw for each visible tile. A tile that has not loaded
     // is covered by a stand-in rather than left blank, in this order:
@@ -399,6 +401,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     this._debug.drawn = tilesToDraw.length
     this._debug.fallback = fallbackDraws
+    this._debug.hour = tm.currentForecastHour
 
     // Keep rendering while stale tiles are up so their time limit is noticed.
     if (useStale) this._map.triggerRepaint()
@@ -663,40 +666,26 @@ export class WeatherGLLayer implements CustomLayerInterface {
   }
 
   /**
-   * Synchronously advance the forecast hour, swapping T0↔T1 if T1 has
-   * the target hour's tiles pre-fetched. Called from the RAF playback loop
-   * BEFORE setTemporalBlend reconfigures T1 for the next-next hour —
-   * this prevents the race where React's async effect fires too late and
-   * finds T1 already pointing at a different hour.
+   * Synchronously advance the forecast hour: swap T0↔T1 if T1 holds the new
+   * hour, else point T0 at it. Called from the RAF playback loop BEFORE
+   * setTemporalBlend reconfigures T1 for the next-next hour — this prevents
+   * the race where React's async effect fires too late and finds T1 already
+   * pointing at a different hour. The setConfig that follows sees nothing
+   * changed, so T0 must be right here (#36).
    */
   advanceForecastHour(newHour: number): void {
     this._forecastHour = newHour
-    const targetLayer = this._isVector ? 'wind_u' : this._layerName
-
-    // T1 should have newHour's tiles (pre-fetched during blend).
-    // Swap T0↔T1 so T0 now serves newHour immediately.
-    if (
-      this._tileManagerT1 &&
-      this._tileManagerT1.cacheSize > 0 &&
-      this._tileManagerT1.currentLayer === targetLayer &&
-      this._tileManagerT1.currentForecastHour === newHour &&
-      // Vector mode: V T1 must also be ready — otherwise swapping
-      // produces U/V mismatch (U has tiles, V doesn't).
-      (!this._isVector || (
-        this._tileManagerVT1 != null &&
-        this._tileManagerVT1.cacheSize > 0 &&
-        this._tileManagerVT1.currentForecastHour === newHour
-      ))
-    ) {
-      ;[this._tileManager, this._tileManagerT1] = [this._tileManagerT1, this._tileManager]
-      if (this._isVector) {
-        ;[this._tileManagerV, this._tileManagerVT1] = [this._tileManagerVT1, this._tileManagerV]
-      }
-    }
-    // If swap failed: T0 keeps old tiles. render() still draws them
-    // (they're loaded textures). setConfig will clear + re-fetch later.
     this._temporalMix = 0
+    this._applyLayerConfig()
     this._map?.triggerRepaint()
+  }
+
+  /**
+   * Whether the next hour has finished loading for the viewport (failed
+   * tiles count as finished, so one bad tile cannot stall playback).
+   */
+  isT1Ready(): boolean {
+    return this._forecastHourT1 < 0 || this._lastVisible.length === 0 || this._t1Covers(true)
   }
 
   /** Update opacity at runtime. */
@@ -724,8 +713,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     // When stepping to the next hour, T1 usually already has its tiles (they
     // are pre-fetched). Swap T0↔T1 instead of re-fetching — an instant
-    // transition. Only when T1 covers the whole viewport: a partial swap
-    // would leave holes, whereas the path below keeps the old hour up.
+    // transition. Only when T1 has finished the whole viewport: a swap while
+    // it is loading would leave holes, whereas the path below keeps the old
+    // hour up.
     if (
       this._tileManagerT1 &&
       this._tileManagerT1.currentLayer === targetLayer &&
@@ -734,7 +724,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
         this._tileManagerVT1 != null &&
         this._tileManagerVT1.currentForecastHour === this._forecastHour
       )) &&
-      this._t1CoversViewport()
+      this._t1Covers(true)
     ) {
       const tmpT = this._tileManager
       this._tileManager = this._tileManagerT1
@@ -798,12 +788,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
     return null
   }
 
-  /** Whether T1 has every tile of the last rendered viewport loaded. */
-  private _t1CoversViewport(): boolean {
-    const isVector = this._isVector
-    return this._lastVisible.length > 0 && this._lastVisible.every(({ z, x, y }) =>
-      this._tileManagerT1?.getTexture(z, x, y) != null &&
-      (!isVector || this._tileManagerVT1?.getTexture(z, x, y) != null))
+  /** Whether T1 has every tile of the last rendered viewport loaded (or failed, with `orFailed`). */
+  private _t1Covers(orFailed: boolean): boolean {
+    const managers = this._isVector ? [this._tileManagerT1, this._tileManagerVT1] : [this._tileManagerT1]
+    return this._lastVisible.length > 0 &&
+      managers.every((m) => m != null && m.allLoaded(this._lastVisible, orFailed))
   }
 
   /** Create or replace the color ramp texture for the current layer. */

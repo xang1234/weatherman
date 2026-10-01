@@ -17,6 +17,8 @@ export interface WeatherDebugState {
   drawn: number
   /** Of those, drawn from a stand-in: an ancestor, child, or the previous hour. */
   fallback: number
+  /** Forecast hour the current (T0) tiles are fetched for. */
+  hour?: number
 }
 
 interface ParticleDebugRoot {
