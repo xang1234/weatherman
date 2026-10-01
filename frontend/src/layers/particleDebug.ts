@@ -19,6 +19,10 @@ export interface WeatherDebugState {
   fallback: number
   /** Forecast hour the current (T0) tiles are fetched for. */
   hour?: number
+  /** Frames that redrew the tiles into the offscreen buffer. */
+  tilePasses: number
+  /** Frames that composited the buffer onto the map. */
+  composites: number
 }
 
 interface ParticleDebugRoot {
@@ -48,5 +52,5 @@ export function ensureParticleDebugState(layer: ParticleDebugLayer): ParticleDeb
 export function ensureWeatherDebugState(): WeatherDebugState {
   const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
   const root = (globalWithDebug.__weathermanDebug ??= {})
-  return (root.weather ??= { drawn: 0, fallback: 0 })
+  return (root.weather ??= { drawn: 0, fallback: 0, tilePasses: 0, composites: 0 })
 }
