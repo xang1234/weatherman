@@ -111,6 +111,8 @@ def test_endpoint_gzips_when_accepted(client: TestClient):
     assert response.headers["content-encoding"] == "gzip"
     # TestClient decodes gzip itself, so the body is the GeoJSON either way.
     assert response.json()["type"] == "FeatureCollection"
+    # "latest" moves on with each new run, so it must not be cached for long.
+    assert "immutable" not in response.headers["cache-control"]
 
 
 def test_endpoint_404s(client: TestClient):

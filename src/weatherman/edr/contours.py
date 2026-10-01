@@ -14,7 +14,12 @@ from functools import lru_cache
 import numpy as np
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
-from weatherman.edr.position import EDRService, get_edr_service
+from weatherman.edr.position import (
+    _IMMUTABLE_CACHE_CONTROL,
+    _LATEST_CACHE_CONTROL,
+    EDRService,
+    get_edr_service,
+)
 from weatherman.processing.contours import isobars_geojson
 
 logger = logging.getLogger(__name__)
@@ -52,11 +57,14 @@ def isobars(
 ) -> Response:
     # Sync on purpose: contouring is CPU work, so FastAPI runs it in its
     # threadpool rather than on the event loop.
-    if run_id == "latest":
+    is_latest = run_id == "latest"
+    if is_latest:
         # Not cached under "latest": the current run changes.
         run_id = str(svc.resolve_run_id(model, run_id))
     body = _isobars_json(model, run_id, forecast_hour)
-    headers = {"Cache-Control": "public, max-age=86400, immutable", "Vary": "Accept-Encoding"}
+    # A literal run never changes; "latest" moves on with each new run.
+    cache_control = _LATEST_CACHE_CONTROL if is_latest else _IMMUTABLE_CACHE_CONTROL
+    headers = {"Cache-Control": cache_control, "Vary": "Accept-Encoding"}
     if accept_encoding and "gzip" in accept_encoding:
         return Response(gzip.compress(body), media_type="application/geo+json",
                         headers={**headers, "Content-Encoding": "gzip"})

@@ -336,6 +336,27 @@ test('isobars overlay loads the shown hour and prefetches the next', async ({ pa
   await expect.poll(() => [...requested].sort()).toEqual(['0', '3', '6'])
 })
 
+test('isobars retry an hour that failed with a server error', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    const hour = new URL(route.request().url()).pathname.split('/').pop()!
+    requested.push(hour)
+    // The first request for hour 0 fails; a 503 must not be remembered as "no isobars".
+    if (hour === '0' && requested.filter((h) => h === '0').length === 1) return route.fulfill({ status: 503 })
+    return route.fulfill({ json: { type: 'FeatureCollection', features: [] } })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+
+  await isobars.check()
+  await expect.poll(() => requested.filter((h) => h === '0').length).toBe(1)
+  await isobars.uncheck()
+  await isobars.check()
+  await expect.poll(() => requested.filter((h) => h === '0').length).toBe(2)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

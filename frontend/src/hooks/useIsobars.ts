@@ -125,9 +125,13 @@ export function useIsobars({
       let entry = cache.get(key)
       if (!entry) {
         entry = fetch(`${apiBase}/api/contours/${model}/${runId}/prmsl/${hour}`)
-          // A 404 (no pressure field in this run) stays cached; a network
-          // error is dropped so the hour is fetched again next time.
-          .then((res) => (res.ok ? res.json() as Promise<GeoJSON.FeatureCollection> : EMPTY))
+          // A 404 (no pressure field in this run) stays cached; any other
+          // failure is dropped so the hour is fetched again next time.
+          .then((res) => {
+            if (res.ok) return res.json() as Promise<GeoJSON.FeatureCollection>
+            if (res.status === 404) return EMPTY
+            throw new Error(`HTTP ${res.status}`)
+          })
           .catch(() => {
             cache.delete(key)
             return EMPTY
