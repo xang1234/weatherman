@@ -230,6 +230,45 @@ test('wind particle count follows the viewport area, not the pixel density', asy
   expect(await drawn(400, 320, 1)).toBe(512)
 })
 
+test('overlays: wind particles over temperature, each layer with its own opacity', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+
+  const debug = () => page.evaluate(() => {
+    const state = (window as unknown as { __weathermanDebug?: Record<string, { active?: boolean; opacity?: number }> }).__weathermanDebug
+    return { wind: state?.wind, waves: state?.wave, weather: state?.weather }
+  })
+  const windToggle = page.getByLabel('Wind particles', { exact: true })
+  const wavesToggle = page.getByLabel('Wave dashes', { exact: true })
+
+  // By default an overlay follows the colour layer: none over temperature (#20).
+  await expect(windToggle).not.toBeChecked()
+  await expect(wavesToggle).not.toBeChecked()
+  await expect.poll(async () => (await debug()).wind?.active).toBe(false)
+
+  // Wind particles stacked over the temperature field, with their own opacity.
+  await windToggle.check()
+  await expect.poll(async () => (await debug()).wind?.active).toBe(true)
+  await page.getByLabel('Wind particles opacity').fill('0.3')
+  await expect.poll(async () => (await debug()).wind?.opacity).toBeCloseTo(0.3)
+
+  // The colour layer's opacity is separate.
+  await page.getByLabel('Opacity', { exact: true }).fill('0.5')
+  await expect.poll(async () => (await debug()).weather?.opacity).toBeCloseTo(0.5)
+  expect((await debug()).wind?.opacity).toBeCloseTo(0.3)
+
+  // A toggled overlay stays as set when the colour layer changes.
+  await page.locator('button').filter({ hasText: 'Wave Height' }).click()
+  await expect(windToggle).toBeChecked()
+  await expect(wavesToggle).toBeChecked() // still following: dashes with wave height
+  await expect.poll(async () => (await debug()).waves?.active).toBe(true)
+
+  await windToggle.uncheck()
+  await expect.poll(async () => (await debug()).wind?.active).toBe(false)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
@@ -284,7 +323,7 @@ test('temperature playback advances while particle layers are inactive', async (
   await page.locator('button').filter({ hasText: '▶' }).click()
 
   await page.waitForFunction(() => {
-    const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
+    const slider = document.querySelector('input[aria-label="Forecast hour"]') as HTMLInputElement | null
     return slider?.value === '1'
   }, undefined, { timeout: 5_000 })
 
@@ -328,15 +367,15 @@ test('pausing after a slow step shows the hour on the slider', async ({ page }) 
   const waitingStart = (await weatherState()).tilePasses ?? 0
   await page.waitForTimeout(1_500)
   expect(((await weatherState()).tilePasses ?? 0) - waitingStart).toBeLessThanOrEqual(2)
-  await expect(page.locator('input[type="range"]')).toHaveValue('0')
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('0')
 
   // Hour 3 arrives: playback steps to it, then waits again for hour 6.
   release['3']()
-  await expect(page.locator('input[type="range"]')).toHaveValue('1', { timeout: 10_000 })
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('1', { timeout: 10_000 })
   await page.locator('button').filter({ hasText: '⏸' }).click()
   release['6']()
 
-  await expect(page.locator('input[type="range"]')).toHaveValue('1')
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('1')
   await expect.poll(async () => (await weatherState()).hour).toBe(3)
 })
 
@@ -350,7 +389,7 @@ test('a failed next-hour tile does not stall playback', async ({ page }) => {
   await page.locator('button').filter({ hasText: '▶' }).click()
 
   await page.waitForFunction(() => {
-    const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
+    const slider = document.querySelector('input[aria-label="Forecast hour"]') as HTMLInputElement | null
     return slider?.value === '2'
   }, undefined, { timeout: 10_000 })
   await page.locator('button').filter({ hasText: '⏸' }).click()
@@ -373,7 +412,7 @@ test('wind atlas ignores delayed loads from a scrubbed-away forecast hour', asyn
     return { atlasClears: wind.atlasClears, atlasFlushes: wind.atlasFlushes }
   })
 
-  const slider = page.locator('input[type="range"]')
+  const slider = page.locator('input[aria-label="Forecast hour"]')
   await expect(slider).toHaveValue('0')
 
   await page.locator('button').filter({ hasText: '❯' }).click()

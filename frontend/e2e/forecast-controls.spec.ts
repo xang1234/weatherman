@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test('forecast controls render with first hour selected', async ({ page }) => {
   await page.goto('/')
-  const bar = page.locator('input[type="range"]')
+  const bar = page.locator('input[aria-label="Forecast hour"]')
   await expect(bar).toBeVisible({ timeout: 10_000 })
 
   // Slider should be at position 0 (first forecast hour)
@@ -27,7 +27,7 @@ test('step forward button advances forecast hour', async ({ page }) => {
 
   // Should now show the next hour's valid time
   await expect(page.getByText(forecastLabel(FORECAST_HOURS[1]))).toBeVisible()
-  await expect(page.locator('input[type="range"]')).toHaveValue('1')
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('1')
 })
 
 test('step back button is disabled at first hour', async ({ page }) => {
@@ -52,7 +52,7 @@ test('slider change updates forecast hour label', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
-  const slider = page.locator('input[type="range"]')
+  const slider = page.locator('input[aria-label="Forecast hour"]')
   await slider.fill('3')
 
   await expect(page.getByText(forecastLabel(FORECAST_HOURS[3]))).toBeVisible()

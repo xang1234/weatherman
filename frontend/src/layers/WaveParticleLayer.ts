@@ -595,6 +595,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
 
   setOpacity(opacity: number): void {
     this._opacity = Math.max(0, Math.min(1, opacity))
+    this._debug.opacity = this._opacity
     this._map?.triggerRepaint()
   }
 
