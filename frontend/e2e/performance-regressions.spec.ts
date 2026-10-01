@@ -246,6 +246,22 @@ test('pausing after a slow step shows the hour on the slider', async ({ page }) 
   await expect.poll(weatherHour).toBe(3)
 })
 
+test('a failed next-hour tile does not stall playback', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Registered later, so it wins: every hour-3 temperature tile fails.
+  await page.route(/\/tiles\/gfs\/.*\/temperature\/3\/data\//, (route) => route.fulfill({ status: 500 }))
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+  await page.locator('button').filter({ hasText: '▶' }).click()
+
+  await page.waitForFunction(() => {
+    const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
+    return slider?.value === '2'
+  }, undefined, { timeout: 10_000 })
+  await page.locator('button').filter({ hasText: '⏸' }).click()
+})
+
 test('wind atlas ignores delayed loads from a scrubbed-away forecast hour', async ({ page }) => {
   await mockPerformanceRoutes(page, {
     delayedForecastHour: 3,

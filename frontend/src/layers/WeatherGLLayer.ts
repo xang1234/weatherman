@@ -713,9 +713,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     // When stepping to the next hour, T1 usually already has its tiles (they
     // are pre-fetched). Swap T0↔T1 instead of re-fetching — an instant
-    // transition. Only when T1 has finished the whole viewport: a swap while
-    // it is loading would leave holes, whereas the path below keeps the old
-    // hour up.
+    // transition. Only when T1 has loaded the whole viewport: a swap with a
+    // tile still loading or failed would leave a hole, whereas the path below
+    // keeps the old hour up while T0 fetches.
     if (
       this._tileManagerT1 &&
       this._tileManagerT1.currentLayer === targetLayer &&
@@ -724,7 +724,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
         this._tileManagerVT1 != null &&
         this._tileManagerVT1.currentForecastHour === this._forecastHour
       )) &&
-      this._t1Covers(true)
+      this._t1Covers(false)
     ) {
       const tmpT = this._tileManager
       this._tileManager = this._tileManagerT1
