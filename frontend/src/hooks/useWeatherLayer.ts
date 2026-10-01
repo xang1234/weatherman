@@ -10,6 +10,7 @@ const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER !== 'false'
 export interface WeatherLayerHandle {
   setTemporalBlend?(forecastHourT1: number, mix: number): void
   advanceForecastHour?(newHour: number): void
+  isT1Ready?(): boolean
 }
 
 export interface UseWeatherLayerOptions {
@@ -163,6 +164,9 @@ export function useWeatherLayer(options: UseWeatherLayerOptions): WeatherLayerHa
       },
       advanceForecastHour(newHour: number) {
         layerRef.current?.advanceForecastHour(newHour)
+      },
+      isT1Ready() {
+        return layerRef.current?.isT1Ready() ?? true
       },
     }
   }

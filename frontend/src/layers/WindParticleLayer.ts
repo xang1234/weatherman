@@ -132,6 +132,8 @@ export class WindParticleLayer implements CustomLayerInterface {
   private _windUT1Manager: TileManager | null = null
   private _windVT1Manager: TileManager | null = null
   private _windConfigured = false
+  /** Data tiles of the last drawn frame. */
+  private _lastVisible: TileCoord[] = []
 
   // Wind dataset config
   private _model = ''
@@ -346,15 +348,18 @@ export class WindParticleLayer implements CustomLayerInterface {
       ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
       : []
 
+    this._lastVisible = visibleCoords
     if (this._windConfigured) {
-      // Priority: P0 = visible current time, P1 = visible next time, P2 = prefetch
+      // Priority: P0 = visible current time, P1 = visible next time, P2 = prefetch.
+      // T1 is fetched as soon as it is configured, not only once blending
+      // starts, so the playback gate (isT1Ready) has something to wait for.
       this._windUManager?.updateVisibleTiles(visibleCoords, 0)
       this._windVManager?.updateVisibleTiles(visibleCoords, 0)
       if (prefetchCoords.length > 0) {
         this._windUManager?.updateVisibleTiles(prefetchCoords, 2)
         this._windVManager?.updateVisibleTiles(prefetchCoords, 2)
       }
-      if (this._forecastHourT1 >= 0 && this._temporalMix > 0) {
+      if (this._forecastHourT1 >= 0) {
         this._windUT1Manager?.updateVisibleTiles(visibleCoords, 1)
         this._windVT1Manager?.updateVisibleTiles(visibleCoords, 1)
         if (prefetchCoords.length > 0) {
@@ -419,7 +424,9 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, atlas ? this._atlasV : null)
     gl.uniform1i(this._uUpdateWindV, 2)
 
-    const hasT1 = this._forecastHourT1 >= 0 && this._temporalMix > 0
+    // Blend only once all of T1 is in: a partly filled T1 atlas would blend
+    // some tiles towards the next hour and others towards nothing (#36).
+    const hasT1 = this._forecastHourT1 >= 0 && this._temporalMix > 0 && this._t1Covers(false)
 
     gl.activeTexture(gl.TEXTURE3)
     gl.bindTexture(gl.TEXTURE_2D, atlas && hasT1 ? this._atlasUT1 : null)
@@ -631,12 +638,9 @@ export class WindParticleLayer implements CustomLayerInterface {
   /** Synchronously advance the forecast hour, swapping T0↔T1. */
   advanceForecastHour(newHour: number): void {
     if (
-      this._windUT1Manager &&
-      this._windUT1Manager.cacheSize > 0 &&
-      this._windUT1Manager.currentForecastHour === newHour &&
-      this._windVT1Manager &&
-      this._windVT1Manager.cacheSize > 0 &&
-      this._windVT1Manager.currentForecastHour === newHour
+      this._windUT1Manager?.currentForecastHour === newHour &&
+      this._windVT1Manager?.currentForecastHour === newHour &&
+      this._t1Covers(true)
     ) {
       // T1 tiles are ready — swap T0 ↔ T1 for seamless transition
       ;[this._windUManager, this._windUT1Manager] = [this._windUT1Manager, this._windUManager]
@@ -656,12 +660,18 @@ export class WindParticleLayer implements CustomLayerInterface {
     this._map?.triggerRepaint()
   }
 
-  /** Check if T1 tiles have at least partial data for seamless playback advance. */
+  /**
+   * Whether the next hour has finished loading for the viewport (failed
+   * tiles count as finished). Always true while the layer is not drawn.
+   */
   isT1Ready(): boolean {
-    return (
-      (this._windUT1Manager?.cacheSize ?? 0) > 0 &&
-      (this._windVT1Manager?.cacheSize ?? 0) > 0
-    )
+    return !this._active || this._forecastHourT1 < 0 || this._t1Covers(true)
+  }
+
+  /** Whether T1 has every tile of the last drawn viewport loaded (or failed, with `orFailed`). */
+  private _t1Covers(orFailed: boolean): boolean {
+    return [this._windUT1Manager, this._windVT1Manager].every(
+      (m) => m != null && m.allLoaded(this._lastVisible, orFailed))
   }
 
   /** Get the current "read" state texture. */

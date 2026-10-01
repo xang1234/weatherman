@@ -292,6 +292,19 @@ export class TileManager {
     return state.tiles.get(key)?.state ?? null
   }
 
+  /**
+   * Whether every one of `coords` is loaded in the current dataset — or,
+   * with `orFailed`, has at least stopped loading (failed tiles count).
+   */
+  allLoaded(coords: TileCoord[], orFailed = false): boolean {
+    const state = this._currentState()
+    if (!state) return coords.length === 0
+    return coords.every(({ z, x, y }) => {
+      const tile = state.tiles.get(tileKey(z, x, y))?.state
+      return tile === 'loaded' || (orFailed && tile === 'error')
+    })
+  }
+
   /** Returns true if any tiles are currently loading. */
   get isLoading(): boolean {
     const state = this._currentState()
@@ -300,15 +313,6 @@ export class TileManager {
       state.pendingF16.size > 0 ||
       state.pendingWorker.size > 0
     )
-  }
-
-  /** Number of loaded tiles in the current dataset. */
-  get cacheSize(): number {
-    let loaded = 0
-    for (const entry of this._currentState()?.tiles.values() ?? []) {
-      if (entry.state === 'loaded') loaded++
-    }
-    return loaded
   }
 
   /** Current layer name this manager is fetching. */

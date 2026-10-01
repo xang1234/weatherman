@@ -144,17 +144,21 @@ export function MapView() {
       const mix = Math.min(1, elapsed / PLAYBACK_STEP_MS)
       const idx = playbackIdxRef.current
       const nextIdx = (idx + 1) % hours.length
+      // Wrapping from the last hour to the first: snap rather than morph
+      // across the whole forecast range (#36).
+      const blendMix = nextIdx === 0 ? 0 : mix
 
-      handleRef.current.setTemporalBlend?.(hours[nextIdx], mix)
-      windParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
-      waveParticlesRef.current.setTemporalBlend?.(hours[nextIdx], mix)
+      handleRef.current.setTemporalBlend?.(hours[nextIdx], blendMix)
+      windParticlesRef.current.setTemporalBlend?.(hours[nextIdx], blendMix)
+      waveParticlesRef.current.setTemporalBlend?.(hours[nextIdx], blendMix)
 
       if (mix >= 1) {
-        // Gate advance on T1 tile readiness — if T1 tiles haven't loaded
-        // yet, hold at mix=1 and keep requesting frames until ready.
-        const windT1Ready = windParticlesRef.current.isT1Ready?.() ?? true
-        const waveT1Ready = waveParticlesRef.current.isT1Ready?.() ?? true
-        const t1Ready = windT1Ready && waveT1Ready
+        // Gate advance on every layer having the next hour for the whole
+        // viewport — hold at the end of the step until they do.
+        const t1Ready =
+          (handleRef.current.isT1Ready?.() ?? true) &&
+          (windParticlesRef.current.isT1Ready?.() ?? true) &&
+          (waveParticlesRef.current.isT1Ready?.() ?? true)
         if (!t1Ready) {
           rafId = requestAnimationFrame(tick)
           return
