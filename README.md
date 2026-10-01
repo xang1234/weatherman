@@ -42,7 +42,8 @@ The first run pulls a sample from NOAA: the latest GFS cycle, forecast hours 0, 
 ```bash
 SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh        # seed more hours on first run
 NODE_BIN=~/.nvm/versions/node/v22.18.0/bin ./scripts/dev.sh   # if system node is too old
-uv run python scripts/run_pipeline.py --hours 0,3,6 --max-runs 1 --tile-formats png   # refresh to the newest cycle
+WEATHERMAN_DATA_DIR=.data uv run python scripts/run_pipeline.py \
+  --hours 0,3,6 --max-runs 1 --tile-formats png   # refresh to the newest cycle; the open map updates live
 ```
 
 **Docker:**
@@ -52,9 +53,11 @@ cp .env.example .env
 docker compose up
 ```
 
+> The Docker frontend isn't given `VITE_BASEMAP_URL` yet, so it falls back to a hardcoded Protomaps daily build that has since expired: weather layers render, the basemap doesn't. Use `dev.sh` for the full map.
+
 ## Configuration
 
-Weather works out of the box. Settings in `.env` are only needed for AIS:
+Weather needs no settings. The variables in `.env` are for AIS:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
