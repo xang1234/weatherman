@@ -73,12 +73,12 @@ See **[AIS / Neptune](docs/ais-neptune.md)** for ingest and live streaming.
 
 ```
              ┌─► COG ─┬─► data tiles z0–z5 (pre-built) ─┐
-NOAA GRIB2 ──┤        └─► TiTiler (z6+, on demand) ─────┤
+NOAA GRIB2 ──┤        └─► TiTiler (tile missing) ───────┤
              └─► Zarr ──► EDR point / trajectory ───────┼─► MapLibre + WebGL layers
 AIS feed ──► DuckDB (spatial) ──► vector tiles ─────────┘
 ```
 
-Each forecast run is converted from GRIB2 twice: into COGs for the map and into Zarr for point queries. The pipeline pre-builds raw-value data tiles for zooms 0–5 from the COGs; deeper zooms fall back to TiTiler, which cuts them from the same COGs on request. The WebGL layers colour those tiles in the browser. The hover readout and voyage corridor query Zarr through **OGC API EDR** position and trajectory endpoints. Each run is staged, then published in one atomic step, so the map never reads a run while it's being written.
+Each forecast run is converted from GRIB2 twice: into COGs for the map and into Zarr for point queries. The pipeline pre-builds raw-value data tiles for zooms 0–5 from the COGs, and the browser keeps using z5 tiles when you zoom in further; TiTiler cuts a tile from the COGs only if a pre-built one is missing. The WebGL layers colour those tiles in the browser. The hover readout and voyage corridor query Zarr through **OGC API EDR** position and trajectory endpoints. Each run is staged, then published in one atomic step, so the map never reads a run while it's being written.
 
 ## Tech stack
 
