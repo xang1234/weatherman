@@ -210,7 +210,8 @@ test('wind particle count follows the viewport area, not the pixel density', asy
   // One particle per 250 CSS px² (#40). Small viewports keep SwiftShader's
   // low-tier cap (2,304) out of the way.
   const drawn = async (width: number, height: number, deviceScaleFactor: number) => {
-    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor })
+    const { baseURL } = test.info().project.use
+    const page = await browser.newPage({ baseURL, viewport: { width, height }, deviceScaleFactor })
     await mockPerformanceRoutes(page)
     await page.goto('/')
     await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
