@@ -305,6 +305,104 @@ test('an overlay re-enabled during playback picks up the current hour', async ({
   release['6']()
 })
 
+test('isobars overlay loads the shown hour and prefetches the next', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    requested.push(new URL(route.request().url()).pathname.split('/').pop()!)
+    return route.fulfill({
+      json: {
+        type: 'FeatureCollection',
+        features: [
+          { type: 'Feature', geometry: { type: 'LineString', coordinates: [[-40, 30], [-20, 35]] }, properties: { kind: 'isobar', hpa: 1012 } },
+          { type: 'Feature', geometry: { type: 'Point', coordinates: [-30, 40] }, properties: { kind: 'low', hpa: 996 } },
+        ],
+      },
+    })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+
+  // Off by default: nothing fetched (#23).
+  await expect(isobars).not.toBeChecked()
+  await page.waitForTimeout(500)
+  expect(requested).toEqual([])
+
+  await isobars.check()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '3'])
+
+  await page.locator('button').filter({ hasText: '❯' }).click()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '3', '6'])
+})
+
+test('isobars on the last hour prefetch the first, where playback wraps to', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    requested.push(new URL(route.request().url()).pathname.split('/').pop()!)
+    return route.fulfill({ json: { type: 'FeatureCollection', features: [] } })
+  })
+  await page.goto('/?fh=6')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('2')
+
+  await isobars.check()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '6'])
+})
+
+test('isobars are cleared while a jumped-to hour loads', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  let releaseHour6!: () => void
+  const hour6Released = new Promise<void>((resolve) => { releaseHour6 = resolve })
+  const line = (hpa: number) => ({
+    type: 'Feature', geometry: { type: 'LineString', coordinates: [[-40, 30], [-20, 35]] }, properties: { kind: 'isobar', hpa },
+  })
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, async (route) => {
+    const hour = new URL(route.request().url()).pathname.split('/').pop()!
+    if (hour === '6') await hour6Released
+    // Hour 0 has two isobars, the others one, so the counts tell them apart.
+    return route.fulfill({ json: { type: 'FeatureCollection', features: hour === '0' ? [line(1012), line(1016)] : [line(1008)] } })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+  const shown = () => page.evaluate(() =>
+    (window as unknown as { __weathermanDebug?: { isobars?: { features: number } } }).__weathermanDebug?.isobars?.features)
+
+  await isobars.check()
+  await expect.poll(shown).toBe(2)
+
+  // Jump past the prefetched hour 3 to hour 6, which is held back: hour 0's
+  // isobars must not stay up under hour 6's label.
+  await page.locator('input[aria-label="Forecast hour"]').fill('2')
+  await expect.poll(shown).toBe(0)
+  releaseHour6()
+  await expect.poll(shown).toBe(1)
+})
+
+test('isobars retry an hour that failed with a server error', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    const hour = new URL(route.request().url()).pathname.split('/').pop()!
+    requested.push(hour)
+    // The first request for hour 0 fails; a 503 must not be remembered as "no isobars".
+    if (hour === '0' && requested.filter((h) => h === '0').length === 1) return route.fulfill({ status: 503 })
+    return route.fulfill({ json: { type: 'FeatureCollection', features: [] } })
+  })
+  await page.goto('/')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+
+  await isobars.check()
+  await expect.poll(() => requested.filter((h) => h === '0').length).toBe(1)
+  await isobars.uncheck()
+  await isobars.check()
+  await expect.poll(() => requested.filter((h) => h === '0').length).toBe(2)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

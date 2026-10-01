@@ -46,6 +46,7 @@ from weatherman.edr.position import (
     init_edr_service,
     shutdown_edr_service,
 )
+from weatherman.edr.contours import router as contours_router
 from weatherman.edr.position import router as edr_router
 from weatherman.edr.trajectory import router as trajectory_router
 from weatherman.events.router import (
@@ -336,6 +337,7 @@ def create_app(
     app.include_router(ais_tile_router)
     app.include_router(ais_query_router)
     app.include_router(edr_router)
+    app.include_router(contours_router)
     app.include_router(trajectory_router)
     app.include_router(events_router)
 

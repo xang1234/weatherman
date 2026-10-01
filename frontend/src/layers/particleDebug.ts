@@ -37,6 +37,12 @@ interface ParticleDebugRoot {
   wind?: ParticleDebugState
   wave?: ParticleDebugState
   weather?: WeatherDebugState
+  isobars?: IsobarsDebugState
+}
+
+/** What the isobar overlay last put on the map. */
+export interface IsobarsDebugState {
+  features: number
 }
 
 const DEFAULT_STATE: ParticleDebugState = {
@@ -61,4 +67,10 @@ export function ensureWeatherDebugState(): WeatherDebugState {
   const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
   const root = (globalWithDebug.__weathermanDebug ??= {})
   return (root.weather ??= { drawn: 0, fallback: 0, tilePasses: 0, composites: 0 })
+}
+
+export function ensureIsobarsDebugState(): IsobarsDebugState {
+  const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
+  const root = (globalWithDebug.__weathermanDebug ??= {})
+  return (root.isobars ??= { features: 0 })
 }

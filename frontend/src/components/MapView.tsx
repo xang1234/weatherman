@@ -11,6 +11,7 @@ import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
 import { useVesselTrack } from '@/hooks/useVesselTrack'
 import { useWindParticles, type WindParticleHandle } from '@/hooks/useWindParticles'
+import { useIsobars } from '@/hooks/useIsobars'
 import { useWaveParticles, type WaveParticleHandle } from '@/hooks/useWaveParticles'
 import { useVoyageRoute } from '@/hooks/useVoyageRoute'
 import { useVoyageCorridor } from '@/hooks/useVoyageCorridor'
@@ -46,10 +47,12 @@ export function MapView() {
   const [opacity, setOpacity] = useState(0.9)
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
   // Overlays drawn over the colour layer. `on: null` follows the colour layer
-  // (wind particles with wind speed, dashes with wave height) until toggled.
+  // (wind particles with wind speed, dashes with wave height; isobars off)
+  // until toggled.
   const [overlays, setOverlays] = useState<Record<OverlayId, OverlayState>>({
     wind: { on: null, opacity: 0.6 },
     waves: { on: null, opacity: 0.8 },
+    isobars: { on: null, opacity: 0.8 },
   })
   const [selectedForecastHour, setSelectedForecastHour] = useState<number | null>(() =>
     forecastHourFromUrl([]),
@@ -67,6 +70,7 @@ export function MapView() {
       : layers[0]?.id ?? null
   const windOn = overlays.wind.on ?? resolvedLayerId === 'wind_speed'
   const wavesOn = overlays.waves.on ?? resolvedLayerId === 'wave_height'
+  const isobarsOn = overlays.isobars.on ?? false
   const updateOverlay = (id: OverlayId, change: Partial<OverlayState>) =>
     setOverlays((current) => ({ ...current, [id]: { ...current[id], ...change } }))
   const forecastHours = manifest?.forecast_hours ?? EMPTY_FORECAST_HOURS
@@ -244,6 +248,17 @@ export function MapView() {
   const waveParticlesRef = useRef<WaveParticleHandle>(waveParticles)
   waveParticlesRef.current = waveParticles
 
+  useIsobars({
+    map,
+    isLoaded,
+    enabled: isobarsOn,
+    opacity: overlays.isobars.opacity,
+    model,
+    runId,
+    forecastHour,
+    forecastHours,
+  })
+
   useVesselPopup({ map, isLoaded })
   useVesselTrack({ map, isLoaded, snapshotDate: aisDate })
   const voyageRoute = useVoyageRoute({ map, isLoaded })
@@ -299,6 +314,7 @@ export function MapView() {
           overlays={[
             { id: 'wind', label: 'Wind particles', on: windOn, opacity: overlays.wind.opacity },
             { id: 'waves', label: 'Wave dashes', on: wavesOn, opacity: overlays.waves.opacity },
+            { id: 'isobars', label: 'Isobars', on: isobarsOn, opacity: overlays.isobars.opacity },
           ]}
           onOverlayChange={updateOverlay}
         />

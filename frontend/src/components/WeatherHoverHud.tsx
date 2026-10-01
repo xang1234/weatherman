@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import type { HoverProbeState } from '@/hooks/useHoverProbe'
 import type { CoverageParameter } from '@/types/edr'
-import { formatForecastDateTime, formatLatLon } from '@/utils/format'
+import { formatForecastDateTime, formatLatLon, formatWithUnit } from '@/utils/format'
 
 export interface WeatherHoverHudProps {
   probe: HoverProbeState
@@ -84,8 +84,7 @@ function formatValue(
   parameter?: CoverageParameter,
 ): string {
   if (value == null) return '—'
-  const unit = parameter?.unit?.symbol
-  return `${value.toFixed(1)}${unit ? ` ${unit}` : ''}`
+  return formatWithUnit(value, parameter?.unit?.symbol, 1)
 }
 
 /**

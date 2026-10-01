@@ -28,3 +28,9 @@ export function formatLatLon(lat: number, lon: number, digits = 2): string {
   const ew = wrapped < 0 ? 'W' : 'E'
   return `${Math.abs(lat).toFixed(digits)}°${ns}, ${Math.abs(wrapped).toFixed(digits)}°${ew}`
 }
+
+/** A value with its unit, in the unit people read: pressure in hPa, not Pa. */
+export function formatWithUnit(value: number, unit: string | undefined, digits: number): string {
+  if (unit === 'Pa') return `${(value / 100).toFixed(digits)} hPa`
+  return `${value.toFixed(digits)}${unit ? ` ${unit}` : ''}`
+}
