@@ -44,6 +44,8 @@ The first run pulls a sample from NOAA: the latest GFS cycle, forecast hours 0, 
 SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh        # seed more hours on first run
 WEATHERMAN_DATA_DIR=.data uv run python scripts/run_pipeline.py \
   --hours 0,3,6 --max-runs 1 --tile-formats png   # refresh to the newest cycle; the open map updates live
+WEATHERMAN_DATA_DIR=.data uv run python scripts/run_pipeline.py \
+  --model gefs --hours 0,3,6 --max-runs 1 --tile-formats png   # add GEFS; dev.sh seeds GFS only
 ```
 
 **Docker:**
