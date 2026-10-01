@@ -37,7 +37,7 @@ import {
   type TileFormat,
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
-import { fadeForFrame } from './particle-motion'
+import { fadeForFrame, waveGridSpacingPx } from './particle-motion'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
@@ -333,12 +333,21 @@ export class WaveParticleLayer implements CustomLayerInterface {
     const vpMaxLon = (vpEast + 180) / 360
     const vpMinLat = this._latToMercatorY(bounds.getNorth())
     const vpMaxLat = this._latToMercatorY(bounds.getSouth())
-    const gridSpacing = GRID_SPACING_PX / worldSize
+    // Widen the grid when the viewport has more cells than dash slots, else
+    // the rows at the bottom (filled last) would get no dashes (#35).
+    const spacingPx = waveGridSpacingPx(
+      GRID_SPACING_PX,
+      (vpMaxLon - vpMinLon) * worldSize,
+      (vpMaxLat - vpMinLat) * worldSize,
+      this._particleCount,
+    )
+    const gridSpacing = spacingPx / worldSize
     const gridOriginX = Math.floor(vpMinLon / gridSpacing) * gridSpacing
     const gridOriginY = Math.floor(vpMinLat / gridSpacing) * gridSpacing
     const gridCols = Math.max(1, Math.ceil((vpMaxLon - gridOriginX) / gridSpacing))
     const gridRows = Math.max(1, Math.ceil((vpMaxLat - gridOriginY) / gridSpacing))
     const activeParticleCount = Math.min(this._particleCount, gridCols * gridRows)
+    this._debug.gridTruncated = gridCols * gridRows > this._particleCount
 
     const stateRead = this._stateReadIndex
     const stateWrite = 1 - stateRead
