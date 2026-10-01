@@ -68,12 +68,13 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 
-# Only download variables we can render (have colormaps defined):
+# Only download variables we can render:
 #   temperature   ← tmp_2m
 #   wind_speed    ← ugrd_10m + vgrd_10m
+#   isobars       ← prmsl (Zarr only; contoured on request, no tiles)
 PIPELINE_VARIABLES = {
     k: DEFAULT_SEARCH_PATTERNS[k]
-    for k in ("tmp_2m", "ugrd_10m", "vgrd_10m")
+    for k in ("tmp_2m", "ugrd_10m", "vgrd_10m", "prmsl")
 }
 
 # Layer definitions matching colormaps.py
