@@ -78,7 +78,7 @@ NOAA GRIB2 ─► Zarr (canonical) ─► COG ─► TiTiler ─► MapLibre + W
 AIS feed ─► DuckDB (spatial) ─► vector tiles ───────────┘
 ```
 
-Forecasts land in Zarr as the source of truth. Each run is staged, validated and only then published, so a run is never served half-written. COGs are a map-friendly projection of the Zarr data, tiled on demand by TiTiler; nothing is pre-rendered. The hover readout and voyage corridor read the Zarr data directly through **OGC API EDR** position and trajectory endpoints.
+Forecasts land in Zarr as the source of truth. Each run is staged, then published in one atomic step, so the map never reads a run while it's being written. COGs are a map-friendly projection of the Zarr data, tiled on demand by TiTiler; nothing is pre-rendered. The hover readout and voyage corridor read the Zarr data directly through **OGC API EDR** position and trajectory endpoints.
 
 ## Tech stack
 
