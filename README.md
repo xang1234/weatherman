@@ -1,94 +1,98 @@
-# Weatherman
+# Weatherman 🌊 🌬️ 🚢
 
-**Maritime weather visualization & decision support platform** — interactive weather layers with AIS vessel tracking and weather routing.
+**Windy-style marine weather maps with live AIS vessels and along-route forecasts**
+
+GFS and GEFS forecasts, rendered on the GPU over a vector basemap, with the ships underneath.
+
+![Wind particles flowing over the North Atlantic](docs/wind.gif)
+*GPU wind particles over the wind-speed field, scrubbing through forecast hours*
+
+## Features
+
+- **Weather layers** — temperature, 10 m wind speed and significant wave height, drawn as WebGL rasters with smooth blending between forecast hours.
+- **Wind & wave particles** — GPU particle systems trace wind flow and swell direction across the whole map.
+- **GFS and GEFS** — switch between the deterministic run and the ensemble mean; a freshness badge shows which cycle you're looking at and how old it is.
+- **Voyage corridor** — draw a route and get a distance × forecast-hour profile of waves, wind or temperature along it.
+- **AIS vessels** — vessel positions as vector tiles, with a popup for MMSI, type, speed, destination and recent track.
+- **Point readout** — hover anywhere to read every variable at that position and time.
+- **Live updates** — new forecast runs and AIS refreshes are pushed to the browser over SSE, with no polling.
 
 <table>
   <tr>
-    <td align="center">
-      <img src="docs/wind.gif" alt="Wind particles" width="400"><br>
-      <em>Wind particle flow</em>
-    </td>
-    <td align="center">
-      <img src="docs/waves.gif" alt="Wave particles" width="400"><br>
-      <em>Wave animation</em>
-    </td>
+    <td width="50%"><img src="docs/waves.gif" alt="Wave height with animated swell streaks"><br><em>Wave height with animated swell direction</em></td>
+    <td width="50%"><img src="docs/voyage.gif" alt="Drawing a New York to English Channel route and viewing its wave profile"><br><em>Voyage corridor: wave height along a transatlantic route</em></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/vessel.jpg" alt="Vessel popup showing a Capesize bulk carrier bound for Rotterdam"><br><em>AIS vessel details and recent track</em></td>
+    <td width="50%"><img src="docs/screenshots/wind.jpg" alt="Wind speed over the Atlantic with AIS vessels"><br><em>Wind speed with live vessel positions</em></td>
   </tr>
 </table>
 
-## What it does
+## Quickstart
 
-- **Weather visualization** — real-time meteorological layers (wind, waves, pressure, precipitation) rendered as WebGL overlays on a slippy map
-- **Wind & wave particles** — GPU-accelerated particle systems showing flow direction and intensity, with smooth temporal interpolation
-- **AIS vessel tracking** — live vessel positions via AIS feed, with filtering by vessel type, flag, and cargo
-- **Weather routing** — isochrone-based optimal route calculation accounting for weather, currents, and vessel characteristics
-- **Temporal animation** — scrub through forecast timesteps with animated transitions between frames
-
-## Tech stack
-
-| Layer | Technologies |
-|-------|-------------|
-| **Backend** | Python · FastAPI · Zarr · DuckDB (spatial) · Argo Workflows |
-| **Frontend** | React · TypeScript · MapLibre GL JS · WebGL · Vite |
-| **Infra** | Docker · TiTiler · S3-compatible storage · OpenTelemetry |
-
-## Quick start
-
-```bash
-docker compose up
-```
-
-Copy `.env.example` to `.env` and configure S3 credentials and data paths before starting.
-
-For Neptune-backed AIS ingestion and live streaming, see [docs/ais-neptune.md](docs/ais-neptune.md).
-
-## Development
-
-**Run the app locally (no Docker)**
+**Local (no Docker):** needs [uv](https://docs.astral.sh/uv/) and Node ≥ 20.
 
 ```bash
 (cd frontend && npm install)   # once
-./scripts/dev.sh
+./scripts/dev.sh               # TiTiler :8080, API :8000, Vite :5173
 ```
 
-`dev.sh` starts TiTiler, the backend and the Vite dev server (hot reload), then prints the frontend URL. On first run, when `.data/` has no weather data, it fetches a sample from NOAA: the latest GFS cycle, forecast hours 0, 3 and 6 (about 1 minute and 0.6 GB per hour). Later runs reuse it and start in a few seconds.
+The first run pulls a sample from NOAA: the latest GFS cycle, forecast hours 0, 3 and 6 (about 3 minutes and 2 GB). Later runs start in seconds. Open the URL Vite prints, usually <http://127.0.0.1:5173>.
 
 ```bash
-SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh                           # more hours on first run
-uv run python scripts/run_pipeline.py --hours 0,3,6 --max-runs 1 \
-  --tile-formats png                                               # refresh to the newest cycle
+SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh        # seed more hours on first run
+NODE_BIN=~/.nvm/versions/node/v22.18.0/bin ./scripts/dev.sh   # if system node is too old
+uv run python scripts/run_pipeline.py --hours 0,3,6 --max-runs 1 --tile-formats png   # refresh to the newest cycle
 ```
 
-**Tests**
+**Docker:**
 
 ```bash
-uv run pytest                  # backend
+cp .env.example .env
+docker compose up
 ```
 
-> **Note:** System Node is v14 (too old). Use the nvm-managed v22 by prefixing commands:
-> ```bash
-> PATH="/Users/admin/.nvm/versions/node/v22.18.0/bin:/usr/bin:/bin" ./node_modules/.bin/vite dev
-> ```
+## Configuration
 
-**AIS / Neptune**
+Weather works out of the box. Settings in `.env` are only needed for AIS:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AIS_BACKEND` | `legacy_parquet` | `neptune` to ingest from the Neptune archive |
+| `AIS_DB_PATH` | `/data/ais.duckdb` | DuckDB file holding vessel positions |
+| `COMPOSE_PROFILES` | _(empty)_ | `ais-live` streams live AIS into the map (needs `NEPTUNE_LIVE_API_KEY`) |
+
+See **[AIS / Neptune](docs/ais-neptune.md)** for ingest and live streaming.
+
+## How it works
+
+```
+NOAA GRIB2 ─► Zarr (canonical) ─► COG ─► TiTiler ─► MapLibre + WebGL layers
+                    │                                   ▲
+                    └─► EDR point / trajectory queries ─┤
+AIS feed ─► DuckDB (spatial) ─► vector tiles ───────────┘
+```
+
+Forecasts land in Zarr as the source of truth. Each run is staged, validated and only then published, so a run is never served half-written. COGs are a map-friendly projection of the Zarr data, tiled on demand by TiTiler; nothing is pre-rendered. The hover readout and voyage corridor read the Zarr data directly through **OGC API EDR** position and trajectory endpoints.
+
+## Tech stack
+
+| | |
+|---|---|
+| **Backend** | Python 3.14 · FastAPI · Zarr · TiTiler · DuckDB (spatial) |
+| **Frontend** | React · TypeScript · MapLibre GL JS · WebGL2 · Vite · Protomaps |
+| **Ops** | Docker Compose · OpenTelemetry · Grafana dashboards |
+
+## Development
 
 ```bash
-AIS_BACKEND=neptune uv run python scripts/refresh_ais.py 2026-03-08
-NEPTUNE_LIVE_ENABLE=true ./scripts/dev.sh
+uv run pytest                          # backend tests
+cd frontend
+./node_modules/.bin/tsc -b --noEmit    # type-check
+./node_modules/.bin/vite build         # production build
 ```
 
-## Architecture
-
-```
-GRIB2 → Zarr (canonical) → COG (map-optimized) → TiTiler (dynamic tiles) → MapLibre + WebGL particles
-                                                                          ↗
-                                          AIS feed → DuckDB (spatial) ──┘
-```
-
-Ingest pipelines convert raw GRIB2 forecasts into Zarr archives (canonical store), then project to COGs for map tiling. TiTiler serves tiles dynamically — no pre-rendered pyramids. The frontend composites raster tiles with WebGL particle overlays. AIS data is stored in DuckDB with the spatial extension for fast geospatial queries.
-
-## API standards
-
-Exposes **OGC API Tiles**, **EDR**, and **Features** endpoints, with a **STAC** catalog for dataset discovery.
+Design notes live in [docs/adr](docs/adr).
 
 ## License
 
