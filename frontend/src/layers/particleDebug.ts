@@ -7,6 +7,8 @@ export interface ParticleDebugState {
   atlasClears: number
   atlasFlushes: number
   pendingDirtyTiles: number
+  /** Wind only: particles drawn in the last frame. */
+  drawnParticles?: number
   /** Wave only: the last frame needed more grid cells than there are dash slots. */
   gridTruncated?: boolean
 }

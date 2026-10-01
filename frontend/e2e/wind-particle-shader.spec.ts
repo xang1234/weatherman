@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { createTrailDecay, waveGridSpacingPx, windSpeedScale } from '../src/layers/particle-motion'
+import { gpuTierForRenderer } from '../src/layers/gpu-tier'
 
 const shader = (name: string) =>
   readFileSync(fileURLToPath(new URL(`../src/layers/shaders/${name}`, import.meta.url)), 'utf8')
@@ -196,3 +197,12 @@ test('wind trail lasts the same time at any frame rate', () => {
   }
 })
 
+test('GPU tiers recognise Windows/ANGLE renderer names', () => {
+  // ANGLE writes (R) marks that the patterns used to trip over (#40).
+  expect(gpuTierForRenderer('ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('medium')
+  expect(gpuTierForRenderer('ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('medium')
+  expect(gpuTierForRenderer('Intel(R) HD Graphics 520')).toBe('low')
+  expect(gpuTierForRenderer('Apple M2 Pro')).toBe('high')
+  expect(gpuTierForRenderer('ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('high')
+  expect(gpuTierForRenderer('ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)')).toBe('low')
+})

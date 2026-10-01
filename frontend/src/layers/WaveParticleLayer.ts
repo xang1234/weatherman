@@ -457,7 +457,8 @@ export class WaveParticleLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, this._stateTextures[this._stateReadIndex])
     gl.useProgram(this._drawProgram.program)
     gl.uniform1i(this._uDrawStateTex, 0)
-    gl.uniform1f(this._uDrawPointSize, POINT_SIZE)
+    // gl_PointSize is in device pixels; POINT_SIZE, like the grid, is in CSS pixels.
+    gl.uniform1f(this._uDrawPointSize, POINT_SIZE * this._map.getPixelRatio())
     gl.uniform1f(this._uDrawSpeedMax, SPEED_MAX)
 
     const mvp = options.modelViewProjectionMatrix
