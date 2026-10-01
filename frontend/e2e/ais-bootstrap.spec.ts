@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { AIS_DATE, mockApiRoutes } from './fixtures'
+import { AIS_DATE, forecastLabel, mockApiRoutes } from './fixtures'
 
 test('AIS layer bootstraps from /ais/tiles/latest on load', async ({ page }) => {
   let latestCalled = false
@@ -12,7 +12,7 @@ test('AIS layer bootstraps from /ais/tiles/latest on load', async ({ page }) => 
   })
 
   await page.goto('/')
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   expect(latestCalled).toBe(true)
 })
@@ -26,7 +26,7 @@ test('AIS layer handles missing snapshot gracefully', async ({ page }) => {
 
   await page.goto('/')
   // App should still render forecast controls without crashing
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   // No error messages in the UI
   await expect(page.locator('text=Error')).not.toBeVisible()

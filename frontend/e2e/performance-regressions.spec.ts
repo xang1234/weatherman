@@ -156,6 +156,42 @@ test('wind layer stays mounted and atlas blits stop on a steady viewport', async
   expect(mounts).toBe(1)
 })
 
+test('the weather tile pass does not rerun on a steady view while particles animate', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  const weatherCounters = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
+    const weather = debugState.weather as { tilePasses: number; composites: number }
+    return { tilePasses: weather.tilePasses, composites: weather.composites }
+  })
+
+  // Wait out the tile arrivals: a 300 ms window with no tile pass.
+  await expect.poll(async () => {
+    const before = await weatherCounters()
+    await page.waitForTimeout(300)
+    return (await weatherCounters()).tilePasses === before.tilePasses
+  }, { timeout: 10_000 }).toBe(true)
+
+  // The particles keep the map repainting; the colour layer only composites (#42).
+  const steadyStart = await weatherCounters()
+  await page.waitForTimeout(1_000)
+  const steadyEnd = await weatherCounters()
+  expect(steadyEnd.composites - steadyStart.composites).toBeGreaterThan(5)
+  expect(steadyEnd.tilePasses).toBe(steadyStart.tilePasses)
+
+  // Moving the map redraws the tiles.
+  const canvas = page.locator('canvas.maplibregl-canvas')
+  await canvas.hover()
+  await page.mouse.down()
+  await page.mouse.move(400, 300, { steps: 5 })
+  await page.mouse.up()
+  await expect.poll(async () => (await weatherCounters()).tilePasses).toBeGreaterThan(steadyEnd.tilePasses)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
@@ -235,7 +271,19 @@ test('pausing after a slow step shows the hour on the slider', async ({ page }) 
   })
   await expect.poll(weatherHour).toBe(0)
 
+  const tilePasses = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
+    return (debugState.weather as { tilePasses: number }).tilePasses
+  })
   await page.locator('button').filter({ hasText: '▶' }).click()
+
+  // Waiting for hour 3, playback sets the blend every frame, but nothing can
+  // be blended yet: the tile pass must not rerun each time (#42).
+  await page.waitForTimeout(300)
+  const waitingStart = await tilePasses()
+  await page.waitForTimeout(1_500)
+  expect(await tilePasses() - waitingStart).toBeLessThanOrEqual(2)
+
   await page.waitForFunction(() => {
     const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
     return slider?.value === '1'

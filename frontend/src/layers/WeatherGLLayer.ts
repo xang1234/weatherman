@@ -32,6 +32,7 @@ import {
   createProgram,
   deleteProgram,
   deleteQuadGeometry,
+  matrixChanged,
   type GLProgram,
   type QuadGeometry,
 } from './gl-utils'
@@ -71,6 +72,36 @@ export interface WeatherGLLayerOptions {
   tileFormat?: TileFormat
 }
 
+/**
+ * Whether two tile passes would draw the same picture. Textures are compared
+ * by identity: a tile's texture is only drawn once loaded and never re-uploaded.
+ */
+function sameDraws(a: TileDraw[], b: TileDraw[]): boolean {
+  return a.length === b.length && a.every((d, i) => {
+    const e = b[i]
+    return d.z === e.z && d.x === e.x && d.y === e.y && d.wrap === e.wrap &&
+      d.uvOffsetX === e.uvOffsetX && d.uvOffsetY === e.uvOffsetY && d.uvScale === e.uvScale &&
+      d.texT0 === e.texT0 && d.texT1 === e.texT1 && d.texV === e.texV && d.texVT1 === e.texVT1
+  })
+}
+
+/** One quad of the tile pass and the texture region it samples. */
+interface TileDraw {
+  /** Footprint to cover: tile coordinates at zoom z. */
+  z: number
+  x: number
+  y: number
+  wrap: number
+  /** Sub-rectangle of the source textures to sample. */
+  uvOffsetX: number
+  uvOffsetY: number
+  uvScale: number
+  texT0: WebGLTexture
+  texT1: WebGLTexture | null
+  texV: WebGLTexture | null
+  texVT1: WebGLTexture | null
+}
+
 export class WeatherGLLayer implements CustomLayerInterface {
   readonly id: string
   readonly type = 'custom' as const
@@ -108,6 +139,13 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
   // Tiles covering the viewport in the last rendered frame
   private _lastVisible: TileCoord[] = []
+
+  // What the offscreen buffer holds: redrawn when the view, the tiles or the
+  // blend drawn differ, or when a setter marks it dirty (hour, layer, size).
+  private _dirty = true
+  private _lastDraws: TileDraw[] = []
+  private _lastMix = 0
+  private _lastMatrix = new Float64Array(16)
 
   private _debug = ensureWeatherDebugState()
 
@@ -318,21 +356,6 @@ export class WeatherGLLayer implements CustomLayerInterface {
     //   1. the previous hour/run, while the newly selected one is loading
     //   2. the nearest loaded ancestor (after zooming in)
     //   3. any loaded children (after zooming out)
-    interface TileDraw {
-      /** Footprint to cover: tile coordinates at zoom z. */
-      z: number
-      x: number
-      y: number
-      wrap: number
-      /** Sub-rectangle of the source textures to sample. */
-      uvOffsetX: number
-      uvOffsetY: number
-      uvScale: number
-      texT0: WebGLTexture
-      texT1: WebGLTexture | null
-      texV: WebGLTexture | null
-      texVT1: WebGLTexture | null
-    }
     const tilesToDraw: TileDraw[] = []
     let fallbackDraws = 0
 
@@ -437,15 +460,79 @@ export class WeatherGLLayer implements CustomLayerInterface {
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE) as number
 
-    // ── Phase 1: Render tiles to offscreen FBO ──────────────────
-
-    // Resize FBO if canvas dimensions changed
-    const fbW = gl.drawingBufferWidth
-    const fbH = gl.drawingBufferHeight
+    // ── Phase 1: tiles → offscreen buffer, only when the picture changed ──
+    // The particle layers repaint every frame, but the colour field only
+    // changes with the view, the tiles drawn, the hour/mix or the layer, so
+    // other frames just composite the buffer again (#42). The buffer is at
+    // CSS resolution: the field is smooth, so device pixels would only
+    // multiply the fragment cost.
+    const pixelRatio = this._map.getPixelRatio()
+    const fbW = Math.max(1, Math.round(gl.drawingBufferWidth / pixelRatio))
+    const fbH = Math.max(1, Math.round(gl.drawingBufferHeight / pixelRatio))
     if (fbW !== this._fboWidth || fbH !== this._fboHeight) {
       this._resizeFBO(gl, fbW, fbH)
     }
+    const moved = matrixChanged(this._lastMatrix, options.modelViewProjectionMatrix)
+    // The mix only shows while blending: playback sets it every frame, also
+    // while it waits for the next hour, and that must not force a pass.
+    const mix = blending ? this._temporalMix : 0
+    if (this._dirty || moved || mix !== this._lastMix || !sameDraws(this._lastDraws, tilesToDraw)) {
+      this._dirty = false
+      this._lastDraws = tilesToDraw
+      this._lastMix = mix
+      this._drawTiles(gl, tilesToDraw, options.modelViewProjectionMatrix, isVector)
+      this._debug.tilePasses++
+    }
+    this._debug.composites++
 
+    // ── Phase 2: Blur composite to screen ───────────────────────
+
+    // Restore MapLibre's FBO and viewport
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo)
+    gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3])
+
+    // Compute zoom-dependent blur radius in device pixels: z3→3.0, z4→2.25,
+    // z5→1.5, z6→0.75, z7+→0.0. Uses the map zoom, not the (capped) data-tile
+    // zoom. Divided by the pixel ratio because a buffer texel is a CSS pixel.
+    const blurRadius = Math.max(0, Math.min(3, (7 - Math.floor(this._map!.getZoom())) * 0.75)) / pixelRatio
+
+    // Enable premultiplied-alpha blending for compositing over the basemap
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+
+    gl.useProgram(this._blurProgram!.program)
+
+    // Bind the offscreen FBO texture to unit 0
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this._fboTexture)
+    gl.uniform1i(this._uBlurTexture, 0)
+    gl.uniform2f(this._uBlurTexelSize, 1.0 / this._fboWidth, 1.0 / this._fboHeight)
+    gl.uniform1f(this._uBlurRadius, blurRadius)
+    gl.uniform1f(this._uBlurOpacity, this._opacity)
+
+    // Draw fullscreen quad (same VAO — compatible attribute layout)
+    gl.bindVertexArray(this._quad.vao)
+    gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
+    gl.bindVertexArray(null)
+
+    // Restore MapLibre's GL state (blend + texture bindings + active unit + program)
+    if (prevBlend) {
+      gl.enable(gl.BLEND)
+      gl.blendFuncSeparate(prevBlendSrc, prevBlendDst, prevBlendSrcA, prevBlendDstA)
+    } else {
+      gl.disable(gl.BLEND)
+    }
+    gl.activeTexture(prevActiveTexture)
+    gl.useProgram(prevProgram)
+  }
+
+  /** Draw the tiles into the offscreen buffer (cleared first). */
+  private _drawTiles(
+    gl: WebGL2RenderingContext,
+    tilesToDraw: TileDraw[],
+    mvp: ArrayLike<number>,
+    isVector: boolean,
+  ): void {
     // Bind offscreen FBO and clear
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbo)
     gl.viewport(0, 0, this._fboWidth, this._fboHeight)
@@ -455,14 +542,13 @@ export class WeatherGLLayer implements CustomLayerInterface {
     // Disable blending for the tile pass — tiles composite additively in the FBO
     gl.disable(gl.BLEND)
 
-    gl.useProgram(this._program.program)
+    gl.useProgram(this._program!.program)
 
     // MapLibre's modelViewProjectionMatrix transforms from world-space pixels
     // [0, worldSize] to clip space. Our vertex shader uses mercator [0, 1]
     // coordinates, so we right-multiply by diag(worldSize) to convert
     // mercator → world-space before the projection.
     const worldSize = 512 * Math.pow(2, this._map!.getZoom())
-    const mvp = options.modelViewProjectionMatrix
     const mercatorMatrix = new Float64Array(16)
     // Right-multiply columns 0,1 by worldSize; column 2 by 1; column 3 unchanged
     for (let i = 0; i < 4; i++) {
@@ -517,7 +603,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.bindTexture(gl.TEXTURE_2D, null)
 
     // Draw each visible tile as a positioned quad
-    gl.bindVertexArray(this._quad.vao)
+    gl.bindVertexArray(this._quad!.vao)
 
     for (const tile of tilesToDraw) {
       const { texT0, texT1, texV, texVT1 } = tile
@@ -565,49 +651,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
         }
       }
 
-      gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
+      gl.drawArrays(gl.TRIANGLES, 0, this._quad!.vertexCount)
     }
 
     gl.bindVertexArray(null)
-
-    // ── Phase 2: Blur composite to screen ───────────────────────
-
-    // Restore MapLibre's FBO and viewport
-    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo)
-    gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3])
-
-    // Compute zoom-dependent blur radius: z3→3.0, z4→2.25, z5→1.5, z6→0.75, z7+→0.0
-    // Uses the map zoom, not the (capped) data-tile zoom.
-    const blurRadius = Math.max(0, Math.min(3, (7 - Math.floor(this._map!.getZoom())) * 0.75))
-
-    // Enable premultiplied-alpha blending for compositing over the basemap
-    gl.enable(gl.BLEND)
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-
-    gl.useProgram(this._blurProgram!.program)
-
-    // Bind the offscreen FBO texture to unit 0
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this._fboTexture)
-    gl.uniform1i(this._uBlurTexture, 0)
-    gl.uniform2f(this._uBlurTexelSize, 1.0 / this._fboWidth, 1.0 / this._fboHeight)
-    gl.uniform1f(this._uBlurRadius, blurRadius)
-    gl.uniform1f(this._uBlurOpacity, this._opacity)
-
-    // Draw fullscreen quad (same VAO — compatible attribute layout)
-    gl.bindVertexArray(this._quad.vao)
-    gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
-    gl.bindVertexArray(null)
-
-    // Restore MapLibre's GL state (blend + texture bindings + active unit + program)
-    if (prevBlend) {
-      gl.enable(gl.BLEND)
-      gl.blendFuncSeparate(prevBlendSrc, prevBlendDst, prevBlendSrcA, prevBlendDstA)
-    } else {
-      gl.disable(gl.BLEND)
-    }
-    gl.activeTexture(prevActiveTexture)
-    gl.useProgram(prevProgram)
   }
 
   /**
@@ -636,6 +683,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
     if (layerChanged && this._gl) {
       this._createColorRamp(this._gl)
     }
+
+    this._dirty = true
 
     // Reset render-skip warning so future failures are not silenced
     this._renderSkipWarned = false
@@ -676,6 +725,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
   advanceForecastHour(newHour: number): void {
     this._forecastHour = newHour
     this._temporalMix = 0
+    this._dirty = true
     this._applyLayerConfig()
     this._map?.triggerRepaint()
   }
@@ -840,6 +890,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._fbo = fbo
     this._fboWidth = width
     this._fboHeight = height
+    this._dirty = true
   }
 
   /** Free all GL resources. */

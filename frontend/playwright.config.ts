@@ -5,6 +5,8 @@ export default defineConfig({
   timeout: 30_000,
   use: {
     baseURL: 'http://localhost:4173',
+    // The forecast bar formats dates in the browser's locale; tests expect en-US.
+    locale: 'en-US',
   },
   webServer: {
     command: 'npx vite preview --port 4173',
