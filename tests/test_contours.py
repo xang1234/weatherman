@@ -115,6 +115,11 @@ def test_endpoint_gzips_when_accepted(client: TestClient):
     assert "immutable" not in response.headers["cache-control"]
 
 
+def test_endpoint_400s_on_a_malformed_model(client: TestClient):
+    assert client.get("/api/contours/GFS/20260306T00Z/prmsl/0").status_code == 400
+    assert client.get("/api/contours/gfs-0/latest/prmsl/0").status_code == 400
+
+
 def test_endpoint_404s(client: TestClient):
     assert client.get("/api/contours/gfs/20260306T00Z/prmsl/9").status_code == 404
     assert client.get("/api/contours/gfs/20991231T00Z/prmsl/0").status_code == 404

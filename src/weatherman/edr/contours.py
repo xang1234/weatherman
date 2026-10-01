@@ -21,6 +21,7 @@ from weatherman.edr.position import (
     get_edr_service,
 )
 from weatherman.processing.contours import isobars_geojson
+from weatherman.storage.paths import StorageLayout
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,10 @@ def isobars(
 ) -> Response:
     # Sync on purpose: contouring is CPU work, so FastAPI runs it in its
     # threadpool rather than on the event loop.
+    try:
+        StorageLayout(model)  # validates the model name, as the catalog endpoint does
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     is_latest = run_id == "latest"
     if is_latest:
         # Not cached under "latest": the current run changes.
