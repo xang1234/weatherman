@@ -374,6 +374,8 @@ export class WindParticleLayer implements CustomLayerInterface {
     const prevBlendDst = gl.getParameter(gl.BLEND_DST_RGB) as number
     const prevBlendSrcA = gl.getParameter(gl.BLEND_SRC_ALPHA) as number
     const prevBlendDstA = gl.getParameter(gl.BLEND_DST_ALPHA) as number
+    const prevBlendEqRgb = gl.getParameter(gl.BLEND_EQUATION_RGB) as number
+    const prevBlendEqAlpha = gl.getParameter(gl.BLEND_EQUATION_ALPHA) as number
 
     // ── Pack visible tiles into atlas textures ──
     const atlas = this._packAtlas(gl, visibleCoords)
@@ -542,7 +544,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.bindVertexArray(this._drawVao)
     gl.drawArrays(gl.TRIANGLES, 0, this._particleCount * 6)
     gl.bindVertexArray(null)
-    gl.blendEquation(gl.FUNC_ADD)
+    gl.blendEquation(gl.FUNC_ADD) // the composite pass below adds
 
     this._trailReadIndex = trailWrite
 
@@ -576,6 +578,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     } else {
       gl.disable(gl.BLEND)
     }
+    gl.blendEquationSeparate(prevBlendEqRgb, prevBlendEqAlpha)
     gl.useProgram(prevProgram)
 
     // Request next frame only when animating (wind data active or mid-transition)
