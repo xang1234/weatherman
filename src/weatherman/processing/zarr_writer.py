@@ -45,6 +45,17 @@ _BLOSC_CODEC = BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")
 _GRID = GridResolution.GFS_025
 
 
+def _stored_units(src: rasterio.DatasetReader, schema_units: str) -> str:
+    """Units of the values GDAL hands back, which can differ from the schema.
+
+    GDAL's GRIB driver converts Kelvin to Celsius by default
+    (GRIB_NORMALIZE_UNITS=YES) and reports it in the band's GRIB_UNIT tag.
+    """
+    if schema_units == "K" and src.tags(1).get("GRIB_UNIT") == "[C]":
+        return "°C"
+    return schema_units
+
+
 def grib2_dir_to_zarr(
     grib2_dir: Path,
     zarr_path: Path,
@@ -106,6 +117,7 @@ def grib2_dir_to_zarr(
 
             with rasterio.open(grib2_file) as src:
                 data = _read_band_as_float32(src)
+                arr.attrs["units"] = _stored_units(src, var_def.units)
 
             data = np.roll(data, _LON_ROLL, axis=1)
             arr[t_idx, :, :] = data
