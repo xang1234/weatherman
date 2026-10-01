@@ -40,10 +40,9 @@ const MANIFEST_RESPONSE = {
 const TILE_FIXTURE_PATH = fileURLToPath(new URL('./fixtures/transparent-256.png', import.meta.url))
 
 interface PerformanceRouteOptions {
-  /** Hold back data tiles of these layers (default wind U/V) for one forecast hour. */
+  /** Hold back wind U/V data tiles for one forecast hour. */
   delayedForecastHour?: number
   delayedResponseMs?: number
-  delayedLayers?: string[]
 }
 
 async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOptions = {}) {
@@ -82,7 +81,7 @@ async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOption
       options.delayedForecastHour != null &&
       options.delayedResponseMs != null &&
       forecastHour === String(options.delayedForecastHour) &&
-      (options.delayedLayers ?? ['wind_u', 'wind_v']).includes(layer)
+      (layer === 'wind_u' || layer === 'wind_v')
     ) {
       await new Promise((resolve) => setTimeout(resolve, options.delayedResponseMs))
     }
@@ -192,6 +191,20 @@ test('the weather tile pass does not rerun on a steady view while particles anim
   await expect.poll(async () => (await weatherCounters()).tilePasses).toBeGreaterThan(steadyEnd.tilePasses)
 })
 
+test('weather is drawn while the basemap is still loading', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Basemap tiles that never arrive used to hold the whole app behind
+  // "Loading map..." (#51).
+  await page.route(/basemaps\.cartocdn\.com|\/basemap\//, () => new Promise(() => {}))
+  await page.goto('/')
+
+  await page.waitForFunction(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return ((debugState?.weather as { drawn?: number } | undefined)?.drawn ?? 0) > 0
+  }, undefined, { timeout: 10_000 })
+  await expect(page.getByText('Loading map...')).toHaveCount(0)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
@@ -254,44 +267,52 @@ test('temperature playback advances while particle layers are inactive', async (
 })
 
 test('pausing after a slow step shows the hour on the slider', async ({ page }) => {
-  // Hour 3 takes 3 s to arrive. Playback used to step the slider to hour 3
-  // after 1.2 s anyway, leaving the map on hour 0 if paused there (#36).
-  await mockPerformanceRoutes(page, {
-    delayedForecastHour: 3,
-    delayedResponseMs: 3_000,
-    delayedLayers: ['temperature'],
+  // Hours 3 and 6 are held back until the test releases them. Playback used
+  // to step the slider to hour 3 after 1.2 s anyway, leaving the map on hour
+  // 0 if paused there (#36).
+  await mockPerformanceRoutes(page)
+  const release: Record<string, () => void> = {}
+  const released = Object.fromEntries(['3', '6'].map((hour) =>
+    [hour, new Promise<void>((resolve) => { release[hour] = resolve })]))
+  await page.route(/\/tiles\/gfs\/.*\/temperature\/(3|6)\/data\//, async (route) => {
+    await released[new URL(route.request().url()).pathname.split('/')[5]]
+    await route.fulfill({ path: TILE_FIXTURE_PATH })
   })
   await page.goto('/')
   await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
   await page.locator('button').filter({ hasText: 'Temperature' }).click()
 
-  const weatherHour = () => page.evaluate(() => {
+  const weatherState = () => page.evaluate(() => {
     const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
-    return (debugState?.weather as { hour?: number } | undefined)?.hour
+    return (debugState?.weather ?? {}) as { hour?: number; tilePasses?: number }
   })
-  await expect.poll(weatherHour).toBe(0)
+  await expect.poll(async () => (await weatherState()).hour).toBe(0)
+  // Let hour 0 finish loading: a 300 ms window with no tile pass.
+  await expect.poll(async () => {
+    const before = (await weatherState()).tilePasses
+    await page.waitForTimeout(300)
+    return (await weatherState()).tilePasses === before
+  }, { timeout: 10_000 }).toBe(true)
 
-  const tilePasses = () => page.evaluate(() => {
-    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
-    return (debugState.weather as { tilePasses: number }).tilePasses
-  })
   await page.locator('button').filter({ hasText: '▶' }).click()
 
-  // Waiting for hour 3, playback sets the blend every frame, but nothing can
-  // be blended yet: the tile pass must not rerun each time (#42).
+  // Waiting for hour 3, playback holds the slider and sets the blend every
+  // frame, but nothing can be blended yet: the tile pass must not rerun each
+  // time (#42).
   await page.waitForTimeout(300)
-  const waitingStart = await tilePasses()
+  const waitingStart = (await weatherState()).tilePasses ?? 0
   await page.waitForTimeout(1_500)
-  expect(await tilePasses() - waitingStart).toBeLessThanOrEqual(2)
+  expect(((await weatherState()).tilePasses ?? 0) - waitingStart).toBeLessThanOrEqual(2)
+  await expect(page.locator('input[type="range"]')).toHaveValue('0')
 
-  await page.waitForFunction(() => {
-    const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
-    return slider?.value === '1'
-  }, undefined, { timeout: 10_000 })
+  // Hour 3 arrives: playback steps to it, then waits again for hour 6.
+  release['3']()
+  await expect(page.locator('input[type="range"]')).toHaveValue('1', { timeout: 10_000 })
   await page.locator('button').filter({ hasText: '⏸' }).click()
+  release['6']()
 
   await expect(page.locator('input[type="range"]')).toHaveValue('1')
-  await expect.poll(weatherHour).toBe(3)
+  await expect.poll(async () => (await weatherState()).hour).toBe(3)
 })
 
 test('a failed next-hour tile does not stall playback', async ({ page }) => {

@@ -30,7 +30,10 @@ export function useMap({ container, center, zoom, style }: UseMapOptions) {
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
 
-    map.on('load', () => setIsLoaded(true))
+    // Layers can be added once the style is parsed. Waiting for `load` would
+    // also wait for the basemap's tiles: weather would start seconds late on
+    // a slow basemap and never if its tiles fail (#51).
+    map.once('style.load', () => setIsLoaded(true))
 
     mapRef.current = map
 
