@@ -147,8 +147,9 @@ export function useIsobars({
     load(forecastHour).then((data) => {
       if (current) (m.getSource(SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData(data)
     })
-    const next = forecastHours[forecastHours.indexOf(forecastHour) + 1]
-    if (next != null) void load(next)
+    // Wraps like playback does: from the last hour it goes back to the first.
+    const next = forecastHours[(forecastHours.indexOf(forecastHour) + 1) % forecastHours.length]
+    if (next != null && next !== forecastHour) void load(next)
     return () => { current = false }
   }, [map, isLoaded, enabled, model, runId, forecastHour, forecastHours, apiBase])
 }

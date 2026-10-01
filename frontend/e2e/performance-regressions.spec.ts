@@ -336,6 +336,22 @@ test('isobars overlay loads the shown hour and prefetches the next', async ({ pa
   await expect.poll(() => [...requested].sort()).toEqual(['0', '3', '6'])
 })
 
+test('isobars on the last hour prefetch the first, where playback wraps to', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const requested: string[] = []
+  await page.route(/\/api\/contours\/gfs\/[^/]+\/prmsl\/\d+$/, (route) => {
+    requested.push(new URL(route.request().url()).pathname.split('/').pop()!)
+    return route.fulfill({ json: { type: 'FeatureCollection', features: [] } })
+  })
+  await page.goto('/?fh=6')
+  const isobars = page.getByLabel('Isobars', { exact: true })
+  await expect(isobars).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('2')
+
+  await isobars.check()
+  await expect.poll(() => [...requested].sort()).toEqual(['0', '6'])
+})
+
 test('isobars retry an hour that failed with a server error', async ({ page }) => {
   await mockPerformanceRoutes(page)
   const requested: string[] = []
