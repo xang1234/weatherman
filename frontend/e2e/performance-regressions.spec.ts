@@ -271,7 +271,19 @@ test('pausing after a slow step shows the hour on the slider', async ({ page }) 
   })
   await expect.poll(weatherHour).toBe(0)
 
+  const tilePasses = () => page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
+    return (debugState.weather as { tilePasses: number }).tilePasses
+  })
   await page.locator('button').filter({ hasText: '▶' }).click()
+
+  // Waiting for hour 3, playback sets the blend every frame, but nothing can
+  // be blended yet: the tile pass must not rerun each time (#42).
+  await page.waitForTimeout(300)
+  const waitingStart = await tilePasses()
+  await page.waitForTimeout(1_500)
+  expect(await tilePasses() - waitingStart).toBeLessThanOrEqual(2)
+
   await page.waitForFunction(() => {
     const slider = document.querySelector('input[type="range"]') as HTMLInputElement | null
     return slider?.value === '1'

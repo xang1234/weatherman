@@ -140,10 +140,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
   // Tiles covering the viewport in the last rendered frame
   private _lastVisible: TileCoord[] = []
 
-  // What the offscreen buffer holds: redrawn when the view or the tiles
-  // differ, or when a setter marks it dirty (hour, mix, layer, size).
+  // What the offscreen buffer holds: redrawn when the view, the tiles or the
+  // blend drawn differ, or when a setter marks it dirty (hour, layer, size).
   private _dirty = true
   private _lastDraws: TileDraw[] = []
+  private _lastMix = 0
   private _lastMatrix = new Float64Array(16)
 
   private _debug = ensureWeatherDebugState()
@@ -472,9 +473,13 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._resizeFBO(gl, fbW, fbH)
     }
     const moved = matrixChanged(this._lastMatrix, options.modelViewProjectionMatrix)
-    if (this._dirty || moved || !sameDraws(this._lastDraws, tilesToDraw)) {
+    // The mix only shows while blending: playback sets it every frame, also
+    // while it waits for the next hour, and that must not force a pass.
+    const mix = blending ? this._temporalMix : 0
+    if (this._dirty || moved || mix !== this._lastMix || !sameDraws(this._lastDraws, tilesToDraw)) {
       this._dirty = false
       this._lastDraws = tilesToDraw
+      this._lastMix = mix
       this._drawTiles(gl, tilesToDraw, options.modelViewProjectionMatrix, isVector)
       this._debug.tilePasses++
     }
@@ -698,7 +703,6 @@ export class WeatherGLLayer implements CustomLayerInterface {
   setTemporalBlend(forecastHourT1: number, mix: number): void {
     this._forecastHourT1 = forecastHourT1
     this._temporalMix = Math.max(0, Math.min(1, mix))
-    this._dirty = true
 
     if (forecastHourT1 >= 0 && this._model && this._runId && this._layerName) {
       const t1Layer = this._isVector ? 'wind_u' : this._layerName
