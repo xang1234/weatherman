@@ -94,7 +94,12 @@ export function useWindParticles({
   // so it only runs then if this run was never configured (enabled mid-play).
   useEffect(() => {
     const pl = layerRef.current
-    if (!pl || !runId || !enabled) return
+    if (!enabled) {
+      // Re-enabling must configure again: the hour has moved on meanwhile.
+      configuredRunRef.current = null
+      return
+    }
+    if (!pl || !runId) return
     if (isPlaying && configuredRunRef.current === runId) return
 
     const ramp = COLOR_RAMPS['wind_speed']

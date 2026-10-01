@@ -9,6 +9,8 @@ export interface ParticleDebugState {
   pendingDirtyTiles: number
   /** Opacity last set on the layer. */
   opacity?: number
+  /** Wind only: forecast hour of the current (T0) tiles. */
+  hour?: number
   /** Wind only: particles drawn in the last frame. */
   drawnParticles?: number
   /** Wave only: the last frame needed more grid cells than there are dash slots. */

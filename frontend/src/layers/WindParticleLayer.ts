@@ -407,6 +407,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const cssArea = (canvasW / pixelRatio) * (canvasH / pixelRatio)
     const drawnParticles = Math.min(this._particleCount, Math.max(1, Math.round(cssArea * PARTICLES_PER_CSS_PX2)))
     this._debug.drawnParticles = drawnParticles
+    this._debug.hour = this._windUManager?.currentForecastHour
 
     // Compute worldSize once — used in both update (speed scale) and draw (matrix) passes.
     const worldSize = 512 * Math.pow(2, this._map.getZoom())

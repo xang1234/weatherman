@@ -269,6 +269,42 @@ test('overlays: wind particles over temperature, each layer with its own opacity
   await expect.poll(async () => (await debug()).wind?.active).toBe(false)
 })
 
+test('an overlay re-enabled during playback picks up the current hour', async ({ page }) => {
+  // Hours 3 and 6 are held back so playback parks on hour 3.
+  await mockPerformanceRoutes(page)
+  const release: Record<string, () => void> = {}
+  const released = Object.fromEntries(['3', '6'].map((hour) =>
+    [hour, new Promise<void>((resolve) => { release[hour] = resolve })]))
+  await page.route(/\/tiles\/gfs\/[^/]+\/[^/]+\/(3|6)\/data\//, async (route) => {
+    await released[new URL(route.request().url()).pathname.split('/')[5]]
+    await route.fulfill({ path: TILE_FIXTURE_PATH })
+  })
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+
+  const windHour = () => page.evaluate(() => {
+    const state = (window as unknown as { __weathermanDebug?: Record<string, { hour?: number }> }).__weathermanDebug
+    return state?.wind?.hour
+  })
+  const windToggle = page.getByLabel('Wind particles', { exact: true })
+  await windToggle.check()
+  await expect.poll(windHour).toBe(0)
+  await windToggle.uncheck()
+
+  await page.locator('button').filter({ hasText: '▶' }).click()
+  release['3']()
+  await expect(page.locator('input[aria-label="Forecast hour"]')).toHaveValue('1', { timeout: 10_000 })
+
+  // Parked on hour 3 (hour 6 is held). Wind comes back on: it must show
+  // hour 3, not the hour 0 it had when switched off.
+  await windToggle.check()
+  await expect.poll(windHour, { timeout: 5_000 }).toBe(3)
+
+  await page.locator('button').filter({ hasText: '⏸' }).click()
+  release['6']()
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
