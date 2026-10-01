@@ -25,6 +25,20 @@ export function fadeForFrame(fadePer60th: number, dt: number): number {
   return Math.pow(fadePer60th, dt * 60)
 }
 
+/**
+ * Spacing (px) of the wave dash grid: the preferred spacing, widened when a
+ * viewport of `width` × `height` px would need more cells than there are
+ * `slots`. The grid origin is snapped to a cell boundary and the far edge
+ * rounded up, so the viewport can need up to (w/s + 2) × (h/s + 2) cells;
+ * that is the quadratic solved for s.
+ */
+export function waveGridSpacingPx(preferred: number, width: number, height: number, slots: number): number {
+  const n = slots - 4
+  if (n <= 0) return Math.max(preferred, width, height)
+  const sum = width + height
+  return Math.max(preferred, (sum + Math.sqrt(sum * sum + n * width * height)) / n)
+}
+
 /** Per-frame trail decay: the buffer is multiplied by `fade`, then `epsilon` is subtracted. */
 export interface TrailDecay {
   fade: number

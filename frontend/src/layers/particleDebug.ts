@@ -7,6 +7,8 @@ export interface ParticleDebugState {
   atlasClears: number
   atlasFlushes: number
   pendingDirtyTiles: number
+  /** Wave only: the last frame needed more grid cells than there are dash slots. */
+  gridTruncated?: boolean
 }
 
 /** What the weather colour layer drew in its last frame (for the e2e suite). */

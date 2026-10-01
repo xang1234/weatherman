@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
-import { createTrailDecay, windSpeedScale } from '../src/layers/particle-motion'
+import { createTrailDecay, waveGridSpacingPx, windSpeedScale } from '../src/layers/particle-motion'
 
 const shader = (name: string) =>
   readFileSync(fileURLToPath(new URL(`../src/layers/shaders/${name}`, import.meta.url)), 'utf8')
@@ -158,6 +158,20 @@ test('wind particles: speed per second, bulk respawn and missing data', async ({
 
   // No wind data: nothing is drawn, rather than particles drifting at random (#34).
   expect(result.hiddenWithoutData).toBe(result.count)
+})
+
+test('wave dash grid never needs more cells than there are slots', () => {
+  // Worst case for the layer's layout: origin snapped a whole cell before the
+  // viewport, far edge rounded up (#35).
+  const cellsNeeded = (w: number, h: number, s: number) => Math.ceil(w / s + 1) * Math.ceil(h / s + 1)
+
+  expect(waveGridSpacingPx(24, 1280, 720, 14_400)).toBe(24) // plenty of slots: keep the preferred spacing
+  for (const [w, h, slots] of [[1536, 864, 1600], [1920, 1080, 1600], [2560, 1440, 5184], [3840, 2160, 1600]]) {
+    const s = waveGridSpacingPx(24, w, h, slots)
+    expect(s).toBeGreaterThan(24)
+    expect(cellsNeeded(w, h, s), `${w}x${h} / ${slots}`).toBeLessThanOrEqual(slots)
+    expect(cellsNeeded(w, h, s * 0.97), `${w}x${h} / ${slots} is not wider than needed`).toBeGreaterThan(slots * 0.93)
+  }
 })
 
 test('wind trail lasts the same time at any frame rate', () => {

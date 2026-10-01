@@ -178,6 +178,27 @@ test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   expect(mounts).toBe(1)
 })
 
+test('wave dashes cover a viewport with more grid cells than dash slots', async ({ page }) => {
+  // SwiftShader is the low tier: 1,600 slots. At 24 px a 1920x1080 viewport
+  // needs 80x45 = 3,600 cells, which used to leave the bottom rows empty (#35).
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await mockPerformanceRoutes(page)
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wave Height' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wave Height' }).click()
+
+  await page.waitForFunction(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    const wave = debugState?.wave as { mounts?: number; gridTruncated?: boolean } | undefined
+    return Boolean(wave && wave.mounts === 1 && wave.gridTruncated !== undefined)
+  })
+  const truncated = await page.evaluate(() => {
+    const debugState = (window as unknown as { __weathermanDebug: Record<string, unknown> }).__weathermanDebug
+    return (debugState.wave as { gridTruncated: boolean }).gridTruncated
+  })
+  expect(truncated).toBe(false)
+})
+
 test('temperature playback advances while particle layers are inactive', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
