@@ -7,6 +7,19 @@ export const CYCLE_TIME = '2026-03-10T00:00:00Z'
 export const FORECAST_HOURS = [0, 3, 6, 9, 12]
 export const AIS_DATE = '2026-03-10'
 
+/** The forecast bar's label for an hour of the fixture run: its valid time in UTC. */
+export function forecastLabel(hour: number): string {
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'UTC',
+  }).format(new Date(Date.parse(CYCLE_TIME) + hour * 3_600_000))
+}
+
 export const CATALOG_RESPONSE = {
   model: 'gfs',
   current_run_id: RUN_ID,

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { mockApiRoutes } from './fixtures'
+import { forecastLabel, mockApiRoutes } from './fixtures'
 
 test.beforeEach(async ({ page }) => {
   await mockApiRoutes(page)
@@ -9,7 +9,7 @@ test('clicking the map opens weather inspector with EDR data', async ({ page }) 
   await page.goto('/')
 
   // Wait for forecast controls to appear (map is loaded + data fetched)
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   // Click on the map canvas to trigger weather inspector
   const canvas = page.locator('canvas.maplibregl-canvas')
@@ -26,7 +26,7 @@ test('clicking the map opens weather inspector with EDR data', async ({ page }) 
 
 test('inspector shows variable tabs and values table', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   const canvas = page.locator('canvas.maplibregl-canvas')
   await canvas.click({ position: { x: 400, y: 300 } })
@@ -49,7 +49,7 @@ test('inspector shows variable tabs and values table', async ({ page }) => {
 
 test('switching variable tab updates the selected chart', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   const canvas = page.locator('canvas.maplibregl-canvas')
   await canvas.click({ position: { x: 400, y: 300 } })
@@ -67,7 +67,7 @@ test('switching variable tab updates the selected chart', async ({ page }) => {
 
 test('close button dismisses inspector', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByText('F000')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(forecastLabel(0))).toBeVisible({ timeout: 10_000 })
 
   const canvas = page.locator('canvas.maplibregl-canvas')
   await canvas.click({ position: { x: 400, y: 300 } })
