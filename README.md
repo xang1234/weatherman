@@ -30,18 +30,18 @@ GFS and GEFS forecasts, rendered on the GPU over a vector basemap, with the ship
 
 ## Quickstart
 
-**Local (no Docker):** needs [uv](https://docs.astral.sh/uv/) and Node 20.19+ or 22.12+.
+**Local (no Docker):** needs [uv](https://docs.astral.sh/uv/) and Node 20.19+ or 22.12+ on your `PATH` (e.g. `nvm use 22`) for every frontend command below.
 
 ```bash
-(cd frontend && npm install)   # once
-./scripts/dev.sh               # TiTiler :8080, API :8000, Vite :5173
+export NODE_BIN="$(dirname "$(command -v node)")"   # dev.sh runs Vite with a fixed PATH
+(cd frontend && npm install)                        # once
+./scripts/dev.sh                                    # TiTiler :8080, API :8000, Vite :5173
 ```
 
 The first run pulls a sample from NOAA: the latest GFS cycle, forecast hours 0, 3 and 6 (about 3 minutes and 2 GB). Later runs start in seconds. Open the URL Vite prints, usually <http://127.0.0.1:5173>.
 
 ```bash
 SAMPLE_HOURS=0,3,6,9,12 ./scripts/dev.sh        # seed more hours on first run
-NODE_BIN=~/.nvm/versions/node/v22.18.0/bin ./scripts/dev.sh   # if system node is too old
 WEATHERMAN_DATA_DIR=.data uv run python scripts/run_pipeline.py \
   --hours 0,3,6 --max-runs 1 --tile-formats png   # refresh to the newest cycle; the open map updates live
 ```
