@@ -5,7 +5,8 @@
  * (via WEBGL_debug_renderer_info). Falls back to a conservative default
  * if the extension is unavailable (e.g., privacy-focused browsers).
  *
- * Tier → particle state-texture size (particles = size²):
+ * Tier → particle state-texture size (particles = size²), the most a
+ * layer may use; how many it draws depends on the viewport:
  *   HIGH   → 136  (18,496 particles)
  *   MEDIUM → 88   (7,744 particles)
  *   LOW    → 48   (2,304 particles)
@@ -28,7 +29,8 @@ const TIER_STATE_SIZES: Record<GpuTier, number> = {
 }
 
 // ── Renderer string patterns ─────────────────────────────────────────
-// Matched case-insensitively against UNMASKED_RENDERER_WEBGL.
+// Matched case-insensitively against UNMASKED_RENDERER_WEBGL, with (R) and
+// (TM) marks removed: Windows/ANGLE reports "Intel(R) UHD Graphics 620".
 
 /** GPUs known to handle high particle counts at 60fps easily. */
 const HIGH_PATTERNS = [
@@ -40,12 +42,12 @@ const HIGH_PATTERNS = [
   /radeon pro [wv]/i,               // AMD Pro workstation
 ]
 
-/** GPUs where 80² is appropriate. */
+/** Mid-range GPUs. */
 const MEDIUM_PATTERNS = [
   /apple m1/i,                       // Apple M1 (still good, but not 512²)
   /apple gpu/i,                      // Generic Apple (A-series iPad/iPhone)
   /intel iris (plus|pro|xe)/i,       // Intel Iris integrated (decent)
-  /intel uhd [6-9]\d{2}/i,          // Intel UHD 630+
+  /intel uhd (graphics )?[6-9]\d{2}/i, // Intel UHD (Graphics) 600-900 series
   /nvidia geforce gtx 1[0-5]/i,     // NVIDIA GTX 1050-1550
   /nvidia geforce mx/i,             // NVIDIA MX mobile
   /radeon rx [3-5]\d{2}/i,          // AMD RX 400/500 series (3-digit models: 480, 580, 590)
@@ -67,23 +69,16 @@ export function detectGpuTier(gl: WebGL2RenderingContext): GpuTierResult {
   const renderer = ext
     ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) as string
     : 'unknown'
+  const tier = gpuTierForRenderer(renderer)
+  return { tier, stateSize: TIER_STATE_SIZES[tier], renderer }
+}
 
-  // Check high-tier patterns first
-  for (const pattern of HIGH_PATTERNS) {
-    if (pattern.test(renderer)) {
-      return { tier: 'high', stateSize: TIER_STATE_SIZES.high, renderer }
-    }
-  }
-
-  // Then medium-tier
-  for (const pattern of MEDIUM_PATTERNS) {
-    if (pattern.test(renderer)) {
-      return { tier: 'medium', stateSize: TIER_STATE_SIZES.medium, renderer }
-    }
-  }
-
-  // Unknown or weak GPU — be conservative
-  return { tier: 'low', stateSize: TIER_STATE_SIZES.low, renderer }
+/** Tier for a WebGL renderer string. Unknown or weak GPUs are 'low'. */
+export function gpuTierForRenderer(renderer: string): GpuTier {
+  const name = renderer.replace(/\((r|tm)\)/gi, '')
+  if (HIGH_PATTERNS.some((pattern) => pattern.test(name))) return 'high'
+  if (MEDIUM_PATTERNS.some((pattern) => pattern.test(name))) return 'medium'
+  return 'low'
 }
 
 /**

@@ -206,6 +206,30 @@ test('weather is drawn while the basemap is still loading', async ({ page }) => 
   await expect(page.getByText('Loading map...')).toHaveCount(0)
 })
 
+test('wind particle count follows the viewport area, not the pixel density', async ({ browser }) => {
+  // One particle per 250 CSS px² (#40). Small viewports keep SwiftShader's
+  // low-tier cap (2,304) out of the way.
+  const drawn = async (width: number, height: number, deviceScaleFactor: number) => {
+    const { baseURL } = test.info().project.use
+    const page = await browser.newPage({ baseURL, viewport: { width, height }, deviceScaleFactor })
+    await mockPerformanceRoutes(page)
+    await page.goto('/')
+    await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+    await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+    const handle = await page.waitForFunction(() => {
+      const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+      return (debugState?.wind as { drawnParticles?: number } | undefined)?.drawnParticles
+    })
+    const count = await handle.jsonValue()
+    await page.close()
+    return count
+  }
+
+  expect(await drawn(640, 400, 1)).toBe(1024)
+  expect(await drawn(640, 400, 2)).toBe(1024)
+  expect(await drawn(400, 320, 1)).toBe(512)
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

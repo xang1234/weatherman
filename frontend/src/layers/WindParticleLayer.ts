@@ -63,8 +63,14 @@ const TRAIL_FADE = 0.97
 /** Maximum expected wind speed (m/s) for normalizing speed → alpha in the draw shader. */
 const SPEED_MAX = 50.0
 
-/** Trail width in drawing-buffer pixels — zoom-independent. */
+/** Trail width in CSS pixels — zoom-independent. */
 const LINE_WIDTH = 1.7
+
+/**
+ * Particles drawn per CSS pixel² of viewport, so density does not depend on
+ * window size (about 5,200 at 1440×900). The GPU tier only caps the total.
+ */
+const PARTICLES_PER_CSS_PX2 = 1 / 250
 
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
@@ -267,9 +273,9 @@ export class WindParticleLayer implements CustomLayerInterface {
     } else {
       const tier = detectGpuTier(gl)
       this._gpuTier = tier.tier
-      // Wind-specific: ~30% of tier baseline (sqrt(0.3) ≈ 0.548 on stateSize axis)
-      // for a calmer, less dense field. Waves use the unscaled tier value.
-      this._stateSize = clampStateSize(Math.round(tier.stateSize * 0.548))
+      // The tier sets how many particles there can be; render() draws as
+      // many as the viewport area calls for.
+      this._stateSize = clampStateSize(tier.stateSize)
       console.info(
         `[WindParticleLayer] GPU: "${tier.renderer}" → tier=${tier.tier}, ` +
         `stateSize=${this._stateSize} (${this._stateSize ** 2} particles)`
@@ -394,6 +400,13 @@ export class WindParticleLayer implements CustomLayerInterface {
     }
 
     if (!this._trailTextures || !this._trailFbos) return
+
+    // Draw a share of the particles proportional to the viewport's CSS area.
+    // All of them are updated (cheap), so a resize only changes how many show.
+    const pixelRatio = this._map.getPixelRatio()
+    const cssArea = (canvasW / pixelRatio) * (canvasH / pixelRatio)
+    const drawnParticles = Math.min(this._particleCount, Math.max(1, Math.round(cssArea * PARTICLES_PER_CSS_PX2)))
+    this._debug.drawnParticles = drawnParticles
 
     // Compute worldSize once — used in both update (speed scale) and draw (matrix) passes.
     const worldSize = 512 * Math.pow(2, this._map.getZoom())
@@ -529,7 +542,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform1i(this._uDrawStateTex, 0)
     gl.uniform1i(this._uDrawPrevStateTex, 1)
     gl.uniform2f(this._uDrawViewport, this._trailWidth, this._trailHeight)
-    gl.uniform1f(this._uDrawLineWidth, LINE_WIDTH)
+    gl.uniform1f(this._uDrawLineWidth, LINE_WIDTH * pixelRatio)
     gl.uniform1f(this._uDrawSpeedMax, SPEED_MAX)
 
     // MapLibre's modelViewProjectionMatrix transforms from world coordinates
@@ -549,7 +562,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     // ends, and summing there would bead the trail.
     gl.blendEquation(gl.MAX)
     gl.bindVertexArray(this._drawVao)
-    gl.drawArrays(gl.TRIANGLES, 0, this._particleCount * 6)
+    gl.drawArrays(gl.TRIANGLES, 0, drawnParticles * 6)
     gl.bindVertexArray(null)
     gl.blendEquation(gl.FUNC_ADD) // the composite pass below adds
 
