@@ -47,7 +47,7 @@ const MEDIUM_PATTERNS = [
   /apple m1/i,                       // Apple M1 (still good, but not 512²)
   /apple gpu/i,                      // Generic Apple (A-series iPad/iPhone)
   /intel iris (plus|pro|xe)/i,       // Intel Iris integrated (decent)
-  /intel uhd graphics [6-9]\d{2}/i, // Intel UHD Graphics 600-900 series
+  /intel uhd (graphics )?[6-9]\d{2}/i, // Intel UHD (Graphics) 600-900 series
   /nvidia geforce gtx 1[0-5]/i,     // NVIDIA GTX 1050-1550
   /nvidia geforce mx/i,             // NVIDIA MX mobile
   /radeon rx [3-5]\d{2}/i,          // AMD RX 400/500 series (3-digit models: 480, 580, 590)

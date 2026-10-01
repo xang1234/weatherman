@@ -201,6 +201,7 @@ test('GPU tiers recognise Windows/ANGLE renderer names', () => {
   // ANGLE writes (R) marks that the patterns used to trip over (#40).
   expect(gpuTierForRenderer('ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('medium')
   expect(gpuTierForRenderer('ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('medium')
+  expect(gpuTierForRenderer('Intel UHD 630')).toBe('medium')
   expect(gpuTierForRenderer('Intel(R) HD Graphics 520')).toBe('low')
   expect(gpuTierForRenderer('Apple M2 Pro')).toBe('high')
   expect(gpuTierForRenderer('ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)')).toBe('high')
