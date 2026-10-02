@@ -15,6 +15,7 @@ from rasterio.enums import Resampling
 
 from weatherman.processing.data_tiles import (
     MAX_DATA_TILE_ZOOM,
+    TILE_GUTTER,
     _WORLD_EXTENT,
     data_tile_resampling_for_layer,
     generate_all_data_tiles,
@@ -22,6 +23,8 @@ from weatherman.processing.data_tiles import (
     tile_bounds_3857,
 )
 from weatherman.tiling.data_encoder import decode_f16_to_float, decode_rgba_to_float
+
+SIDE = 256 + 2 * TILE_GUTTER
 
 
 def _make_test_cog(
@@ -91,7 +94,7 @@ class TestTileBounds3857:
 class TestGenerateDataTile:
     def test_wave_direction_uses_nearest_resampling(self):
         assert data_tile_resampling_for_layer("wave_direction") == Resampling.nearest
-        assert data_tile_resampling_for_layer("temperature") == Resampling.bilinear
+        assert data_tile_resampling_for_layer("temperature") == Resampling.cubic_spline
 
     def test_roundtrip_accuracy(self):
         """Synthetic COG → tile → decode should preserve values within 0.1%."""
@@ -106,7 +109,7 @@ class TestGenerateDataTile:
             png_bytes = generate_data_tile(cog_path, 0, 0, 0, -55.0, 55.0)
 
             img = Image.open(io.BytesIO(png_bytes))
-            assert img.size == (256, 256)
+            assert img.size == (SIDE, SIDE)
             assert img.mode == "RGBA"
 
             rgba = np.array(img)
@@ -159,9 +162,9 @@ class TestGenerateDataTile:
                 50.0,
                 tile_format="f16",
             )
-            decoded, mask = decode_f16_to_float(buf, 256, 256)
+            decoded, mask = decode_f16_to_float(buf, SIDE, SIDE)
 
-            assert decoded.shape == (256, 256)
+            assert decoded.shape == (SIDE, SIDE)
             assert not mask.all()
             assert np.allclose(decoded[~mask], 12.5, atol=0.1)
         finally:
@@ -189,11 +192,19 @@ def _smooth_field(lon, lat):
     return 20.0 * np.sin(np.radians(2 * lon + 30.0)) * np.cos(np.radians(lat))
 
 
-def _decode_tile(cog_path: str, z: int, x: int, y: int) -> np.ndarray:
-    rgba = np.array(Image.open(io.BytesIO(generate_data_tile(cog_path, z, x, y, -50.0, 50.0))))
-    values, mask = decode_rgba_to_float(rgba, -50.0, 50.0)
+def _decode_tile(
+    cog_path: str, z: int, x: int, y: int, resampling: Resampling = Resampling.cubic_spline,
+) -> np.ndarray:
+    """A tile's values, gutter included."""
+    tile = generate_data_tile(cog_path, z, x, y, -50.0, 50.0, resampling=resampling)
+    values, mask = decode_rgba_to_float(np.array(Image.open(io.BytesIO(tile))), -50.0, 50.0)
     assert not mask.any()
     return values
+
+
+def _inner(values: np.ndarray) -> np.ndarray:
+    """The tile's own 256 x 256 pixels, without the gutter."""
+    return values[TILE_GUTTER:-TILE_GUTTER, TILE_GUTTER:-TILE_GUTTER]
 
 
 class TestDataTileAccuracy:
@@ -209,7 +220,7 @@ class TestDataTileAccuracy:
         _global_point_grid_cog(cog_path, lambda lon, lat: noise)
 
         z, x, y = 3, 5, 2
-        values = _decode_tile(cog_path, z, x, y)
+        values = _inner(_decode_tile(cog_path, z, x, y, Resampling.bilinear))
 
         # Position of every tile pixel centre, as fractional (row, col) of the
         # 1 degree grid whose point (0, 0) is at 90N, 180W.
@@ -236,13 +247,28 @@ class TestDataTileAccuracy:
         _global_point_grid_cog(cog_path, _smooth_field)
 
         z, y = 3, 3
-        last = _decode_tile(cog_path, z, 2**z - 1, y)   # ends at 180°E
-        first = _decode_tile(cog_path, z, 0, y)         # starts at 180°W
+        last = _inner(_decode_tile(cog_path, z, 2**z - 1, y))   # ends at 180°E
+        first = _inner(_decode_tile(cog_path, z, 0, y))         # starts at 180°W
 
         step_across = np.abs(last[:, -1] - first[:, 0]).max()
         step_within = np.abs(last[:, -1] - last[:, -2]).max()
         assert step_within > 0, "field must vary right up to the antimeridian"
         assert step_across < 2 * step_within
+
+
+    @pytest.mark.parametrize(("left", "right"), [(4, 5), (7, 0)], ids=["inland", "antimeridian"])
+    def test_gutter_holds_the_neighbours_edge_pixels(self, tmp_path: Path, left: int, right: int):
+        """A tile's gutter is its neighbour's edge, so the browser can
+        interpolate across the boundary instead of clamping at it (#45)."""
+        cog_path = str(tmp_path / "field.tif")
+        _global_point_grid_cog(cog_path, _smooth_field)
+        z, y = 3, 3
+        a = _decode_tile(cog_path, z, left, y)
+        b = _decode_tile(cog_path, z, right, y)
+        g = TILE_GUTTER
+        # 16-bit encoding over a 100-unit range quantises to 0.0015.
+        assert np.abs(a[g:-g, -g:] - b[g:-g, g:2 * g]).max() < 0.005    # a's right gutter = b's first column
+        assert np.abs(b[g:-g, :g] - a[g:-g, -2 * g:-g]).max() < 0.005   # b's left gutter = a's last column
 
 
 class TestGenerateAllDataTiles:
@@ -279,7 +305,7 @@ class TestGenerateAllDataTiles:
                 cog_path, 0.0, 50.0, max_zoom=1,
             ):
                 img = Image.open(io.BytesIO(png_bytes))
-                assert img.size == (256, 256)
+                assert img.size == (SIDE, SIDE)
                 assert img.mode == "RGBA"
         finally:
             Path(cog_path).unlink()
@@ -304,8 +330,8 @@ class TestGenerateAllDataTiles:
             )
             assert len(tiles) == 1
             _, _, _, buf = tiles[0]
-            decoded, mask = decode_f16_to_float(buf, 256, 256)
-            assert decoded.shape == (256, 256)
+            decoded, mask = decode_f16_to_float(buf, SIDE, SIDE)
+            assert decoded.shape == (SIDE, SIDE)
             assert not mask.all()
             assert np.allclose(decoded[~mask], 18.0, atol=0.1)
         finally:

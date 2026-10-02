@@ -37,10 +37,19 @@ _WORLD_EXTENT = 20037508.342789244
 
 _NEAREST_DATA_TILE_LAYERS = frozenset({"wave_direction"})
 
+# Pixels of the neighbouring tiles kept on each side, so a 256 px tile is
+# stored as 258 x 258. The browser interpolates between texels; with the
+# gutter it can do so across a tile edge too, instead of clamping there and
+# drawing a seam (#45).
+TILE_GUTTER = 1
+
 # Source columns copied across the antimeridian onto each side of a global
 # grid, so resampling at ±180° interpolates across it instead of stopping at
-# the raster's edge (which shows as a seam along the date line).
-_WRAP_COLUMNS = 4
+# the raster's edge (which shows as a seam along the date line). Enough for
+# z0 on a 0.25° grid: a tile pixel there is ~5.6 columns, GDAL widens the
+# cubic-spline kernel (radius 2) by that when downsampling, and the gutter
+# reaches a pixel further — about 14 columns past the edge.
+_WRAP_COLUMNS = 16
 
 
 def _encode_data_tile(
@@ -79,10 +88,16 @@ def tile_bounds_3857(z: int, x: int, y: int) -> tuple[float, float, float, float
 
 
 def data_tile_resampling_for_layer(layer: str) -> Resampling:
-    """Return the raster resampling strategy for a layer's data tiles."""
+    """Return the raster resampling strategy for a layer's data tiles.
+
+    A cubic B-spline: one source cell spans several tile pixels, and
+    bilinear resampling creases the field along every grid line, which shows
+    once the map zooms in. The B-spline is smooth across them and, unlike
+    cubic convolution, never overshoots (no negative wave heights).
+    """
     if layer in _NEAREST_DATA_TILE_LAYERS:
         return Resampling.nearest
-    return Resampling.bilinear
+    return Resampling.cubic_spline
 
 
 @contextmanager
@@ -133,7 +148,10 @@ def _warp_tile(
     tile_size: int,
     resampling: Resampling,
 ) -> tuple[np.ndarray, float | None]:
-    """Warp the source straight onto one tile's pixel grid.
+    """Warp the source straight onto one tile's pixel grid, plus the gutter.
+
+    The result is (tile_size + 2 * TILE_GUTTER) square: the tile's own
+    pixels, framed by the adjacent pixels of its neighbours on the same grid.
 
     The grid is given explicitly. Left to itself, WarpedVRT picks one grid for
     the whole dataset, and for a pole-to-pole source (unbounded in Web
@@ -142,13 +160,16 @@ def _warp_tile(
 
     Returns (values, nodata).
     """
-    transform = from_bounds(*tile_bounds_3857(z, x, y), tile_size, tile_size)
+    west, south, east, north = tile_bounds_3857(z, x, y)
+    pad = (east - west) / tile_size * TILE_GUTTER
+    side = tile_size + 2 * TILE_GUTTER
+    transform = from_bounds(west - pad, south - pad, east + pad, north + pad, side, side)
     with WarpedVRT(
         src,
         crs="EPSG:3857",
         transform=transform,
-        width=tile_size,
-        height=tile_size,
+        width=side,
+        height=side,
         resampling=resampling,
     ) as vrt:
         return vrt.read(1).astype(np.float32), vrt.nodata
@@ -162,7 +183,7 @@ def generate_data_tile(
     value_min: float,
     value_max: float,
     tile_size: int = 256,
-    resampling: Resampling = Resampling.bilinear,
+    resampling: Resampling = Resampling.cubic_spline,
     tile_format: str = "png",
 ) -> bytes:
     """Generate a single pre-generated data tile from a COG.
@@ -181,7 +202,7 @@ def generate_all_data_tiles(
     value_max: float,
     max_zoom: int = MAX_DATA_TILE_ZOOM,
     tile_size: int = 256,
-    resampling: Resampling = Resampling.bilinear,
+    resampling: Resampling = Resampling.cubic_spline,
     tile_format: str = "png",
 ) -> Iterator[tuple[int, int, int, bytes]]:
     """Generate pre-generated data tiles for z0 through max_zoom from a COG.

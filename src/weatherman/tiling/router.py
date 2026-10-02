@@ -23,7 +23,11 @@ from fastapi.responses import JSONResponse
 from weatherman.storage.catalog import RunCatalog
 from weatherman.storage.config import StorageConfig
 from weatherman.storage.paths import RunID, StorageLayout
-from weatherman.processing.data_tiles import MAX_DATA_TILE_ZOOM
+from weatherman.processing.data_tiles import (
+    MAX_DATA_TILE_ZOOM,
+    TILE_GUTTER,
+    data_tile_resampling_for_layer,
+)
 from weatherman.storage.object_store import ObjectStore
 from weatherman.tiling.colormaps import COLORMAPS, export_color_ramps, get_colormap, get_value_range
 from weatherman.tiling.data_encoder import encode_float_to_f16, encode_float_to_rgba, rgba_to_png_bytes
@@ -33,7 +37,7 @@ router = APIRouter(prefix="/tiles", tags=["tiles"])
 # The app provides a function that loads a RunCatalog for a given model name.
 CatalogLoader = Callable[[str], RunCatalog]
 
-_NEAREST_TILE_LAYERS = frozenset({"wave_direction"})
+_DATA_TILE_SIDE = 256 + 2 * TILE_GUTTER
 
 
 def _read_geotiff_band(content: bytes) -> tuple[np.ndarray, float | None]:
@@ -44,10 +48,12 @@ def _read_geotiff_band(content: bytes) -> tuple[np.ndarray, float | None]:
 
 
 def tile_resampling_for_layer(layer: str) -> str:
-    """Return TiTiler/GDAL resampling mode for the requested layer."""
-    if layer in _NEAREST_TILE_LAYERS:
-        return "nearest"
-    return "bilinear"
+    """Return TiTiler/GDAL resampling mode for the requested layer.
+
+    The same as the pre-generated data tiles, so a tile looks alike whichever
+    path serves it.
+    """
+    return data_tile_resampling_for_layer(layer).name
 
 
 class TileService:
@@ -229,6 +235,8 @@ class TileService:
         params: dict[str, str] = {
             "url": cog_uri,
             "resampling": tile_resampling_for_layer(layer),
+            # Same gutter as the pre-generated tiles (258 x 258).
+            "buffer": str(TILE_GUTTER),
         }
 
         titiler_path = (
@@ -325,7 +333,7 @@ class TileService:
                     headers={
                         "Cache-Control": cache,
                         "X-Tile-Format": "float16",
-                        "X-Tile-Size": "256,256",
+                        "X-Tile-Size": f"{_DATA_TILE_SIDE},{_DATA_TILE_SIDE}",
                     },
                 )
             except (FileNotFoundError, OSError):
@@ -335,6 +343,8 @@ class TileService:
         params: dict[str, str] = {
             "url": cog_uri,
             "resampling": tile_resampling_for_layer(layer),
+            # Same gutter as the pre-generated tiles (258 x 258).
+            "buffer": str(TILE_GUTTER),
         }
 
         titiler_path = (
