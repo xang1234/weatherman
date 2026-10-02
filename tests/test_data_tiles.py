@@ -283,6 +283,7 @@ class TestGenerateAllDataTiles:
         try:
             tiles = list(generate_all_data_tiles(cog_path, 0.0, 50.0, max_zoom=2))
             assert len(tiles) == 21
+            assert all(t[3].keys() == {"png"} for t in tiles)  # png only by default
 
             # Verify z values are correct
             z_values = [t[0] for t in tiles]
@@ -301,10 +302,10 @@ class TestGenerateAllDataTiles:
             cog_path = f.name
 
         try:
-            for z, x, y, png_bytes in generate_all_data_tiles(
+            for z, x, y, encoded in generate_all_data_tiles(
                 cog_path, 0.0, 50.0, max_zoom=1,
             ):
-                img = Image.open(io.BytesIO(png_bytes))
+                img = Image.open(io.BytesIO(encoded["png"]))
                 assert img.size == (SIDE, SIDE)
                 assert img.mode == "RGBA"
         finally:
@@ -325,14 +326,37 @@ class TestGenerateAllDataTiles:
                     0.0,
                     50.0,
                     max_zoom=0,
-                    tile_format="f16",
+                    tile_formats=("f16",),
                 )
             )
             assert len(tiles) == 1
-            _, _, _, buf = tiles[0]
+            _, _, _, encoded = tiles[0]
+            assert encoded.keys() == {"f16"}
+            buf = encoded["f16"]
             decoded, mask = decode_f16_to_float(buf, SIDE, SIDE)
             assert decoded.shape == (SIDE, SIDE)
             assert not mask.all()
             assert np.allclose(decoded[~mask], 18.0, atol=0.1)
         finally:
             Path(cog_path).unlink()
+
+    def test_both_formats_come_from_one_warp_per_tile(self, tmp_path: Path, monkeypatch):
+        """Dual-format output warps each tile once and encodes exactly what
+        each format alone would (#95)."""
+        import weatherman.processing.data_tiles as mod
+
+        cog_path = str(tmp_path / "field.tif")
+        _global_point_grid_cog(cog_path, _smooth_field)
+        alone = {
+            f: {(z, x, y): t[f] for z, x, y, t in generate_all_data_tiles(cog_path, -50.0, 50.0, max_zoom=1, tile_formats=(f,))}
+            for f in ("png", "f16")
+        }
+
+        warps = []
+        real_warp = mod._warp_tile
+        monkeypatch.setattr(mod, "_warp_tile", lambda *a, **kw: warps.append(a[1:4]) or real_warp(*a, **kw))
+        both = list(generate_all_data_tiles(cog_path, -50.0, 50.0, max_zoom=1, tile_formats=("png", "f16")))
+
+        assert len(warps) == len(set(warps)) == len(both) == 5
+        for z, x, y, encoded in both:
+            assert encoded == {f: alone[f][(z, x, y)] for f in ("png", "f16")}

@@ -176,11 +176,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tile-formats",
-        default="png,f16",
+        default="png",
         help=(
-            "Comma-separated data-tile formats to pre-generate (default: png,f16). "
-            "f16 is ~70%% of a run's disk use and only read when the frontend "
-            "sets VITE_USE_FLOAT16_TILES=true."
+            "Comma-separated data-tile formats to pre-generate: png, f16 or "
+            "png,f16 (default: png). The frontend reads png unless built with "
+            "VITE_USE_FLOAT16_TILES=true; add f16 only for such a build. "
+            "f16 is ~70%% of a run's disk use."
         ),
     )
     return parser.parse_args()
@@ -339,6 +340,22 @@ def step_generate_cogs(
     return generated_layers
 
 
+def parse_tile_formats(value: str) -> tuple[str, ...]:
+    """The data-tile formats of a ``--tile-formats`` value, e.g. "png,f16".
+
+    Each format is a consumer contract: png for the default frontend build,
+    f16 for one built with VITE_USE_FLOAT16_TILES=true. A format left out
+    still works, only slower: its tile route falls back to TiTiler, which
+    warps the COG per request.
+    """
+    formats = tuple(dict.fromkeys(f.strip() for f in value.split(",") if f.strip()))
+    if not formats:
+        raise ValueError("no format given (expected png, f16 or png,f16)")
+    if unknown := set(formats) - {"png", "f16"}:
+        raise ValueError(f"unknown format(s) {sorted(unknown)} (expected png, f16)")
+    return formats
+
+
 def step_generate_data_tiles(
     run_id: RunID,
     forecast_hours: list[int],
@@ -347,7 +364,7 @@ def step_generate_data_tiles(
     layout: StorageLayout,
     generated_layers: set[str],
     max_zoom: int = MAX_DATA_TILE_ZOOM,
-    tile_formats: tuple[str, ...] = ("png", "f16"),
+    tile_formats: tuple[str, ...] = ("png",),
 ) -> dict[str, ValueRange]:
     """Pre-generate static data tiles for each layer/hour.
 
@@ -376,32 +393,32 @@ def step_generate_data_tiles(
             if not cog_path.exists():
                 continue
 
-            for tile_format in tile_formats:
-                count = 0
-                tiles = generate_all_data_tiles(
-                    str(cog_path),
-                    vmin,
-                    vmax,
-                    max_zoom=max_zoom,
-                    resampling=data_tile_resampling_for_layer(layer),
-                    tile_format=tile_format,
-                )
-                try:
-                    for z, x, y, tile_bytes in tiles:
+            count = 0
+            tiles = generate_all_data_tiles(
+                str(cog_path),
+                vmin,
+                vmax,
+                max_zoom=max_zoom,
+                resampling=data_tile_resampling_for_layer(layer),
+                tile_formats=tile_formats,
+            )
+            try:
+                for z, x, y, encoded in tiles:
+                    for tile_format, tile_bytes in encoded.items():
                         tile_key = layout.staging_data_tile_path(
                             run_id, layer, fhour, z, x, y,
                             tile_format=tile_format,
                         )
                         store.write_bytes(tile_key, tile_bytes)
                         count += 1
-                finally:
-                    tiles.close()
+            finally:
+                tiles.close()
 
-                total += count
-                logger.info(
-                    "  %s/f%03d (%s): %d tiles",
-                    layer, fhour, tile_format, count,
-                )
+            total += count
+            logger.info(
+                "  %s/f%03d (%s): %d tiles",
+                layer, fhour, ",".join(tile_formats), count,
+            )
 
     logger.info("Generated %d data tiles total", total)
     return ranges
@@ -647,9 +664,10 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     forecast_hours = [int(h.strip()) for h in args.hours.split(",")]
-    tile_formats = tuple(f.strip() for f in args.tile_formats.split(","))
-    if unknown := set(tile_formats) - {"png", "f16"}:
-        sys.exit(f"--tile-formats: unknown format(s) {sorted(unknown)} (expected png, f16)")
+    try:
+        tile_formats = parse_tile_formats(args.tile_formats)
+    except ValueError as exc:
+        sys.exit(f"--tile-formats: {exc}")
 
     # Resolve run ID
     if args.run_id:

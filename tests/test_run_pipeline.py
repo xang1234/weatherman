@@ -65,3 +65,17 @@ def test_step_publish_run_uses_canonical_publish_and_emits_event(tmp_path):
         run(_test())
     finally:
         shutdown_event_bus()
+
+
+def test_tile_formats_default_to_png_and_reject_empty_or_unknown(monkeypatch):
+    import pytest
+
+    from scripts.run_pipeline import parse_args, parse_tile_formats
+
+    monkeypatch.setattr("sys.argv", ["run_pipeline.py"])
+    assert parse_tile_formats(parse_args().tile_formats) == ("png",)
+    assert parse_tile_formats("f16") == ("f16",)
+    assert parse_tile_formats(" png , f16,png") == ("png", "f16")
+    for bad in ("", " , ", "png,webp"):
+        with pytest.raises(ValueError):
+            parse_tile_formats(bad)
