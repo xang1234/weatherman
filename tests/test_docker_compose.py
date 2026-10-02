@@ -14,11 +14,9 @@ def _load_compose() -> dict:
     return yaml.safe_load(COMPOSE_PATH.read_text())
 
 
-def test_neptune_live_service_uses_same_ais_db_path_as_backend() -> None:
-    compose = _load_compose()
-    services = compose["services"]
+def test_live_ais_runs_inside_the_backend() -> None:
+    """DuckDB can't share ais.duckdb between a writing and a reading process (#72)."""
+    services = _load_compose()["services"]
 
-    backend_env = services["backend"]["environment"]
-    live_env = services["ais-neptune-live"]["environment"]
-
-    assert live_env["AIS_DB_PATH"] == backend_env["AIS_DB_PATH"]
+    assert "ais-neptune-live" not in services
+    assert "AIS_LIVE" in services["backend"]["environment"]

@@ -42,12 +42,18 @@ class ServerEvent:
 class EventBus:
     """In-memory pub/sub event bus with tenant filtering and replay.
 
-    Thread-safety: all mutations happen on the asyncio event loop, so no
-    locks are needed. The bus is intended for single-process use; for
-    multi-process deployments, plug in Redis pub/sub upstream.
+    Thread-safety: all mutations happen on the asyncio event loop the bus
+    was created on, so no locks are needed; ``publish_sync`` from another
+    thread (live AIS ingest) is handed to that loop. The bus is intended for
+    single-process use; for multi-process deployments, plug in Redis pub/sub
+    upstream.
     """
 
     def __init__(self, replay_limit: int = _DEFAULT_REPLAY_LIMIT) -> None:
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._subscribers: dict[int, _Subscription] = {}
         self._next_sub_id = 0
         self._counter = 0
@@ -88,9 +94,20 @@ class EventBus:
     def publish_sync(self, event: ServerEvent) -> int:
         """Broadcast an event from synchronous code.
 
-        Same as ``publish()`` but callable without await. Safe because the
-        underlying delivery only uses ``put_nowait`` (no I/O).
+        Same as ``publish()`` but callable without await. On the bus's own
+        loop, delivery only uses ``put_nowait`` (no I/O). From another thread
+        asyncio queues must not be touched, so delivery is scheduled on the
+        bus's loop and 0 is returned (the count isn't known yet).
         """
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                current = asyncio.get_running_loop()
+            except RuntimeError:
+                current = None
+            if current is not loop:
+                loop.call_soon_threadsafe(self._deliver, event)
+                return 0
         return self._deliver(event)
 
     def subscribe(

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useMap } from '@/hooks/useMap'
 import { useDataAge } from '@/hooks/useDataAge'
-import { useLatestAISDate } from '@/hooks/useLatestAISDate'
+import { useLatestAISSnapshot } from '@/hooks/useLatestAISSnapshot'
 import { useManifest } from '@/hooks/useManifest'
 import { useWeatherInspector } from '@/hooks/useWeatherInspector'
 import { useHoverProbe } from '@/hooks/useHoverProbe'
@@ -43,7 +43,7 @@ export function MapView() {
   const { map, isLoaded } = useMap({ container: containerRef })
   const [model, setModel] = useState<ModelId>('gfs')
   const sse = useSSE()
-  const latestAISDate = useLatestAISDate()
+  const latestAIS = useLatestAISSnapshot()
   const dataAge = useDataAge({ model, version: sse.weatherVersion })
   const [opacity, setOpacity] = useState(0.9)
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
@@ -233,12 +233,14 @@ export function MapView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying])
 
-  const aisDate = sse.aisDate ?? latestAISDate
+  const ais = sse.aisSnapshot ?? latestAIS
+  const aisDate = ais?.date ?? null
 
   useAISLayer({
     map,
     isLoaded,
     snapshotDate: aisDate,
+    revision: ais?.revision ?? 0,
   })
 
   const windParticles = useWindParticles({

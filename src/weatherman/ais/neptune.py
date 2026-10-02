@@ -166,8 +166,14 @@ def run_neptune_live_ingest(
     db_path: str | Path,
     tenant_id: str,
     emit_event: bool = True,
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> NeptuneLiveResult:
-    """Run one Neptune live ingest cycle and bridge promoted dates into DuckDB."""
+    """Run one Neptune live ingest cycle and bridge promoted dates into DuckDB.
+
+    `con` is a read-write connection to use instead of opening `db_path`:
+    the backend passes its own, since DuckDB allows one writing process and
+    the backend must keep serving tiles meanwhile (#72).
+    """
     NeptuneStream, StreamConfig, ParquetSink, promote_landing, run_with_reconnect = (
         _import_neptune_streaming()
     )
@@ -178,9 +184,10 @@ def run_neptune_live_ingest(
     refreshed_dates: set[date] = set()
     records_promoted = 0
     shard_files = 0
-    db = AISDatabase(db_path)
+    db = AISDatabase(db_path) if con is None else None
     try:
-        con = db.connect()
+        if db is not None:
+            con = db.connect()
 
         def _promote_and_refresh() -> None:
             nonlocal records_promoted, shard_files
@@ -285,7 +292,8 @@ def run_neptune_live_ingest(
 
         asyncio.run(_consume())
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
     return NeptuneLiveResult(
         source=live_config.source,

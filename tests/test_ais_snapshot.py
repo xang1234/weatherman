@@ -147,6 +147,22 @@ class TestIdempotency:
         assert total == 2
 
 
+    def test_each_rebuild_gets_a_new_revision(
+        self, parquet_dir: Path, ais_con: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Live ingest rebuilds a date through the day; clients key tile URLs on the revision (#72)."""
+        from weatherman.ais.snapshot import snapshot_revision
+
+        day = date(2025, 12, 25)
+        assert snapshot_revision(ais_con, day) == 0
+        load_day(f"{parquet_dir}/movement_date=2025-12-25/*", load_date=day, tenant_id="default", con=ais_con)
+        revisions = []
+        for _ in range(3):  # back to back: faster than the clock's millisecond
+            build_snapshot(snapshot_date=day, tenant_id="default", con=ais_con)
+            revisions.append(snapshot_revision(ais_con, day))
+        assert revisions == sorted(set(revisions)), revisions  # strictly increasing
+
+
 class TestTenantIsolation:
     """Snapshot rebuild for one tenant doesn't affect another."""
 

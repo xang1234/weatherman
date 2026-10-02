@@ -12,7 +12,7 @@ import duckdb
 
 from weatherman.ais.ingest import load_day
 from weatherman.ais.neptune import NeptuneConfig, load_day_from_neptune
-from weatherman.ais.snapshot import build_snapshot
+from weatherman.ais.snapshot import build_snapshot, snapshot_revision
 from weatherman.events.emissions import emit_ais_refreshed
 from weatherman.observability.metrics import AIS_INGEST_TO_VISIBLE_SECONDS
 
@@ -63,6 +63,7 @@ def _finalize_refresh(
         emit_ais_refreshed(
             ais_date=load_date,
             tile_url_template=f"/ais/tiles/{load_date}/{{z}}/{{x}}/{{y}}.pbf",
+            revision=snapshot_revision(con, load_date),
         )
         event_emitted = True
 

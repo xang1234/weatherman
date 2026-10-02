@@ -59,6 +59,7 @@ from weatherman.ais.router import (
     init_ais_tile_service,
     shutdown_ais_tile_service,
 )
+from weatherman.ais.live import live_ingest_enabled, start_live_ingest
 from weatherman.ais.router import router as ais_tile_router
 from weatherman.ais.router import query_router as ais_query_router
 from weatherman.tiling.router import (
@@ -299,12 +300,25 @@ def create_app(
             titiler_public_url=titiler_public_url,
         )
         init_edr_service(catalog_loader, zarr_opener)
-        init_ais_tile_service(ais_db_path)
         init_event_bus(journal_path=event_journal_path)
+        # Live AIS ingest runs in this process, on the tile service's
+        # read-write connection: DuckDB can't share a database between a
+        # writing and a reading process (#72).
+        live_ais = live_ingest_enabled()
+        ais_service = init_ais_tile_service(ais_db_path, writable=live_ais)
+        live_ais_stop = None
+        if live_ais and ais_service is not None:
+            _, live_ais_stop = start_live_ingest(
+                ais_service.connection,
+                db_path=ais_db_path,
+                tenant_id=os.environ.get("AIS_TENANT_ID", "default"),
+            )
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
         # Shutdown
+        if live_ais_stop is not None:
+            live_ais_stop.set()
         shutdown_event_bus()
         shutdown_ais_tile_service()
         shutdown_edr_service()

@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
+import type { AISSnapshot } from '@/types/ais'
 
 interface LatestAISResponse {
   snapshot_date: string
+  revision?: number
 }
 
-export function useLatestAISDate(): string | null {
+/** The newest AIS snapshot on the server, fetched once at load. */
+export function useLatestAISSnapshot(): AISSnapshot | null {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
-  const [snapshotDate, setSnapshotDate] = useState<string | null>(null)
+  const [snapshot, setSnapshot] = useState<AISSnapshot | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -17,12 +20,12 @@ export function useLatestAISDate(): string | null {
           signal: controller.signal,
         })
         if (res.status === 404) {
-          setSnapshotDate(null)
+          setSnapshot(null)
           return
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data: LatestAISResponse = await res.json()
-        setSnapshotDate(data.snapshot_date)
+        setSnapshot({ date: data.snapshot_date, revision: data.revision ?? 0 })
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
         console.warn('Failed to fetch latest AIS snapshot date:', err)
@@ -33,5 +36,5 @@ export function useLatestAISDate(): string | null {
     return () => controller.abort()
   }, [apiBase])
 
-  return snapshotDate
+  return snapshot
 }

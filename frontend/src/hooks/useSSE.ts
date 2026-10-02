@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { AISSnapshot } from '@/types/ais'
 
 export interface SSEState {
   /**
@@ -7,10 +8,11 @@ export interface SSEState {
    */
   weatherVersion: number
   /**
-   * Latest AIS snapshot date from `ais.refreshed` event (YYYY-MM-DD),
-   * or null if no event has been received yet.
+   * Latest AIS snapshot from an `ais.refreshed` event, or null if none has
+   * been received yet. A new object per event, so a rebuild of the same
+   * date (new revision) re-renders too.
    */
-  aisDate: string | null
+  aisSnapshot: AISSnapshot | null
   /** Whether the EventSource is currently connected. */
   connected: boolean
 }
@@ -25,6 +27,7 @@ interface RunPublishedPayload {
 interface AISRefreshedPayload {
   ais_date: string
   tile_url_template: string
+  revision?: number
 }
 
 /**
@@ -36,12 +39,12 @@ interface AISRefreshedPayload {
  *
  * Returns reactive state that downstream hooks can depend on:
  * - `weatherVersion` bumps on `run.published` → triggers catalog refetch
- * - `aisDate` updates on `ais.refreshed` → swaps AIS tile source
+ * - `aisSnapshot` updates on `ais.refreshed` → refreshes AIS tiles
  */
 export function useSSE(): SSEState {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const [weatherVersion, setWeatherVersion] = useState(0)
-  const [aisDate, setAisDate] = useState<string | null>(null)
+  const [aisSnapshot, setAisSnapshot] = useState<AISSnapshot | null>(null)
   const [connected, setConnected] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
@@ -79,8 +82,8 @@ export function useSSE(): SSEState {
     es.addEventListener('ais.refreshed', (e: MessageEvent) => {
       try {
         const payload: AISRefreshedPayload = JSON.parse(e.data)
-        setAisDate(payload.ais_date)
-        console.info('[SSE] ais.refreshed:', payload.ais_date)
+        setAisSnapshot({ date: payload.ais_date, revision: payload.revision ?? 0 })
+        console.info('[SSE] ais.refreshed:', payload.ais_date, payload.revision)
       } catch {
         console.warn('[SSE] Failed to parse ais.refreshed event')
       }
@@ -93,5 +96,5 @@ export function useSSE(): SSEState {
     }
   }, [apiBase])
 
-  return { weatherVersion, aisDate, connected }
+  return { weatherVersion, aisSnapshot, connected }
 }
