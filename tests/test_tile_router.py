@@ -714,3 +714,57 @@ class TestPreGeneratedDataTiles:
         assert resp.status_code == 200
         assert resp.headers["x-tile-format"] == "float16"
         mock_get.assert_called_once()
+
+
+# -- Blocking work stays off the event loop (#44) --
+
+
+class _SlowStore:
+    """An object store whose reads block, like S3 or a slow disk."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+    def read_bytes(self, key: str) -> bytes:
+        import time
+
+        time.sleep(self.seconds)
+        return b"tile"
+
+
+class TestTileReadsDoNotBlockTheEventLoop:
+    def test_concurrent_pre_generated_tiles_overlap(self):
+        """Eight 0.2 s tile reads finish together, not one after another."""
+        import asyncio
+        import time
+
+        svc = TileService(STORAGE, TITILER_URL, _catalog_loader, store=_SlowStore(0.2))
+        run_id = RunID("20260306T00Z")
+
+        async def run() -> tuple[float, int]:
+            ticks = 0
+
+            async def ticker() -> None:
+                nonlocal ticks
+                while True:
+                    await asyncio.sleep(0.01)
+                    ticks += 1
+
+            ticking = asyncio.create_task(ticker())
+            started = time.perf_counter()
+            responses = await asyncio.gather(*(
+                svc.fetch_data_tile(
+                    "s3://unused", "temperature", 2, x, 1,
+                    model="gfs", run_id=run_id, forecast_hour=0,
+                )
+                for x in range(8)
+            ))
+            elapsed = time.perf_counter() - started
+            ticking.cancel()
+            assert all(r.body == b"tile" for r in responses)
+            return elapsed, ticks
+
+        elapsed, ticks = asyncio.run(run())
+        # Serially on the event loop this takes 1.6 s and the ticker never runs.
+        assert elapsed < 0.8
+        assert ticks > 5

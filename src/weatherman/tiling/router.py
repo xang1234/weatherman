@@ -9,10 +9,12 @@ URL patterns:
     /tiles/{model}/{run_id}/tilejson.json  (per-layer via ?layer=...)
 """
 
+import asyncio
 from typing import Annotated, Callable, Optional
 from urllib.parse import quote, urlencode
 
 import httpx
+import numpy as np
 import rasterio
 import rasterio.io
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
@@ -32,6 +34,13 @@ router = APIRouter(prefix="/tiles", tags=["tiles"])
 CatalogLoader = Callable[[str], RunCatalog]
 
 _NEAREST_TILE_LAYERS = frozenset({"wave_direction"})
+
+
+def _read_geotiff_band(content: bytes) -> tuple[np.ndarray, float | None]:
+    """First band of an in-memory GeoTIFF as float32, and its nodata value."""
+    with rasterio.io.MemoryFile(content) as memfile:
+        with memfile.open() as dataset:
+            return dataset.read(1).astype("float32"), dataset.nodata
 
 
 def tile_resampling_for_layer(layer: str) -> str:
@@ -203,7 +212,7 @@ class TileService:
                 tile_key = self._data_tile_path(
                     model, run_id, layer, forecast_hour, z, x, y,
                 )
-                png_bytes = self._store.read_bytes(tile_key)
+                png_bytes = await asyncio.to_thread(self._store.read_bytes, tile_key)
                 cache = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
                 return Response(
                     content=png_bytes,
@@ -244,12 +253,10 @@ class TileService:
                 detail=f"TiTiler returned {resp.status_code}",
             )
 
-        # Parse the GeoTIFF response with rasterio (handles GDAL GeoTIFFs properly)
+        # Decode the GeoTIFF and encode the PNG off the event loop: both are
+        # CPU work that would otherwise stall every other request (#44).
         try:
-            with rasterio.io.MemoryFile(resp.content) as memfile:
-                with memfile.open() as dataset:
-                    data = dataset.read(1).astype("float32")
-                    nodata = dataset.nodata
+            data, nodata = await asyncio.to_thread(_read_geotiff_band, resp.content)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
@@ -257,8 +264,9 @@ class TileService:
             ) from exc
 
         # Encode to RGBA PNG, passing nodata sentinel from the GeoTIFF metadata
-        rgba = encode_float_to_rgba(data, vmin, vmax, nodata=nodata)
-        png_bytes = rgba_to_png_bytes(rgba)
+        png_bytes = await asyncio.to_thread(
+            lambda: rgba_to_png_bytes(encode_float_to_rgba(data, vmin, vmax, nodata=nodata)),
+        )
 
         cache_control = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
         return Response(
@@ -309,7 +317,7 @@ class TileService:
                     model, run_id, layer, forecast_hour, z, x, y,
                     tile_format="f16",
                 )
-                f16_bytes = self._store.read_bytes(tile_key)
+                f16_bytes = await asyncio.to_thread(self._store.read_bytes, tile_key)
                 cache = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
                 return Response(
                     content=f16_bytes,
@@ -352,17 +360,14 @@ class TileService:
             )
 
         try:
-            with rasterio.io.MemoryFile(resp.content) as memfile:
-                with memfile.open() as dataset:
-                    data = dataset.read(1).astype("float32")
-                    nodata = dataset.nodata
+            data, nodata = await asyncio.to_thread(_read_geotiff_band, resp.content)
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"Failed to decode TiTiler response: {exc}",
             ) from exc
 
-        f16_bytes = encode_float_to_f16(data, nodata=nodata)
+        f16_bytes = await asyncio.to_thread(encode_float_to_f16, data, nodata=nodata)
 
         cache_control = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
         return Response(
