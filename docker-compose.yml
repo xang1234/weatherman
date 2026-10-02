@@ -28,6 +28,14 @@ services:
     volumes:
       - ./.data:/data
 
+  # One-shot: fetch the basemap extract the backend serves at /basemap (#70).
+  # About 190 MB the first time; does nothing once .data/basemap has it.
+  basemap:
+    build: .
+    command: ["uv", "run", "python", "scripts/fetch_basemap.py", "--out", "/data/basemap/basemap.pmtiles"]
+    volumes:
+      - ./.data:/data
+
   backend:
     build: .
     ports:

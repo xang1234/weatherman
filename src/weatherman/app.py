@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator, Callable
 import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from weatherman.health import DependencyChecker, clear_checks, register_check
 from weatherman.health import router as health_router
@@ -340,6 +340,20 @@ def create_app(
     app.include_router(contours_router)
     app.include_router(trajectory_router)
     app.include_router(events_router)
+
+    # Basemap: a PMTiles extract fetched by scripts/fetch_basemap.py, served
+    # same-origin (FileResponse answers range requests) (#70). A plain route
+    # rather than StaticFiles, which fails every request while the directory
+    # does not exist yet.
+    if isinstance(store, LocalObjectStore):
+        basemap_dir = store._root / "basemap"
+
+        @app.get("/basemap/{name}", include_in_schema=False)
+        def basemap(name: str) -> FileResponse:
+            path = basemap_dir / name
+            if "/" in name or not name.endswith(".pmtiles") or not path.is_file():
+                raise HTTPException(status_code=404, detail="No such basemap")
+            return FileResponse(path, media_type="application/octet-stream")
 
     # Metrics endpoint (plain Starlette route, not a router)
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])
