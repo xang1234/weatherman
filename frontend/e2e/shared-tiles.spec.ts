@@ -167,3 +167,18 @@ test('no texture (context lost) is a failure, and nothing is cached', () => {
   store.request(URL_A, 0, () => {})
   expect(fetched).toHaveLength(1)
 })
+
+test('fetch counts in the debug state only cover tiles still held', () => {
+  const { store, load } = setup()
+  const fetches = () =>
+    (globalThis as { __weathermanDebug?: { tiles?: { fetches: Record<string, number> } } }).__weathermanDebug?.tiles?.fetches ?? {}
+  // Its own URL: the debug state is global, shared with the other tests here.
+  const url = '/tiles/gfs/run/wind_v/0/data/5/9/9.png'
+  store.request(url, 0, () => {})
+  load(url)
+  expect(fetches()[url]).toBe(1)
+
+  // Released for good: a long-running page must not keep a record of it.
+  store.release(url)
+  expect(fetches()[url]).toBeUndefined()
+})
