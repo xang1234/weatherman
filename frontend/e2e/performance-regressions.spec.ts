@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
+import COLORMAPS_RESPONSE from './fixtures/colormaps.json' with { type: 'json' }
 
 const RUN_ID = '20260310T00Z'
 
@@ -64,6 +65,10 @@ async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOption
 
   await page.route(`**/api/manifest/gfs/${RUN_ID}`, (route) =>
     route.fulfill({ json: MANIFEST_RESPONSE }),
+  )
+
+  await page.route('**/tiles/colormaps.json', (route) =>
+    route.fulfill({ json: COLORMAPS_RESPONSE }),
   )
 
   await page.route('**/ais/tiles/latest', (route) =>
@@ -207,6 +212,22 @@ test('weather is drawn while the basemap is still loading', async ({ page }) => 
     return ((debugState?.weather as { drawn?: number } | undefined)?.drawn ?? 0) > 0
   }, undefined, { timeout: 10_000 })
   await expect(page.getByText('Loading map...')).toHaveCount(0)
+})
+
+test('a failed colour-ramp fetch is retried', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // The GL layers wait for the ramps: one failed fetch must not leave the map empty.
+  let failures = 0
+  await page.route('**/tiles/colormaps.json', (route) =>
+    failures++ === 0 ? route.fulfill({ status: 503 }) : route.fallback(),
+  )
+  await page.goto('/')
+
+  await page.waitForFunction(() => {
+    const debugState = (window as unknown as { __weathermanDebug?: Record<string, unknown> }).__weathermanDebug
+    return ((debugState?.weather as { drawn?: number } | undefined)?.drawn ?? 0) > 0
+  }, undefined, { timeout: 10_000 })
+  expect(failures).toBeGreaterThan(1)
 })
 
 test('wind particle count follows the viewport area, not the pixel density', async ({ browser }) => {
