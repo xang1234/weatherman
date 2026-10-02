@@ -36,6 +36,7 @@ def _stage(
     *,
     empty: tuple[str, int] | None = None,
     units: dict[str, str] | None = None,
+    short: str | None = None,
 ) -> None:
     """Write a staged Zarr store holding `values`, optionally one all-NaN hour."""
     grid = GridResolution.GFS_025
@@ -50,6 +51,8 @@ def _stage(
             data[:, :200, :] = np.nan  # "land": ocean-only fields have gaps
         if empty and empty[0] == name:
             data[HOURS.index(empty[1])] = np.nan
+        if short == name:
+            data = data[:1]  # one forecast hour short: the wrong shape
         array = root.create_array(name, data=data)
         if units and name in units:
             array.attrs["units"] = units[name]
@@ -97,3 +100,14 @@ def test_a_bad_wave_field_drops_only_the_wave_layer(tmp_path: Path):
 def test_missing_pressure_only_warns(tmp_path: Path):
     _stage(tmp_path, {k: v for k, v in GOOD.items() if k != "prmsl"})
     assert _check(tmp_path) == LAYERS
+
+
+def test_a_malformed_wave_array_drops_the_layer_instead_of_crashing(tmp_path: Path):
+    _stage(tmp_path, GOOD, short="perpw_sfc")
+    assert _check(tmp_path) == {"temperature", "wind_speed"}
+
+
+def test_a_malformed_core_array_blocks_publishing_cleanly(tmp_path: Path):
+    _stage(tmp_path, GOOD, short="tmp_2m")
+    with pytest.raises(QualityCheckFailed, match="shape"):
+        _check(tmp_path)

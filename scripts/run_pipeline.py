@@ -460,22 +460,21 @@ def step_quality_check(
         )
 
     required = schema(QC_REQUIRED_VARIABLES)
-    problems: list[str] = []
-    # Geometry on the core variables only: ocean-only fields are NaN at the poles.
-    for result in (
-        check_geometry(zarr_path, required),
-        check_completeness(zarr_path, required),
-        check_sanity(zarr_path, required),
-    ):
+    # Geometry on the core variables only: ocean-only fields are NaN at the
+    # poles. Each check runs only if the earlier ones passed: sanity reads
+    # every expected hour, so it needs the shapes completeness confirms.
+    for check in (check_geometry, check_completeness, check_sanity):
+        result = check(zarr_path, required)
         logger.info("  %s", result.summary)
-        problems += [str(issue) for issue in result.issues]
-    if problems:
-        raise QualityCheckFailed("; ".join(problems))
+        if result.issues:
+            raise QualityCheckFailed("; ".join(str(issue) for issue in result.issues))
 
     layers = set(generated_layers)
     for name, layer in QC_OPTIONAL_VARIABLES.items():
         optional = schema([name])
-        issues = [*check_completeness(zarr_path, optional).issues, *check_sanity(zarr_path, optional).issues]
+        issues = check_completeness(zarr_path, optional).issues
+        if not issues:  # sanity needs a complete, correctly shaped array
+            issues = check_sanity(zarr_path, optional).issues
         if not issues:
             continue
         if layer in layers:
