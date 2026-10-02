@@ -70,7 +70,7 @@ test('wind particles: speed per second, bulk respawn and missing data', async ({
     for (const [name, unit] of [['u_stateTex', 0], ['u_windU', 1], ['u_windV', 2], ['u_windUT1', 3], ['u_windVT1', 4]] as const) {
       gl.uniform1i(uniform(name), unit)
     }
-    gl.uniform1i(uniform('u_hasWindData'), 1)
+    gl.uniform1i(uniform('u_hasData'), 1)
     gl.uniform1i(uniform('u_isFloat16'), 0)
     gl.uniform1f(uniform('u_temporalMix'), 0)
     gl.uniform1f(uniform('u_valueMin'), -50)

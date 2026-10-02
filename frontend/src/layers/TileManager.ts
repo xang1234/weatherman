@@ -770,7 +770,7 @@ export function computePanPrefetchTiles(
   const n = 2 ** z
 
   // Find bounding box using wrap-aware render-X to keep it compact
-  // at the antimeridian (same approach as WindParticleLayer._packAtlas).
+  // at the antimeridian (same approach as ParticleLayer._packAtlas).
   let rxMin = Infinity, rxMax = -Infinity
   let yMin = Infinity, yMax = -Infinity
   for (const c of visible) {
