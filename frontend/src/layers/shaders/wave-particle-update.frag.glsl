@@ -14,7 +14,7 @@ uniform sampler2D u_waveDirV;
 uniform sampler2D u_waveDirVT1;
 
 uniform float u_temporalMix;
-uniform int u_hasWaveData;
+uniform int u_hasData;
 uniform int u_isFloat16;
 
 uniform float u_valueMinHeight;
@@ -192,7 +192,7 @@ void main() {
     int activeCount = int(u_gridCols * u_gridRows + 0.5);
 
     if (
-        u_hasWaveData != 1 ||
+        u_hasData != 1 ||
         particleId < 0 ||
         particleId >= activeCount ||
         u_gridSpacing <= 0.0

@@ -18,7 +18,7 @@ uniform sampler2D u_windVT1;
 uniform float u_temporalMix;
 
 // Whether wind textures are bound and valid (0 = no wind data, 1 = have data).
-uniform int u_hasWindData;
+uniform int u_hasData;
 
 // Float16 mode flag: 0 = 8-bit PNG tiles, 1 = R16F Float16 binary tiles.
 uniform int u_isFloat16;
@@ -195,7 +195,7 @@ void main() {
     vec2 seedOffset = v_uv * 256.0 + vec2(u_seed);
 
     vec2 wind = vec2(0.0);
-    bool hasWind = u_hasWindData == 1 && sampleWind(vec2(lon, lat), wind);
+    bool hasWind = u_hasData == 1 && sampleWind(vec2(lon, lat), wind);
     float speed = length(wind);
 
     if (hasWind) {
