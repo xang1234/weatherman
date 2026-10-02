@@ -27,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 from pmtiles.reader import Reader
-from pmtiles.tile import Entry, deserialize_directory, zxy_to_tileid
+from pmtiles.tile import Compression, Entry, deserialize_directory, zxy_to_tileid
 from pmtiles.writer import Writer
 
 BUILDS_URL = "https://build-metadata.protomaps.dev/builds.json"
@@ -92,6 +92,10 @@ def extract(url: str, out: Path, max_zoom: int) -> None:
     header = reader.header()
     if not header.get("clustered"):
         raise RuntimeError(f"{url} is not clustered; its low zooms are not contiguous")
+    # pmtiles' deserialize_directory gunzips the directories itself, and can
+    # read nothing else (Protomaps builds use gzip).
+    if header["internal_compression"] != Compression.GZIP:
+        raise RuntimeError(f"{url} has {header['internal_compression']} directories; only gzip is supported")
     end_tile_id = zxy_to_tileid(max_zoom + 1, 0, 0)
 
     entries = low_zoom_entries(get_bytes, header, end_tile_id)
