@@ -1,37 +1,24 @@
 import type maplibregl from 'maplibre-gl'
 
 /**
- * Default PMTiles basemap URL (Protomaps daily build).
- * Override via VITE_BASEMAP_URL env var for local/offline use.
- *
- * NOTE: Protomaps daily builds expire after ~7 days. Update this date
- * periodically, or self-host the PMTiles file for stability.
+ * Basemap PMTiles: a low-zoom extract the backend serves same-origin from
+ * <data dir>/basemap/ (fetched by scripts/fetch_basemap.py, #70).
+ * VITE_BASEMAP_URL can point at another PMTiles archive; any other value
+ * (such as the old "raster") is ignored.
  */
+const DEFAULT_BASEMAP_URL = '/basemap/basemap.pmtiles'
+const CONFIGURED = import.meta.env.VITE_BASEMAP_URL as string | undefined
 const RAW_BASEMAP_URL =
-  import.meta.env.VITE_BASEMAP_URL ||
-  'https://build.protomaps.com/20260311.pmtiles'
+  CONFIGURED && (CONFIGURED.endsWith('.pmtiles') || CONFIGURED.startsWith('pmtiles://'))
+    ? CONFIGURED
+    : DEFAULT_BASEMAP_URL
 
 const PMTILES_SOURCE = RAW_BASEMAP_URL.startsWith('pmtiles://')
   ? RAW_BASEMAP_URL
   : `pmtiles://${RAW_BASEMAP_URL}`
 
-/**
- * Whether to use PMTiles (production) or a raster tile fallback (local dev).
- * Set VITE_BASEMAP_URL to a valid PMTiles URL to use vector tiles.
- */
-const USE_PMTILES =
-  RAW_BASEMAP_URL.endsWith('.pmtiles') ||
-  RAW_BASEMAP_URL.startsWith('pmtiles://')
-
-/** Fonts for map text: basemap labels, and isobar labels on either basemap. */
+/** Fonts for map text: basemap labels and isobar labels. */
 const GLYPHS = 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf'
-
-/**
- * Raster basemap opacity when weather overlay is active. Higher than the fill
- * dim because raster tiles carry labels baked-in; over-dimming makes labels
- * unreadable. Tradeoff is inherent to raster fallback.
- */
-const WEATHER_RASTER_OPACITY = 0.55
 
 /** Label layers whose colours flip to white-on-dark when weather is showing. */
 const LABEL_LAYERS = ['places_country', 'places_city']
@@ -42,16 +29,14 @@ const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
 /**
  * Light basemap style optimized for weather overlay readability.
  *
- * Uses Protomaps vector tiles via PMTiles protocol when available,
- * falling back to CartoDB light raster tiles for local development.
+ * Protomaps vector tiles through the PMTiles protocol.
  *
  * Starts as a plain light map. When weather is showing,
  * setWeatherOverlayOpacity() hides the fills and darkens the background so
  * the overlay keeps its full colour and the basemap contributes only thin
  * coastlines, borders and white labels — the Windy.com look.
  */
-export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
-  ? {
+export const darkBasemapStyle: maplibregl.StyleSpecification = {
       version: 8,
       glyphs: GLYPHS,
       sources: {
@@ -146,34 +131,6 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
         },
       ],
     }
-  : {
-      // Raster tile fallback for local development
-      version: 8,
-      glyphs: GLYPHS,
-      sources: {
-        carto: {
-          type: 'raster',
-          tiles: [
-            'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-            'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-            'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-          ],
-          tileSize: 256,
-          attribution:
-            '&copy; <a href="https://carto.com">CARTO</a> | &copy; <a href="https://openstreetmap.org">OSM</a>',
-        },
-      },
-      layers: [
-        {
-          id: 'carto-light',
-          type: 'raster',
-          source: 'carto',
-          minzoom: 0,
-          maxzoom: 19,
-          paint: {},
-        },
-      ],
-    }
 
 /**
  * Switch the basemap between its plain look and its weather-overlay look.
@@ -182,10 +139,6 @@ export const darkBasemapStyle: maplibregl.StyleSpecification = USE_PMTILES
  * background goes dark, so the overlay (inserted below the fills) keeps its
  * full colour; labels turn white with a dark halo. Ocean-only layers keep an
  * opaque land mask, since their data is only valid over water.
- *
- * For raster basemaps (CartoDB fallback), the single raster layer is dimmed
- * instead so weather — inserted *below* it by weatherInsertBeforeId — shows
- * through. Ocean-only weather layers keep the raster fully opaque.
  */
 export function setWeatherOverlayOpacity(
   map: maplibregl.Map,
@@ -210,13 +163,5 @@ export function setWeatherOverlayOpacity(
   }
   for (const [id, property, value] of paint) {
     if (map.getLayer(id)) map.setPaintProperty(id, property, value)
-  }
-
-  // Raster fallback: weather renders beneath, so dim the raster to let it
-  // show through. Ocean-only layers stay opaque (raster carries land).
-  for (const layer of style.layers) {
-    if (layer.type === 'raster') {
-      map.setPaintProperty(layer.id, 'raster-opacity', !active || oceanOnly ? 1 : WEATHER_RASTER_OPACITY)
-    }
   }
 }

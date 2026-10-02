@@ -11,6 +11,7 @@
 
 import type { TileFetchClient, TileFetchError, TileFetchResult } from '@/workers/TileFetchClient'
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
+import { ensureTileDebugState } from './particleDebug'
 
 /** Receives the tile's texture, or null if the fetch failed. */
 export type SharedTileListener = (texture: WebGLTexture | null) => void
@@ -51,8 +52,8 @@ export class SharedTileStore {
     for (const [url, tile] of this._tiles) {
       if (!tile.loaded) this._client.cancel(this._prefix + url)
       this._gl.deleteTexture(tile.texture)
+      this._forget(url)
     }
-    this._tiles.clear()
   }
 
   /**
@@ -78,6 +79,8 @@ export class SharedTileStore {
       tile = { texture, loaded: false, refs: 0, listeners: new Set(), priority }
       this._tiles.set(url, tile)
       this._client.fetch(this._prefix + url, url, this._format, priority)
+      const { fetches } = ensureTileDebugState()
+      fetches[url] = (fetches[url] ?? 0) + 1
     } else if (priority < tile.priority) {
       // A tile first wanted as a prefetch may now be on screen.
       tile.priority = priority
@@ -89,7 +92,7 @@ export class SharedTileStore {
       if (pending.loaded || !pending.listeners.delete(listener) || pending.listeners.size > 0) return
       this._client.cancel(this._prefix + url)
       this._gl.deleteTexture(pending.texture)
-      this._tiles.delete(url)
+      this._forget(url)
     }
   }
 
@@ -106,7 +109,7 @@ export class SharedTileStore {
     const tile = this._tiles.get(url)
     if (!tile?.loaded || --tile.refs > 0) return
     this._gl.deleteTexture(tile.texture)
-    this._tiles.delete(url)
+    this._forget(url)
   }
 
   /** Loaded tiles currently held (for tests). */
@@ -114,6 +117,16 @@ export class SharedTileStore {
     let loaded = 0
     for (const tile of this._tiles.values()) if (tile.loaded) loaded++
     return loaded
+  }
+
+  /**
+   * Drop a tile from the store, and its fetch count from the debug state:
+   * the counts cover only tiles held now, so they stay bounded however long
+   * the page runs.
+   */
+  private _forget(url: string): void {
+    this._tiles.delete(url)
+    delete ensureTileDebugState().fetches[url]
   }
 
   private _onLoaded(result: TileFetchResult): void {
@@ -146,7 +159,7 @@ export class SharedTileStore {
 
   /** Tell every waiter the fetch failed; each retries on its own schedule. */
   private _fail(url: string, tile: SharedTile): void {
-    this._tiles.delete(url)
+    this._forget(url)
     this._gl.deleteTexture(tile.texture)
     for (const listener of tile.listeners) listener(null)
   }

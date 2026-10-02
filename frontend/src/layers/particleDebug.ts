@@ -38,6 +38,12 @@ interface ParticleDebugRoot {
   wave?: ParticleDebugState
   weather?: WeatherDebugState
   isobars?: IsobarsDebugState
+  tiles?: TileDebugState
+}
+
+/** Data-tile fetches started by the shared tile store, per URL. */
+export interface TileDebugState {
+  fetches: Record<string, number>
 }
 
 /** What the isobar overlay last put on the map. */
@@ -73,4 +79,10 @@ export function ensureIsobarsDebugState(): IsobarsDebugState {
   const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
   const root = (globalWithDebug.__weathermanDebug ??= {})
   return (root.isobars ??= { features: 0 })
+}
+
+export function ensureTileDebugState(): TileDebugState {
+  const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
+  const root = (globalWithDebug.__weathermanDebug ??= {})
+  return (root.tiles ??= { fetches: {} })
 }

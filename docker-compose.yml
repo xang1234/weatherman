@@ -28,6 +28,18 @@ services:
     volumes:
       - ./.data:/data
 
+  # One-shot: fetch the basemap extract the backend serves at /basemap (#70).
+  # About 190 MB the first time; does nothing once .data/basemap has it. Never
+  # fails, so the backend (which waits for it) still starts when offline.
+  basemap:
+    build: .
+    command:
+      - sh
+      - -c
+      - uv run python scripts/fetch_basemap.py --out /data/basemap/basemap.pmtiles || echo "WARNING - basemap fetch failed; weather will show without coastlines"
+    volumes:
+      - ./.data:/data
+
   backend:
     build: .
     ports:
@@ -69,6 +81,9 @@ services:
       pipeline:
         condition: service_completed_successfully
       pipeline-gefs:
+        condition: service_completed_successfully
+      # So the first page load finds the basemap rather than a 404.
+      basemap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]

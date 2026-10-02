@@ -23,6 +23,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.61b0",
     "opentelemetry-sdk>=1.40.0",
     "pillow>=12.1.1",
+    "pmtiles>=3.8.1",
     "prometheus-client>=0.24.1",
     "pystac>=1.14.3",
     "pyyaml>=6.0.3",
