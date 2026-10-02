@@ -135,9 +135,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _runId = ''
   private _forecastHour = 0
 
-  // Tile encoding ranges of the dataset drawn, and of the one it replaced
-  private _dataRanges: DataRanges | undefined
-  private _staleDataRanges: DataRanges | undefined
+  // Tile encoding ranges by run, for the current dataset and the stale one
+  // TileManager keeps (which may be several configurations back).
+  // ponytail: grows by one entry per run seen in a session — a few a day.
+  private _rangesByRun = new Map<string, DataRanges>()
 
   // Temporal interpolation state
   private _forecastHourT1 = -1
@@ -577,8 +578,9 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.uniform1f(this._uRampMax, ramp?.valueMax ?? 1)
     // The tiles sampled: U (V is encoded alike) in vector mode, else the layer itself.
     const dataLayer = isVector ? 'wind_u' : this._layerName
-    const dataRange = encodingRange(dataLayer, this._dataRanges)
-    const staleRange = encodingRange(dataLayer, this._staleDataRanges)
+    const dataRange = encodingRange(dataLayer, this._rangesByRun.get(this._runId))
+    const staleRun = this._tileManager?.staleRunId
+    const staleRange = encodingRange(dataLayer, staleRun ? this._rangesByRun.get(staleRun) : undefined)
 
     // Bind color ramp to texture unit 1 (shared across all tiles)
     gl.activeTexture(gl.TEXTURE1)
@@ -679,9 +681,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     // skip _applyLayerConfig to avoid clearing T0's freshly-swapped tiles.
     const configUnchanged = model === this._model && runId === this._runId &&
       layer === this._layerName && forecastHour === this._forecastHour
-    // The dataset being replaced stays up while the new one loads: keep its ranges.
-    if (!configUnchanged) this._staleDataRanges = this._dataRanges
-    this._dataRanges = dataRanges
+    if (dataRanges) this._rangesByRun.set(runId, dataRanges)
     this._model = model
     this._runId = runId
     this._layerName = layer
