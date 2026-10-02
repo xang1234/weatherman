@@ -166,7 +166,7 @@ class TestTileServiceTileJson:
 class TestTileResampling:
     def test_wave_direction_uses_nearest(self):
         assert tile_resampling_for_layer("wave_direction") == "nearest"
-        assert tile_resampling_for_layer("temperature") == "bilinear"
+        assert tile_resampling_for_layer("temperature") == "cubic_spline"
 
 
 class TestInitTileService:
@@ -386,6 +386,19 @@ class TestDataTileEndpoint:
         assert resp.headers["content-type"] == "image/png"
         assert "x-value-range" in resp.headers
         assert resp.headers["x-value-range"] == "-55.0,55.0"
+
+    @pytest.mark.parametrize("ext", ["png", "bin"])
+    def test_live_data_tile_asks_titiler_for_the_gutter(self, client, ext):
+        """A tile TiTiler serves matches a pre-generated one: 258 x 258, cubic spline (#45)."""
+        tiff_bytes = _make_fake_tiff(np.full((258, 258), 10.0, dtype=np.float32))
+        with patch.object(
+            httpx.AsyncClient, "get", new_callable=AsyncMock,
+            return_value=httpx.Response(200, content=tiff_bytes),
+        ) as mock_get:
+            resp = client.get(f"/tiles/gfs/20260306T12Z/temperature/0/data/1/2/3.{ext}")
+        assert resp.status_code == 200
+        params = mock_get.call_args.kwargs["params"]
+        assert (params["buffer"], params["resampling"]) == ("1", "cubic_spline")
 
     def test_data_tile_round_trip_accuracy(self, client):
         """Encoded data tile should decode back within 0.1% error."""
@@ -699,10 +712,20 @@ class TestPreGeneratedDataTiles:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/octet-stream"
         assert resp.headers["x-tile-format"] == "float16"
+        assert resp.headers["x-tile-size"] == "256,256"  # tiled before the gutter
         decoded, mask = decode_f16_to_float(resp.content, 256, 256)
         assert decoded.shape == (256, 256)
         assert not mask.all()
         mock_get.assert_not_called()
+
+    def test_float16_tile_size_follows_the_payload(self, store_app):
+        """A gutter tile says 258 x 258; the header comes from the bytes, not a constant."""
+        app, store = store_app
+        key = StorageLayout("gfs").data_tile_path(RUN, "temperature", 0, 3, 5, 2, tile_format="f16")
+        store.write_bytes(key, encode_float_to_f16(np.full((258, 258), 20.0, dtype=np.float32)))
+        resp = TestClient(app).get("/tiles/gfs/20260306T12Z/temperature/0/data/3/5/2.bin")
+        assert resp.status_code == 200
+        assert resp.headers["x-tile-size"] == "258,258"
 
     def test_float16_tile_fallback_missing(self, store_client):
         """Missing pre-generated Float16 tile should fall through to TiTiler."""

@@ -13,6 +13,20 @@ import type { TileFetchClient, TileFetchError, TileFetchResult } from '@/workers
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
 import { ensureTileDebugState } from './particleDebug'
 
+/** Data tile size without the gutter. */
+export const TILE_SIZE = 256
+
+/**
+ * Texels of neighbouring tiles framing each tile texture: 1 for 258 x 258
+ * tiles (#45), 0 for plain 256 ones (runs tiled before the gutter).
+ */
+export const tileGutters = new WeakMap<WebGLTexture, number>()
+
+/** Record the gutter of a tile texture just uploaded at `side` x `side`. */
+export function recordTileSide(texture: WebGLTexture, side: number): void {
+  tileGutters.set(texture, side > TILE_SIZE ? (side - TILE_SIZE) / 2 : 0)
+}
+
 /** Receives the tile's texture, or null if the fetch failed. */
 export type SharedTileListener = (texture: WebGLTexture | null) => void
 
@@ -175,9 +189,11 @@ export class SharedTileStore {
         return false
       }
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, side, side, 0, gl.RED, gl.HALF_FLOAT, new Uint16Array(result.data as ArrayBuffer))
+      recordTileSide(texture, side)
     } else {
       const bitmap = result.data as ImageBitmap
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap)
+      recordTileSide(texture, bitmap.width)
       bitmap.close()
     }
     gl.bindTexture(gl.TEXTURE_2D, null)

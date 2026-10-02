@@ -20,7 +20,7 @@
 
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
 import type { TileFetchClient } from '@/workers/TileFetchClient'
-import { acquireSharedTileStore, type SharedTileStore } from './shared-tiles'
+import { acquireSharedTileStore, recordTileSide, type SharedTileStore } from './shared-tiles'
 
 /** Loading state for a single tile. */
 export type TileState = 'pending' | 'loaded' | 'error'
@@ -538,6 +538,7 @@ export class TileManager {
           gl.RED, gl.HALF_FLOAT,
           new Uint16Array(buffer),
         )
+        recordTileSide(texture, side)
         gl.bindTexture(gl.TEXTURE_2D, null)
 
         this._markLoaded(state, key, texture)
@@ -604,6 +605,7 @@ export class TileManager {
         img,
       )
       gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL)
+      recordTileSide(texture, img.width)
       gl.bindTexture(gl.TEXTURE_2D, null)
 
       this._markLoaded(state, key, texture)

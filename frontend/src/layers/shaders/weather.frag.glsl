@@ -74,13 +74,23 @@ float decodeValue(vec4 texel) {
     return (texel.r * 255.0 + texel.g * 255.0 * 256.0) / 65535.0;
 }
 
+// Continuous texel coordinate of uv (texel i's centre is at i).
+// Tiles may be framed by a 1-texel gutter of their neighbours (258 x 258,
+// #45): uv [0,1] then spans the inner 256 texels, and interpolation at the
+// tile's edge reads the gutter instead of clamping, so no seam shows.
+// Older 256 x 256 tiles (and anything else) have no gutter.
+vec2 texelPos(vec2 size, vec2 uv) {
+    float gutter = size.x > 256.0 ? (size.x - 256.0) * 0.5 : 0.0;
+    return uv * (size - 2.0 * gutter) + gutter - 0.5;
+}
+
 // Manual bilinear interpolation: sample 4 texels with GL_NEAREST,
 // decode each to float, then interpolate the decoded values.
 // GPU hardware bilinear (GL_LINEAR) would blend raw encoded bytes,
 // producing incorrect values for our 16-bit encoding scheme.
 float sampleBilinear(sampler2D tex, vec2 uv) {
     vec2 size = vec2(textureSize(tex, 0));
-    vec2 texelCoord = uv * size - 0.5;
+    vec2 texelCoord = texelPos(size, uv);
     // Clamp so the "right/bottom" neighbor never exceeds the last texel center.
     // Without this, base + step overshoots at uv=1.0 and CLAMP_TO_EDGE
     // collapses all 4 samples to the corner texel.
@@ -129,15 +139,16 @@ float sampleWithFallback(sampler2D tex, vec2 uv) {
     float val = sampleBilinear(tex, uv);
     if (!isNodata(val) || u_oceanOnly == 0) return val;
 
-    // Try 8 neighbors at 1-texel offset
-    vec2 size = vec2(textureSize(tex, 0));
-    vec2 step = 1.0 / size;
+    // Try the 8 neighbors of the nearest texel
+    ivec2 size = textureSize(tex, 0);
+    ivec2 center = ivec2(floor(texelPos(vec2(size), uv) + 0.5));
     float total = 0.0;
     float count = 0.0;
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nv = decodeValue(texture(tex, uv + vec2(float(dx), float(dy)) * step));
+            ivec2 at = clamp(center + ivec2(dx, dy), ivec2(0), size - 1);
+            float nv = decodeValue(texelFetch(tex, at, 0));
             if (!isNodata(nv)) {
                 total += nv;
                 count += 1.0;

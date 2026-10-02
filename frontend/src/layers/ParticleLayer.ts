@@ -49,6 +49,7 @@ import {
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
 import { createTrailDecay } from './particle-motion'
+import { TILE_SIZE, tileGutters } from './shared-tiles'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugLayer, type ParticleDebugState } from './particleDebug'
 
@@ -58,8 +59,6 @@ const DEFAULT_STATE_SIZE = 50
 const PERF_WINDOW = 60
 /** Frame time in ms above which the watchdog warns. */
 const PERF_WARN_THRESHOLD_MS = 20
-/** Tile texture dimensions (standard web map tiles). */
-const TILE_SIZE = 256
 
 export interface ParticleLayerOptions {
   /** Unique layer ID for MapLibre. */
@@ -899,7 +898,7 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
   }
 
-  /** Copy a single tile texture into an atlas at the given grid position. */
+  /** Copy a tile's own pixels (not its gutter) into an atlas at the given grid position. */
   private _copyTileToAtlas(
     gl: WebGL2RenderingContext,
     src: WebGLTexture,
@@ -909,12 +908,15 @@ export abstract class ParticleLayer implements CustomLayerInterface {
   ): void {
     const dx = col * TILE_SIZE
     const dy = row * TILE_SIZE
+    // Neighbouring tiles sit next to each other in the atlas, so the
+    // update shader interpolates across their edges without the gutter.
+    const g = tileGutters.get(src) ?? 0
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._copyFbo)
     gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._atlasFbo)
     gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dst, 0)
     gl.blitFramebuffer(
-      0, 0, TILE_SIZE, TILE_SIZE,
+      g, g, g + TILE_SIZE, g + TILE_SIZE,
       dx, dy, dx + TILE_SIZE, dy + TILE_SIZE,
       gl.COLOR_BUFFER_BIT, gl.NEAREST,
     )
