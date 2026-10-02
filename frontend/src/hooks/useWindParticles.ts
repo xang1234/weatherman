@@ -12,7 +12,7 @@
 import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WindParticleLayer } from '@/layers/WindParticleLayer'
-import { particleInsertBeforeId } from './useWebGLWeatherLayer'
+import { particleInsertBeforeId } from './layer-order'
 import { COLOR_RAMPS } from '@/layers/color-ramps'
 import { useColorRamps } from './useColorRamps'
 

@@ -12,7 +12,7 @@
 import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WaveParticleLayer } from '@/layers/WaveParticleLayer'
-import { particleInsertBeforeId } from './useWebGLWeatherLayer'
+import { particleInsertBeforeId } from './layer-order'
 
 export interface UseWaveParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>

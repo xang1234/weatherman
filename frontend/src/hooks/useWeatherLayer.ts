@@ -1,7 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
-import { particleInsertBeforeId, useWebGLWeatherLayer } from './useWebGLWeatherLayer'
+import { useWebGLWeatherLayer } from './useWebGLWeatherLayer'
+import { particleInsertBeforeId } from './layer-order'
 
 /** Feature flag: use WebGL data-tile pipeline instead of raster TileJSON. */
 const USE_WEBGL = import.meta.env.VITE_USE_WEBGL_WEATHER !== 'false'
