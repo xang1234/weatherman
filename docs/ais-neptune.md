@@ -60,7 +60,21 @@ uv run python scripts/refresh_ais.py '.data/ais/movement_date=2026-03-08/*' 2026
 
 ## Live ingest
 
-Run the Neptune live bridge as a long-lived process:
+Set `AIS_LIVE=true` and the backend runs the Neptune live bridge itself, on a
+background thread. It has to: DuckDB lets one process write a database or
+several read it, never both, so a separate ingest process can't write while
+the backend serves tiles from the same file. In-process, each refresh of a day
+gets a new snapshot revision, and open maps reload their vessel tiles (#72).
+Only one backend instance should set it.
+
+With `AIS_LIVE=true` the backend writes `AIS_DB_PATH`, `NEPTUNE_STORE_ROOT`
+and `NEPTUNE_LIVE_LANDING_DIR`, so they must be writable. Under compose the
+data volume is read-only; point them at the runtime volume, e.g.
+`AIS_DB_PATH=/runtime/ais.duckdb NEPTUNE_STORE_ROOT=/runtime/neptune
+NEPTUNE_LIVE_LANDING_DIR=/runtime/neptune-live`.
+
+The standalone bridge still works while the backend is **not** running (to
+backfill, say):
 
 ```bash
 AIS_DB_PATH=.data/ais.duckdb \
@@ -80,10 +94,10 @@ as a separate process.
 ## Compose and dev shell
 
 - `docker compose` reads `.env.example` keys through `.env`
-- `COMPOSE_PROFILES=ais-live docker compose up` starts the optional
-  `ais-neptune-live` service
-- `NEPTUNE_LIVE_ENABLE=true ./scripts/dev.sh` starts the live ingester in the
-  local dev shell alongside the backend
+- `AIS_LIVE=true docker compose up` streams live AIS from the backend
+  (with the writable paths above)
+- `NEPTUNE_LIVE_ENABLE=true ./scripts/dev.sh` runs the live ingester inside the
+  local dev backend
 
 ## Validation checklist
 

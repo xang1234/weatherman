@@ -77,6 +77,7 @@ def test_refresh_day_loads_builds_snapshot_and_emits_event(tmp_path):
                 payload = json.loads(event.data)
                 assert payload["ais_date"] == "2025-12-25"
                 assert payload["tile_url_template"] == "/ais/tiles/2025-12-25/{z}/{x}/{y}.pbf"
+                assert payload["revision"] > 0  # the snapshot's build, for the tile URL (#72)
 
         run(_test())
     finally:

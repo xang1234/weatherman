@@ -14,11 +14,17 @@ def _load_compose() -> dict:
     return yaml.safe_load(COMPOSE_PATH.read_text())
 
 
-def test_neptune_live_service_uses_same_ais_db_path_as_backend() -> None:
-    compose = _load_compose()
-    services = compose["services"]
+def test_live_ais_runs_inside_the_backend() -> None:
+    """DuckDB can't share ais.duckdb between a writing and a reading process (#72)."""
+    services = _load_compose()["services"]
 
-    backend_env = services["backend"]["environment"]
-    live_env = services["ais-neptune-live"]["environment"]
+    assert "ais-neptune-live" not in services
+    assert "AIS_LIVE" in services["backend"]["environment"]
 
-    assert live_env["AIS_DB_PATH"] == backend_env["AIS_DB_PATH"]
+
+def test_sample_env_switches_live_ais_with_ais_live() -> None:
+    """The ais-live profile is gone; a copied .env must not still ask for it."""
+    sample = (COMPOSE_PATH.parent / ".env.example").read_text()
+    keys = {line.split("=", 1)[0] for line in sample.splitlines() if "=" in line and not line.startswith("#")}
+    assert "AIS_LIVE" in keys
+    assert "COMPOSE_PROFILES" not in keys

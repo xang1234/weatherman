@@ -64,7 +64,7 @@ Weather needs no settings. The variables in `.env` are for AIS:
 |----------|---------|---------|
 | `AIS_BACKEND` | `legacy_parquet` | `neptune` to ingest from the Neptune archive |
 | `AIS_DB_PATH` | `/data/ais.duckdb` | DuckDB file holding vessel positions |
-| `COMPOSE_PROFILES` | _(empty)_ | `ais-live` streams live AIS into the map (needs `NEPTUNE_LIVE_API_KEY`) |
+| `AIS_LIVE` | `false` | `true` streams live AIS into the map, inside the backend (needs `NEPTUNE_LIVE_API_KEY` and writable AIS paths, see the AIS docs) |
 
 See **[AIS / Neptune](docs/ais-neptune.md)** for ingest and live streaming.
 

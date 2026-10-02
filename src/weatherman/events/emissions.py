@@ -114,6 +114,7 @@ def emit_run_published(
 def emit_ais_refreshed(
     ais_date: date,
     tile_url_template: str,
+    revision: int | None = None,
 ) -> None:
     """Emit an ``ais.refreshed`` SSE event.
 
@@ -124,11 +125,16 @@ def emit_ais_refreshed(
     Payload:
         ais_date: ISO 8601 date of the refreshed AIS data (e.g. "2026-03-08").
         tile_url_template: URL template for accessing the generated MVT tiles.
+        revision: The snapshot's revision; changes with every rebuild of the
+            same date (#72). Omitted when unknown.
     """
-    data = json.dumps({
+    payload: dict[str, object] = {
         "ais_date": ais_date.isoformat(),
         "tile_url_template": tile_url_template,
-    })
+    }
+    if revision is not None:
+        payload["revision"] = revision
+    data = json.dumps(payload)
     event = ServerEvent(
         id=_next_event_id(),
         event="ais.refreshed",

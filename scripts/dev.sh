@@ -110,15 +110,16 @@ echo "Starting TiTiler on :8080 ..."
 uv run python scripts/run_titiler.py --port 8080 &
 PIDS+=($!)
 
+# Live AIS ingest runs inside the backend: DuckDB can't share ais.duckdb
+# between a writing and a reading process (#72).
+if [ "$NEPTUNE_LIVE_ENABLE" = "true" ]; then
+  echo "Neptune live AIS ingest will run inside the backend."
+  export AIS_LIVE=true
+fi
+
 echo "Starting backend on :8000 ..."
 uv run python -m weatherman &
 PIDS+=($!)
-
-if [ "$NEPTUNE_LIVE_ENABLE" = "true" ]; then
-  echo "Starting Neptune live AIS ingest ..."
-  uv run python scripts/stream_ais_neptune.py &
-  PIDS+=($!)
-fi
 
 # ── Wait for services ────────────────────────────────────────────────
 wait_for() {

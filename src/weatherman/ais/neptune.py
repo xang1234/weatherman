@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import os
+import threading
 from importlib import import_module
 from dataclasses import dataclass, replace
 from datetime import date
@@ -166,8 +167,18 @@ def run_neptune_live_ingest(
     db_path: str | Path,
     tenant_id: str,
     emit_event: bool = True,
+    con: duckdb.DuckDBPyConnection | None = None,
+    stop: threading.Event | None = None,
 ) -> NeptuneLiveResult:
-    """Run one Neptune live ingest cycle and bridge promoted dates into DuckDB."""
+    """Run one Neptune live ingest cycle and bridge promoted dates into DuckDB.
+
+    `con` is a read-write connection to use instead of opening `db_path`:
+    the backend passes its own, since DuckDB allows one writing process and
+    the backend must keep serving tiles meanwhile (#72).
+
+    Setting `stop` ends the stream: what has landed is flushed and refreshed
+    once more, then this returns — so the caller can close `con` after.
+    """
     NeptuneStream, StreamConfig, ParquetSink, promote_landing, run_with_reconnect = (
         _import_neptune_streaming()
     )
@@ -178,9 +189,10 @@ def run_neptune_live_ingest(
     refreshed_dates: set[date] = set()
     records_promoted = 0
     shard_files = 0
-    db = AISDatabase(db_path)
+    db = AISDatabase(db_path) if con is None else None
     try:
-        con = db.connect()
+        if db is not None:
+            con = db.connect()
 
         def _promote_and_refresh() -> None:
             nonlocal records_promoted, shard_files
@@ -283,9 +295,30 @@ def run_neptune_live_ingest(
                     with contextlib.suppress(asyncio.CancelledError):
                         await producer_task
 
-        asyncio.run(_consume())
+        async def _consume_until_stopped() -> None:
+            if stop is None:
+                await _consume()
+                return
+            task = asyncio.create_task(_consume())
+
+            async def _watch() -> None:
+                while not stop.is_set():
+                    await asyncio.sleep(0.25)
+                task.cancel()  # _consume's finally still flushes and refreshes
+
+            watcher = asyncio.create_task(_watch())
+            try:
+                await task
+            except asyncio.CancelledError:
+                if not stop.is_set():
+                    raise
+            finally:
+                watcher.cancel()
+
+        asyncio.run(_consume_until_stopped())
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
     return NeptuneLiveResult(
         source=live_config.source,

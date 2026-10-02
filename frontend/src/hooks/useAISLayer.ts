@@ -6,6 +6,8 @@ export interface UseAISLayerOptions {
   isLoaded: boolean
   /** Snapshot date in YYYY-MM-DD format, or null to hide layer */
   snapshotDate: string | null
+  /** Revision of that date's snapshot: a new one reloads the tiles (#72). */
+  revision?: number
   /** Whether the AIS layer is visible (default true) */
   visible?: boolean
 }
@@ -119,6 +121,7 @@ export function useAISLayer({
   map,
   isLoaded,
   snapshotDate,
+  revision = 0,
   visible = true,
 }: UseAISLayerOptions): void {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
@@ -135,20 +138,31 @@ export function useAISLayer({
       return
     }
 
-    // Already showing this date — nothing to do
-    if (activeDateRef.current === snapshotDate) return
+    // Already showing this snapshot — nothing to do
+    const key = `${snapshotDate}@${revision}`
+    if (activeDateRef.current === key) return
+
+    // MapLibre fetches vector tiles in a worker, which cannot resolve a
+    // relative URL — so an empty (same-origin) API base needs the origin.
+    // The revision pins the URL to one build of the snapshot.
+    const tileUrl = `${apiBase || window.location.origin}/ais/tiles/${snapshotDate}/{z}/{x}/{y}.pbf?v=${TILE_VERSION}&rev=${revision}`
+
+    // A rebuild (new revision): swap the tiles under the existing layers,
+    // so the vessels don't blink out while the new ones load.
+    const existing = m.getSource(SOURCE_ID) as maplibregl.VectorTileSource | undefined
+    if (existing && activeDateRef.current) {
+      existing.setTiles([tileUrl])
+      activeDateRef.current = key
+      return
+    }
 
     // Remove old source/layers before adding new
     cleanup(m)
 
-    // Set ref before addLayer so the visibility effect can find the active date
-    activeDateRef.current = snapshotDate
+    // Set ref before addLayer so the visibility effect can find the active snapshot
+    activeDateRef.current = key
 
     addSprites(m)
-
-    // MapLibre fetches vector tiles in a worker, which cannot resolve a
-    // relative URL — so an empty (same-origin) API base needs the origin.
-    const tileUrl = `${apiBase || window.location.origin}/ais/tiles/${snapshotDate}/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`
 
     m.addSource(SOURCE_ID, {
       type: 'vector',
@@ -212,7 +226,7 @@ export function useAISLayer({
       },
     })
 
-  }, [map, isLoaded, snapshotDate, apiBase, visible])
+  }, [map, isLoaded, snapshotDate, revision, apiBase, visible])
 
   // Update visibility on existing layers
   useEffect(() => {

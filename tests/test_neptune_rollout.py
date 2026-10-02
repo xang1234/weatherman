@@ -34,7 +34,7 @@ def test_rollout_env_surfaces_include_shared_event_journal_path() -> None:
     assert env_values["WEATHERMAN_EVENT_JOURNAL_PATH"] == "/runtime/events/sse-events.jsonl"
     assert (
         services["backend"]["environment"]["WEATHERMAN_EVENT_JOURNAL_PATH"]
-        == services["ais-neptune-live"]["environment"]["WEATHERMAN_EVENT_JOURNAL_PATH"]
+        == f"${{WEATHERMAN_EVENT_JOURNAL_PATH:-{env_values['WEATHERMAN_EVENT_JOURNAL_PATH']}}}"
     )
     assert (
         helm_values["global"]["env"]["WEATHERMAN_EVENT_JOURNAL_PATH"]

@@ -21,6 +21,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 
 import duckdb
@@ -87,10 +88,36 @@ WHERE _rn = 1
 """
 
 
+# Revision of each date's snapshot: the build time in ms. A date's snapshot
+# is rebuilt through the day with live ingest; clients key their tile URLs on
+# it, so a rebuild reaches an open map (#72).
+AIS_SNAPSHOT_REVISIONS_DDL = """\
+CREATE TABLE IF NOT EXISTS ais_snapshot_revisions (
+    "date"      DATE,
+    tenant_id   VARCHAR NOT NULL,
+    revision    BIGINT NOT NULL,
+    PRIMARY KEY ("date", tenant_id)
+);
+"""
+
+
 def ensure_snapshot_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Create the ais_snapshot table and indexes if they don't exist."""
     con.execute(AIS_SNAPSHOT_DDL)
     con.execute(AIS_SNAPSHOT_DATE_INDEX_DDL)
+    con.execute(AIS_SNAPSHOT_REVISIONS_DDL)
+
+
+def snapshot_revision(con: duckdb.DuckDBPyConnection, snapshot_date: date) -> int:
+    """Revision of a date's snapshot (newest over tenants); 0 if never recorded."""
+    try:
+        row = con.execute(
+            'SELECT MAX(revision) FROM ais_snapshot_revisions WHERE "date" = $d',
+            {"d": snapshot_date},
+        ).fetchone()
+    except duckdb.CatalogException:
+        return 0  # a database built before revisions existed
+    return int(row[0]) if row and row[0] is not None else 0
 
 
 def build_snapshot(
@@ -142,6 +169,14 @@ def build_snapshot(
             'SELECT COUNT(*) FROM ais_snapshot WHERE "date" = $snapshot_date AND tenant_id = $tenant_id',
             {"snapshot_date": snapshot_date, "tenant_id": tenant_id},
         ).fetchone()[0]
+
+        # A new revision, after the previous one even if the clock steps back.
+        con.execute(
+            "INSERT OR REPLACE INTO ais_snapshot_revisions "
+            "SELECT $snapshot_date, $tenant_id, GREATEST($now, COALESCE(MAX(revision), 0) + 1) "
+            'FROM ais_snapshot_revisions WHERE "date" = $snapshot_date AND tenant_id = $tenant_id',
+            {"snapshot_date": snapshot_date, "tenant_id": tenant_id, "now": time.time_ns() // 1_000_000},
+        )
 
         con.commit()
     except Exception:

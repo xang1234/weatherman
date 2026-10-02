@@ -74,6 +74,11 @@ services:
       NEPTUNE_LIVE_CLEANUP: ${NEPTUNE_LIVE_CLEANUP:-false}
       NEPTUNE_LIVE_FLUSH_INTERVAL: ${NEPTUNE_LIVE_FLUSH_INTERVAL:-60}
       NEPTUNE_LIVE_API_KEY: ${NEPTUNE_LIVE_API_KEY:-}
+      # Live AIS ingest runs inside the backend (DuckDB can't share ais.duckdb
+      # between a writing and a reading process). It writes AIS_DB_PATH and
+      # the NEPTUNE_* directories, so with AIS_LIVE=true point them at
+      # /runtime: /data is read-only. See docs/ais-neptune.md.
+      AIS_LIVE: ${AIS_LIVE:-false}
       CORS_ORIGINS: "*"
     depends_on:
       titiler:
@@ -91,36 +96,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
-  ais-neptune-live:
-    profiles: ["ais-live"]
-    build: .
-    command: ["uv", "run", "python", "scripts/stream_ais_neptune.py"]
-    volumes:
-      - ./.data:/data
-      # Shared runtime volume with backend so both services write to the same
-      # event journal (SSE replay depends on backend seeing ais-live events).
-      - ./.runtime:/runtime
-    environment:
-      AIS_DB_PATH: ${AIS_DB_PATH:-/data/ais.duckdb}
-      AIS_TENANT_ID: ${AIS_TENANT_ID:-default}
-      WEATHERMAN_EVENT_JOURNAL_PATH: ${WEATHERMAN_EVENT_JOURNAL_PATH:-/runtime/events/sse-events.jsonl}
-      NEPTUNE_STORE_ROOT: ${NEPTUNE_STORE_ROOT:-/data/neptune}
-      NEPTUNE_SOURCES: ${NEPTUNE_SOURCES:-noaa}
-      NEPTUNE_MERGE: ${NEPTUNE_MERGE:-best}
-      NEPTUNE_BBOX: ${NEPTUNE_BBOX:-}
-      NEPTUNE_MMSI: ${NEPTUNE_MMSI:-}
-      NEPTUNE_RAW_POLICY: ${NEPTUNE_RAW_POLICY:-metadata}
-      NEPTUNE_OVERWRITE: ${NEPTUNE_OVERWRITE:-false}
-      NEPTUNE_API_KEYS_JSON: ${NEPTUNE_API_KEYS_JSON:-}
-      NEPTUNE_LIVE_SOURCE: ${NEPTUNE_LIVE_SOURCE:-aisstream}
-      NEPTUNE_LIVE_LANDING_DIR: ${NEPTUNE_LIVE_LANDING_DIR:-/data/neptune-live}
-      NEPTUNE_LIVE_BBOX: ${NEPTUNE_LIVE_BBOX:-}
-      NEPTUNE_LIVE_MMSI: ${NEPTUNE_LIVE_MMSI:-}
-      NEPTUNE_LIVE_MAX_MESSAGES: ${NEPTUNE_LIVE_MAX_MESSAGES:-}
-      NEPTUNE_LIVE_CLEANUP: ${NEPTUNE_LIVE_CLEANUP:-false}
-      NEPTUNE_LIVE_FLUSH_INTERVAL: ${NEPTUNE_LIVE_FLUSH_INTERVAL:-60}
-      NEPTUNE_LIVE_API_KEY: ${NEPTUNE_LIVE_API_KEY:-}
 
   frontend:
     build: ./frontend

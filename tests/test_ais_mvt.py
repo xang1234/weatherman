@@ -446,13 +446,18 @@ class TestAISTileEndpoint:
         assert "vessels" in decoded
         assert len(decoded["vessels"]["features"]) == 2
 
-    def test_tile_has_immutable_cache(self, client):
-        resp = client.get(f"/ais/tiles/{SNAPSHOT_DATE}/0/0/0.pbf")
-        assert resp.status_code == 200
-        assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
+    def test_tile_at_the_current_revision_is_immutable(self, client):
+        """The snapshot is rebuilt through the day (#72): only revision-pinned URLs are immutable."""
+        rev = client.get("/ais/tiles/latest").json()["revision"]
+        assert rev > 0
+        pinned = client.get(f"/ais/tiles/{SNAPSHOT_DATE}/0/0/0.pbf?rev={rev}")
+        assert pinned.headers["cache-control"] == "public, max-age=31536000, immutable"
+        for url in (f"/ais/tiles/{SNAPSHOT_DATE}/0/0/0.pbf", f"/ais/tiles/{SNAPSHOT_DATE}/0/0/0.pbf?rev={rev - 1}"):
+            assert client.get(url).headers["cache-control"] == "public, max-age=60"
 
     def test_empty_tile_returns_204(self, client):
-        resp = client.get(f"/ais/tiles/{SNAPSHOT_DATE}/4/0/0.pbf")
+        rev = client.get("/ais/tiles/latest").json()["revision"]
+        resp = client.get(f"/ais/tiles/{SNAPSHOT_DATE}/4/0/0.pbf?rev={rev}")
         assert resp.status_code == 204
         assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
 
@@ -510,7 +515,29 @@ class TestAISLatestEndpoint:
     def test_latest_snapshot_endpoint(self, client):
         resp = client.get("/ais/tiles/latest")
         assert resp.status_code == 200
-        assert resp.json() == {"snapshot_date": "2025-12-25"}
+        body = resp.json()
+        assert body["snapshot_date"] == "2025-12-25"
+        assert body["revision"] > 0  # the snapshot's build, for revision-keyed tile URLs (#72)
+
+    def test_latest_works_on_a_database_without_revisions(self, tmp_path: Path):
+        """A database built before #72 has no revisions table: revision 0, no error."""
+        import duckdb
+        import weatherman.ais.router as mod
+        from weatherman.ais.snapshot import AIS_SNAPSHOT_DDL
+
+        db_path = str(tmp_path / "old.duckdb")
+        con = duckdb.connect(db_path)
+        con.execute(AIS_SNAPSHOT_DDL)
+        con.execute("INSERT INTO ais_snapshot (\"date\", tenant_id) VALUES ('2025-12-24', 't')")
+        con.close()
+        mod._service = None
+        app = FastAPI()
+        init_ais_tile_service(db_path)
+        app.include_router(router)
+        try:
+            assert TestClient(app).get("/ais/tiles/latest").json() == {"snapshot_date": "2025-12-24", "revision": 0}
+        finally:
+            shutdown_ais_tile_service()
 
     def test_latest_snapshot_not_found_for_empty_db(self, tmp_path: Path):
         from weatherman.ais.db import AISDatabase

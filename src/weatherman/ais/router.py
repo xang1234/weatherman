@@ -8,9 +8,10 @@ URL patterns::
     /ais/bbox                                     — vessels in bounding box (GeoJSON)
     /ais/tracks/{mmsi}                            — vessel track (GeoJSON LineString)
 
-Tiles are date-keyed and immutable: once a day's snapshot is built, its tiles
-never change.  This enables aggressive ``Cache-Control: immutable`` headers
-for CDN and browser caching.
+A date's snapshot is rebuilt through the day by live ingest, and each build
+has a revision. Tiles requested with the current revision (``?rev=``) never
+change and are cached as immutable; anything else (no revision, or an old
+one) is cached only briefly, so a rebuild reaches open maps (#72).
 
 The ``vessels`` layer in each tile contains point features with properties
 suitable for rendering directional arrows color-coded by ship type.
@@ -26,7 +27,9 @@ import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from weatherman.ais.db import AISDatabase
 from weatherman.ais.mvt import MAX_ZOOM, MIN_ZOOM, GeneratedTile, generate_tile_with_stats
+from weatherman.ais.snapshot import snapshot_revision
 from weatherman.ais.tracks import query_track
 from weatherman.observability.metrics import AIS_TILE_BYTES, AIS_TILE_FEATURES
 from weatherman.tenancy import get_tenant_id
@@ -36,28 +39,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ais/tiles", tags=["ais-tiles"])
 
 CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
+# For tiles not pinned to the current revision: a rebuild shows within a minute.
+CACHE_SHORT = "public, max-age=60"
 CONTENT_TYPE_MVT = "application/vnd.mapbox-vector-tile"
 
 
 class AISTileService:
     """Serves MVT tiles from the AIS snapshot table.
 
-    Holds a read-only DuckDB connection. Handlers run on several threads at
+    Holds the process's one DuckDB connection: read-only, or read-write when
+    live ingest runs in this process (DuckDB allows one writing process or
+    several reading ones, never both). Handlers run on several threads at
     once and a DuckDB connection must not be used by two threads at the same
     time (the backend deadlocks), so every query goes through ``cursor()``.
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, writable: bool = False) -> None:
         self._db_path = db_path
+        self._writable = writable
+        self._db: AISDatabase | None = None
         self._con: duckdb.DuckDBPyConnection | None = None
 
     def connect(self) -> None:
-        """Open a read-only DuckDB connection."""
-        self._con = duckdb.connect(self._db_path, read_only=True)
+        """Open the DuckDB connection (read-write also ensures the schema)."""
+        if self._writable:
+            self._db = AISDatabase(self._db_path)
+            self._con = self._db.connect()
+        else:
+            self._con = duckdb.connect(self._db_path, read_only=True)
 
     def close(self) -> None:
         """Close the DuckDB connection."""
-        if self._con is not None:
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+            self._con = None
+        elif self._con is not None:
             self._con.close()
             self._con = None
 
@@ -90,6 +107,10 @@ class AISTileService:
             y=y,
         )
 
+    def revision(self, snapshot_date: date) -> int:
+        """Revision of a date's snapshot; 0 if never recorded."""
+        return snapshot_revision(self.cursor(), snapshot_date)
+
     def latest_snapshot_date(self) -> date | None:
         """Return the newest available AIS snapshot date."""
         row = self.cursor().execute(
@@ -104,10 +125,12 @@ class AISTileService:
 _service: Optional[AISTileService] = None
 
 
-def init_ais_tile_service(db_path: str) -> AISTileService | None:
+def init_ais_tile_service(db_path: str, *, writable: bool = False) -> AISTileService | None:
     """Initialize the AIS tile service. Call once at app startup.
 
-    Returns None if the database file does not exist (AIS not yet ingested).
+    `writable` opens the database read-write — for live ingest in this
+    process — creating it if need be. Otherwise returns None if the database
+    file does not exist (AIS not yet ingested).
     """
     global _service
     if _service is not None:
@@ -117,14 +140,14 @@ def init_ais_tile_service(db_path: str) -> AISTileService | None:
 
     import os
 
-    if not os.path.exists(db_path):
+    if not writable and not os.path.exists(db_path):
         logger.info(
             "AIS database not found, tile service disabled",
             extra={"db_path": db_path},
         )
         return None
 
-    _service = AISTileService(db_path)
+    _service = AISTileService(db_path, writable=writable)
     _service.connect()
     logger.info("AIS tile service started", extra={"db_path": db_path})
     return _service
@@ -164,7 +187,7 @@ def get_latest_snapshot_date(
     if snapshot_date is None:
         raise HTTPException(status_code=404, detail="No AIS snapshots available")
     return JSONResponse(
-        content={"snapshot_date": snapshot_date.isoformat()},
+        content={"snapshot_date": snapshot_date.isoformat(), "revision": svc.revision(snapshot_date)},
         headers={"Cache-Control": "public, max-age=60, must-revalidate"},
     )
 
@@ -179,6 +202,7 @@ def get_ais_tile(
     z: Annotated[int, Path(ge=MIN_ZOOM, le=MAX_ZOOM)],
     x: Annotated[int, Path(ge=0)],
     y: Annotated[int, Path(ge=0)],
+    rev: Annotated[int | None, Query(description="Snapshot revision the client shows")] = None,
     tenant_id: str = Depends(get_tenant_id),
     svc: AISTileService = Depends(get_ais_tile_service),
 ) -> Response:
@@ -188,7 +212,9 @@ def get_ais_tile(
     mmsi, vessel_name, sog, heading, shiptype, vessel_class, dwt,
     destination, destinationtidied, eta.
 
-    Tiles are immutable — the same date always returns the same data.
+    Cached as immutable only when ``rev`` is the date's current revision:
+    the snapshot is rebuilt through the day, and other URLs must not keep
+    stale vessels (#72).
     """
     # Validate tile x/y against zoom level
     max_tile = 2**z - 1
@@ -214,17 +240,16 @@ def get_ais_tile(
         len(generated.tile_bytes)
     )
 
+    pinned = rev is not None and rev == svc.revision(snapshot_date)
+    cache = CACHE_IMMUTABLE if pinned else CACHE_SHORT
     if not generated.tile_bytes:
         # Empty tile — return 204 with cache headers so clients don't re-request.
-        return Response(
-            status_code=204,
-            headers={"Cache-Control": CACHE_IMMUTABLE},
-        )
+        return Response(status_code=204, headers={"Cache-Control": cache})
 
     return Response(
         content=generated.tile_bytes,
         media_type=CONTENT_TYPE_MVT,
-        headers={"Cache-Control": CACHE_IMMUTABLE},
+        headers={"Cache-Control": cache},
     )
 
 
