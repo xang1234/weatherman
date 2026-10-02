@@ -137,8 +137,17 @@ _WIND_SPEED_MS: list[tuple[float, tuple[int, int, int]]] = [
     (46, (231, 215, 215)),
     (50, (221, 213, 152)),
 ]
+
+
+def _soften(rgb: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """Pull a colour towards the grey of its own lightness: less saturated, same brightness."""
+    grey = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    return tuple(round(c + (grey - c) * amount) for c in rgb)  # type: ignore[return-value]
+
+
+# Softened further so coastlines and labels read through at full opacity.
 WIND_SPEED_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (ms / 50.0, rgb) for ms, rgb in _WIND_SPEED_MS
+    (ms / 50.0, _soften(rgb, 0.45)) for ms, rgb in _WIND_SPEED_MS
 ]
 
 WIND_SPEED = WeatherColormap(

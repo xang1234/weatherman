@@ -154,6 +154,9 @@ export function setWeatherOverlayOpacity(
     ['water', 'fill-opacity', active ? 0 : 1],
     ['earth', 'fill-color', oceanOnly ? '#3b4150' : '#e8e8e8'],
     ['earth', 'fill-opacity', active && !oceanOnly ? 0 : 1],
+    // Over the colour field, light lines read better than dark ones.
+    ['earth_outline', 'line-color', active ? 'rgba(255, 255, 255, 0.55)' : 'rgba(10, 14, 22, 0.75)'],
+    ['boundaries', 'line-color', active ? 'rgba(255, 255, 255, 0.35)' : 'rgba(10, 14, 22, 0.45)'],
   ]
   for (const id of LABEL_LAYERS) {
     paint.push(
