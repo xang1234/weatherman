@@ -50,7 +50,7 @@ export function MapView() {
   // (wind particles with wind speed, dashes with wave height; isobars off)
   // until toggled.
   const [overlays, setOverlays] = useState<Record<OverlayId, OverlayState>>({
-    wind: { on: null, opacity: 0.6 },
+    wind: { on: null, opacity: 0.85 },
     waves: { on: null, opacity: 0.8 },
     isobars: { on: null, opacity: 0.8 },
   })

@@ -60,7 +60,7 @@ export function useWindParticles({
     const tileFormat = import.meta.env.VITE_USE_FLOAT16_TILES === 'true' ? 'f16' as const : 'png' as const
     const particleLayer = new WindParticleLayer({
       id: 'wind-particles',
-      opacity: 0.6,
+      opacity: 0.85,
       apiBase,
       tileFormat,
     })

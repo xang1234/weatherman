@@ -23,8 +23,8 @@ import {
 const TRAIL_FADE = 0.97
 /** Maximum expected wind speed (m/s) for normalizing speed → alpha in the draw shader. */
 const SPEED_MAX = 50.0
-/** Trail width in CSS pixels — zoom-independent. */
-const LINE_WIDTH = 1.7
+/** Trail width in CSS pixels — zoom-independent. Wide enough to read over the colour layer. */
+const LINE_WIDTH = 2.5
 /**
  * Particles drawn per CSS pixel² of viewport, so density does not depend on
  * window size (about 5,200 at 1440×900). The GPU tier only caps the total.
