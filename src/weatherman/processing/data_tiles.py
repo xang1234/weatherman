@@ -203,12 +203,13 @@ def generate_all_data_tiles(
     max_zoom: int = MAX_DATA_TILE_ZOOM,
     tile_size: int = 256,
     resampling: Resampling = Resampling.cubic_spline,
-    tile_format: str = "png",
-) -> Iterator[tuple[int, int, int, bytes]]:
+    tile_formats: tuple[str, ...] = ("png",),
+) -> Iterator[tuple[int, int, int, dict[str, bytes]]]:
     """Generate pre-generated data tiles for z0 through max_zoom from a COG.
 
-    Opens the COG once and yields (z, x, y, tile_bytes) for every tile in
-    the zoom range.
+    Opens the COG once and yields (z, x, y, {format: tile_bytes}) for every
+    tile in the zoom range. Each tile is warped once and encoded in every
+    requested format from that one result (#95): the warp is the costly part.
     """
     with _open_for_tiling(cog_path) as src:
         for z in range(max_zoom + 1):
@@ -216,11 +217,7 @@ def generate_all_data_tiles(
             for x in range(n_tiles):
                 for y in range(n_tiles):
                     data, nodata = _warp_tile(src, z, x, y, tile_size, resampling)
-                    yield (
-                        z,
-                        x,
-                        y,
-                        _encode_data_tile(
-                            data, value_min, value_max, nodata, tile_format,
-                        ),
-                    )
+                    yield z, x, y, {
+                        f: _encode_data_tile(data, value_min, value_max, nodata, f)
+                        for f in tile_formats
+                    }

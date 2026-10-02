@@ -49,13 +49,11 @@ if [ ! -x frontend/node_modules/.bin/vite ]; then
 fi
 
 # ── Sample data ──────────────────────────────────────────────────────
-# PNG tiles only: Float16 tiles triple the disk use and the frontend does not
-# read them unless VITE_USE_FLOAT16_TILES=true.
 if [ ! -f "$DATA_DIR/models/gfs/catalog.json" ]; then
   echo "No weather data in $DATA_DIR — fetching a sample from NOAA"
   echo "(latest GFS cycle, hours $SAMPLE_HOURS; about 1 min and 0.6 GB per hour) ..."
   uv run python scripts/run_pipeline.py \
-    --data-dir "$DATA_DIR" --hours "$SAMPLE_HOURS" --max-runs 1 --tile-formats png
+    --data-dir "$DATA_DIR" --hours "$SAMPLE_HOURS" --max-runs 1
 fi
 
 # ── Basemap ──────────────────────────────────────────────────────────
