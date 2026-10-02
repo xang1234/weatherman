@@ -570,3 +570,83 @@ def test_run_neptune_live_ingest_refreshes_before_stream_exit(monkeypatch, tmp_p
 
     assert result.dates_refreshed == (date(2025, 12, 25),)
     assert events.index("refresh") < events.index("connect_end")
+
+
+def test_run_neptune_live_ingest_ends_when_stopped(monkeypatch, tmp_path: Path) -> None:
+    """The backend stops the stream before closing its connection (#72): what landed is still refreshed."""
+    import threading
+    import time
+
+    events: list[str] = []
+    sentinel = object()
+
+    class FakeParquetSink:
+        def __init__(self, landing_dir, source):
+            pass
+
+        async def write(self, messages):
+            events.append("write")
+
+        async def flush(self):
+            events.append("flush")
+
+    class FakeNeptuneStream:
+        def __init__(self, *, config):
+            self.stats = SimpleNamespace(messages_delivered=0)
+            self._message_queue = asyncio.Queue()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            await self._message_queue.put(sentinel)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            message = await self._message_queue.get()
+            if message is sentinel:
+                raise StopAsyncIteration
+            return message
+
+        async def ingest(self, message):
+            self.stats.messages_delivered += 1
+            await self._message_queue.put(message)
+
+    def fake_import():
+        async def fake_run_with_reconnect(stream, connect_fn, *, max_retries=None):
+            await connect_fn()
+
+        def fake_promote(landing_dir, store_root, source, cleanup=False):
+            events.append("promote")
+            return [SimpleNamespace(date="2025-12-25", record_count=1, shard_files=["part-0000.parquet"])]
+
+        return FakeNeptuneStream, SimpleNamespace, FakeParquetSink, fake_promote, fake_run_with_reconnect
+
+    async def endless_stream(stream, *, api_key, bbox):
+        await stream.ingest({"mmsi": 123456789, "timestamp": "2025-12-25T00:00:00"})
+        await asyncio.Event().wait()  # a live feed never ends by itself
+
+    def fake_refresh_neptune_day(*, load_date, tenant_id, con, config, emit_event, download):
+        events.append("refresh")
+        return AISRefreshResult(snapshot_date=load_date, tenant_id=tenant_id, rows_loaded=1, vessels_visible=1, event_emitted=False)
+
+    monkeypatch.setattr("weatherman.ais.neptune._import_neptune_streaming", fake_import)
+    monkeypatch.setattr("weatherman.ais.neptune._import_neptune_stream_source", lambda source: endless_stream)
+    monkeypatch.setattr("weatherman.ais.refresh.refresh_neptune_day", fake_refresh_neptune_day)
+
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    started = time.monotonic()
+    result = run_neptune_live_ingest(
+        live_config=NeptuneLiveConfig(source="aisstream", landing_dir=tmp_path / "landing", flush_interval_s=60),
+        archival_config=NeptuneConfig(store_root=tmp_path / "store"),
+        db_path=tmp_path / "live.duckdb",
+        tenant_id="default",
+        stop=stop,
+    )
+
+    assert time.monotonic() - started < 10  # not the 60 s flush interval, nor forever
+    assert result.dates_refreshed == (date(2025, 12, 25),)
+    assert events[-3:] == ["flush", "promote", "refresh"]  # the last batch landed and was refreshed

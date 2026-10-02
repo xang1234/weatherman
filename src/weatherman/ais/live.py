@@ -40,7 +40,9 @@ def start_live_ingest(
     """Run live ingest on a daemon thread until the returned event is set.
 
     The stream reconnects by itself; if the ingest still returns or raises,
-    it is restarted after a growing pause. `run` replaces the ingest (tests).
+    it is restarted after a growing pause. Setting the event also ends the
+    running stream; join the thread before closing `con`. `run` replaces the
+    ingest (tests).
     """
     from weatherman.ais.neptune import (
         live_config_from_env,
@@ -62,8 +64,10 @@ def start_live_ingest(
                     tenant_id=tenant_id,
                     emit_event=True,
                     con=con.cursor(),  # never share a connection across threads
+                    stop=stop,
                 )
-                logger.warning("Live AIS ingest stopped; restarting in %.0fs", delay)
+                if not stop.is_set():
+                    logger.warning("Live AIS ingest stopped; restarting in %.0fs", delay)
             except Exception:
                 logger.exception("Live AIS ingest failed; restarting in %.0fs", delay)
             if stop.wait(delay):

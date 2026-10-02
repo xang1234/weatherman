@@ -49,14 +49,16 @@ def test_a_same_day_rebuild_reaches_the_running_server(tmp_path: Path, monkeypat
         # A later batch of the same day, ingested in the background.
         done = threading.Event()
 
-        def fake_ingest(*, con, tenant_id, **_):
+        def fake_ingest(*, con, tenant_id, stop, **_):
             refresh_day(tmp_path / "later" / f"movement_date={DAY}" / "*", load_date=DAY, tenant_id=tenant_id, con=con, emit_event=False)
             done.set()
-            threading.Event().wait()  # keep "streaming" until the process ends
+            stop.wait()  # "stream" until told to stop
 
-        _, stop = start_live_ingest(svc.connection, db_path=db_path, tenant_id=TENANT, run=fake_ingest)
+        thread, stop = start_live_ingest(svc.connection, db_path=db_path, tenant_id=TENANT, run=fake_ingest)
         assert done.wait(10)
         stop.set()
+        thread.join(5)
+        assert not thread.is_alive()  # ended, so the connection can be closed
 
         after = client.get("/ais/tiles/latest").json()["revision"]
         assert after > before

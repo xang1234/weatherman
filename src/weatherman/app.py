@@ -10,6 +10,7 @@ Or via CLI:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -70,6 +71,9 @@ from weatherman.tiling.router import (
 from weatherman.tiling.router import router as tile_router
 
 logger = logging.getLogger(__name__)
+
+# How long shutdown waits for live AIS ingest to finish its last refresh.
+_LIVE_AIS_SHUTDOWN_S = 30
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +310,9 @@ def create_app(
         # writing and a reading process (#72).
         live_ais = live_ingest_enabled()
         ais_service = init_ais_tile_service(ais_db_path, writable=live_ais)
-        live_ais_stop = None
+        live_ais_thread = live_ais_stop = None
         if live_ais and ais_service is not None:
-            _, live_ais_stop = start_live_ingest(
+            live_ais_thread, live_ais_stop = start_live_ingest(
                 ais_service.connection,
                 db_path=ais_db_path,
                 tenant_id=os.environ.get("AIS_TENANT_ID", "default"),
@@ -316,9 +320,13 @@ def create_app(
         register_check(TiTilerHealthCheck(titiler_url))
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
-        # Shutdown
-        if live_ais_stop is not None:
+        # Shutdown: end the ingest (its last refresh included) before closing
+        # the connection and event bus it uses.
+        if live_ais_thread is not None and live_ais_stop is not None:
             live_ais_stop.set()
+            await asyncio.to_thread(live_ais_thread.join, _LIVE_AIS_SHUTDOWN_S)
+            if live_ais_thread.is_alive():
+                logger.warning("Live AIS ingest still running after %ss; closing anyway", _LIVE_AIS_SHUTDOWN_S)
         shutdown_event_bus()
         shutdown_ais_tile_service()
         shutdown_edr_service()
