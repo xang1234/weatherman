@@ -321,14 +321,22 @@ def create_app(
         logger.info("Weatherman started", extra={"titiler_url": titiler_url})
         yield
         # Shutdown: end the ingest (its last refresh included) before closing
-        # the connection and event bus it uses.
+        # the connection and event bus it uses. If it is still busy after the
+        # wait, leave both open rather than close them under it: the process
+        # is exiting, and the OS reclaims them.
+        ingest_alive = False
         if live_ais_thread is not None and live_ais_stop is not None:
             live_ais_stop.set()
             await asyncio.to_thread(live_ais_thread.join, _LIVE_AIS_SHUTDOWN_S)
-            if live_ais_thread.is_alive():
-                logger.warning("Live AIS ingest still running after %ss; closing anyway", _LIVE_AIS_SHUTDOWN_S)
-        shutdown_event_bus()
-        shutdown_ais_tile_service()
+            ingest_alive = live_ais_thread.is_alive()
+            if ingest_alive:
+                logger.warning(
+                    "Live AIS ingest still running after %ss; leaving its connection open",
+                    _LIVE_AIS_SHUTDOWN_S,
+                )
+        if not ingest_alive:
+            shutdown_event_bus()
+            shutdown_ais_tile_service()
         shutdown_edr_service()
         await shutdown_tile_service()
         shutdown_tracing()

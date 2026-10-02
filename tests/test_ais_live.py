@@ -82,3 +82,35 @@ def test_an_event_published_from_another_thread_reaches_subscribers():
             return await asyncio.wait_for(queue.get(), timeout=2)
 
     assert asyncio.run(scenario()).event == "ais.refreshed"
+
+
+def test_shutdown_leaves_the_connection_to_an_ingest_still_running(tmp_path: Path, monkeypatch):
+    """Closing DuckDB under a busy ingest thread would break its writes; leave it to process exit."""
+    import weatherman.ais.router as mod
+    import weatherman.app as app_mod
+    from weatherman.app import create_app
+
+    busy = threading.Event()  # never set: an ingest stuck in its last refresh
+    started: list[threading.Thread] = []
+
+    def fake_start(con, *, db_path, tenant_id):
+        thread = threading.Thread(target=busy.wait, daemon=True)
+        thread.start()
+        started.append(thread)
+        return thread, threading.Event()
+
+    monkeypatch.setenv("AIS_LIVE", "true")
+    monkeypatch.setenv("AIS_DB_PATH", str(tmp_path / "ais.duckdb"))
+    monkeypatch.setattr(app_mod, "start_live_ingest", fake_start)
+    monkeypatch.setattr(app_mod, "_LIVE_AIS_SHUTDOWN_S", 0.1)
+    mod._service = None
+    with TestClient(create_app(data_dir=str(tmp_path), titiler_base_url="http://localhost:9999")):
+        assert started
+    try:
+        assert mod._service is not None  # not closed under the running thread
+    finally:
+        from weatherman.events.router import shutdown_event_bus
+
+        busy.set()
+        shutdown_ais_tile_service()
+        shutdown_event_bus()

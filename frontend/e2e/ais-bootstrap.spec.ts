@@ -62,3 +62,28 @@ test('a same-day AIS rebuild reloads the vessel tiles (#72)', async ({ page }) =
   await page.goto('/')
   await expect.poll(() => [...revisions].sort(), { timeout: 15_000 }).toEqual(['1', '2'])
 })
+
+test('AIS events without a revision still reload the tiles each time', async ({ page }) => {
+  // notify_ais.py and older producers send no revision.
+  await mockApiRoutes(page)
+  let connections = 0
+  await page.route('**/events/stream', (route) => {
+    connections++
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      body: `retry: 200\nid: ${connections}\nevent: ais.refreshed\ndata: ${JSON.stringify({
+        ais_date: AIS_DATE,
+        tile_url_template: `/ais/tiles/${AIS_DATE}/{z}/{x}/{y}.pbf`,
+      })}\n\n`,
+    })
+  })
+  const revisions = new Set<string>()
+  page.on('request', (r) => {
+    const m = r.url().match(new RegExp(`/ais/tiles/${AIS_DATE}/\\d+/\\d+/\\d+\\.pbf\\?.*rev=(-\\d+)`))
+    if (m) revisions.add(m[1])
+  })
+
+  await page.goto('/')
+  await expect.poll(() => revisions.size, { timeout: 15_000 }).toBeGreaterThanOrEqual(2)
+})

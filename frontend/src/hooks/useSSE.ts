@@ -82,7 +82,10 @@ export function useSSE(): SSEState {
     es.addEventListener('ais.refreshed', (e: MessageEvent) => {
       try {
         const payload: AISRefreshedPayload = JSON.parse(e.data)
-        setAisSnapshot({ date: payload.ais_date, revision: payload.revision ?? 0 })
+        // An event without a revision (notify_ais.py, older producers) still
+        // means "reload": give it its own, negative so it never matches a real
+        // one — the server then serves current tiles with a short cache.
+        setAisSnapshot({ date: payload.ais_date, revision: payload.revision ?? -Date.now() })
         console.info('[SSE] ais.refreshed:', payload.ais_date, payload.revision)
       } catch {
         console.warn('[SSE] Failed to parse ais.refreshed event')
