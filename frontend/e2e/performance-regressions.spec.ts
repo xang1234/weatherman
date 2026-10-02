@@ -403,6 +403,27 @@ test('isobars retry an hour that failed with a server error', async ({ page }) =
   await expect.poll(() => requested.filter((h) => h === '0').length).toBe(2)
 })
 
+test('wind colour layer and particles fetch each tile once between them', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // Completed fetches: the worker may abort a prefetch for a visible tile
+  // and fetch it again later, which is preemption, not duplication.
+  const requests = new Map<string, number>()
+  page.on('requestfinished', (request) => {
+    const url = request.url()
+    if (/\/wind_[uv]\/\d+\/data\//.test(url)) requests.set(url, (requests.get(url) ?? 0) + 1)
+  })
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  // Both layers draw wind U/V tiles; they used to fetch, decode and upload
+  // each one separately (#43).
+  expect(requests.size).toBeGreaterThan(0)
+  const repeated = [...requests].filter(([, count]) => count > 1)
+  expect(repeated).toEqual([])
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')
