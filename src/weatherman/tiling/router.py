@@ -614,5 +614,6 @@ async def get_colormaps() -> dict:
     """
     return JSONResponse(
         content=export_color_ramps(),
-        headers={"Cache-Control": "public, max-age=86400"},
+        # Short: the ranges must match the tiles, so a change has to reach browsers soon.
+        headers={"Cache-Control": "public, max-age=300"},
     )

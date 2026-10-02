@@ -170,7 +170,8 @@ function LegendSection({ layer }: { layer: LayerConfig }) {
     const stops = color_stops!.map(
       (s) => `rgb(${s.color[0]}, ${s.color[1]}, ${s.color[2]}) ${(s.position * 100).toFixed(1)}%`,
     )
-    return `linear-gradient(to right, ${stops.join(', ')})`
+    // OKLab, like the map's ramp texture: sRGB blending would show other colours between stops.
+    return `linear-gradient(in oklab to right, ${stops.join(', ')})`
   }, [color_stops])
 
   const ticks = useMemo(() => {

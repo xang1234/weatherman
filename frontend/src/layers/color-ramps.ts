@@ -1,9 +1,9 @@
 /**
  * Color ramp definitions and WebGL texture generation.
  *
- * Defines color stops for each weather layer (matching the Python
- * colormaps.py definitions) and provides utilities to interpolate
- * them into 1024-entry RGBA arrays for upload as 1024x1 GL textures.
+ * Loads each weather layer's color stops from the backend (colormaps.py)
+ * and interpolates them into 1024-entry RGBA arrays for upload as
+ * 1024x1 GL textures.
  * Interpolation is performed in OKLAB perceptual color space to
  * eliminate muddy intermediate colors in RGB gradients.
  *
@@ -28,111 +28,27 @@ export interface ColorRampDef {
 }
 
 // ── Color ramp definitions ───────────────────────────────────────
-// These match the Python colormaps.py definitions exactly.
-// The backend also exposes /tiles/colormaps.json for dynamic fetch.
+// Served by the backend from colormaps.py — the same ranges the tile
+// encoder normalised with, so they must not be copied here.
 
-const TEMPERATURE_STOPS: ColorStop[] = [
-  { position: 0.00, color: [45, 0, 75] },
-  { position: 0.10, color: [60, 10, 150] },
-  { position: 0.18, color: [30, 50, 200] },
-  { position: 0.27, color: [0, 90, 230] },
-  { position: 0.36, color: [0, 180, 210] },
-  { position: 0.45, color: [0, 200, 80] },
-  { position: 0.50, color: [80, 220, 20] },
-  { position: 0.55, color: [220, 220, 0] },
-  { position: 0.64, color: [255, 180, 0] },
-  { position: 0.73, color: [255, 100, 0] },
-  { position: 0.82, color: [230, 30, 15] },
-  { position: 0.91, color: [180, 0, 0] },
-  { position: 1.00, color: [130, 0, 50] },
-]
+/** Ramps by layer name, filled in by loadColorRamps(). */
+export const COLOR_RAMPS: Record<string, ColorRampDef> = {}
 
-const WIND_SPEED_STOPS: ColorStop[] = [
-  { position: 0.00, color: [30, 50, 200] },
-  { position: 0.07, color: [0, 90, 230] },
-  { position: 0.12, color: [0, 180, 210] },
-  { position: 0.18, color: [0, 200, 80] },
-  { position: 0.23, color: [80, 220, 20] },
-  { position: 0.27, color: [220, 220, 0] },
-  { position: 0.31, color: [255, 180, 0] },
-  { position: 0.34, color: [255, 100, 0] },
-  { position: 0.36, color: [230, 30, 15] },
-  { position: 0.50, color: [180, 0, 0] },
-  { position: 0.70, color: [130, 0, 80] },
-  { position: 0.85, color: [90, 0, 140] },
-  { position: 1.00, color: [60, 0, 160] },
-]
+let loading: Promise<void> | null = null
 
-const PRESSURE_STOPS: ColorStop[] = [
-  { position: 0.00, color: [60, 0, 160] },     // deep purple (920 hPa, deep low)
-  { position: 0.15, color: [30, 50, 200] },     // blue (940 hPa)
-  { position: 0.30, color: [0, 150, 200] },     // cyan (960 hPa)
-  { position: 0.45, color: [0, 200, 80] },      // green (980 hPa)
-  { position: 0.57, color: [180, 220, 40] },    // yellow-green (1000 hPa)
-  { position: 0.64, color: [220, 220, 0] },     // yellow (1010 hPa, standard)
-  { position: 0.75, color: [255, 180, 0] },     // orange (1025 hPa)
-  { position: 0.85, color: [255, 100, 0] },     // red-orange (1040 hPa)
-  { position: 1.00, color: [180, 0, 0] },       // red (1060 hPa, strong high)
-]
-
-const CLOUD_COVER_STOPS: ColorStop[] = [
-  { position: 0.00, color: [240, 248, 255] },   // near-white (clear sky)
-  { position: 0.25, color: [200, 210, 220] },   // light gray
-  { position: 0.50, color: [160, 170, 180] },   // mid gray
-  { position: 0.75, color: [110, 120, 130] },   // dark gray
-  { position: 1.00, color: [60, 65, 75] },      // very dark gray (overcast)
-]
-
-const WAVE_HEIGHT_STOPS: ColorStop[] = [
-  { position: 0.00, color: [20, 60, 180] },     // deep blue (0 m, calm)
-  { position: 0.07, color: [30, 100, 220] },    // blue (~1 m)
-  { position: 0.13, color: [50, 140, 235] },    // light blue (~2 m)
-  { position: 0.20, color: [200, 60, 30] },     // red onset (~3 m)
-  { position: 0.33, color: [220, 30, 15] },     // vivid red (~5 m)
-  { position: 0.47, color: [190, 0, 0] },       // deep red (~7 m)
-  { position: 0.60, color: [170, 0, 50] },      // red-purple (~9 m)
-  { position: 0.73, color: [150, 0, 100] },     // purple (~11 m)
-  { position: 0.87, color: [120, 0, 140] },     // deep purple (~13 m)
-  { position: 1.00, color: [90, 0, 160] },      // violet (15 m, extreme)
-]
-
-/** Registry of all color ramp definitions by layer name. */
-export const COLOR_RAMPS: Record<string, ColorRampDef> = {
-  temperature: {
-    name: 'temperature',
-    unit: '°C',
-    valueMin: -55,
-    valueMax: 55,
-    stops: TEMPERATURE_STOPS,
-  },
-  wind_speed: {
-    name: 'wind_speed',
-    unit: 'kt',
-    valueMin: 0,
-    valueMax: 50,
-    stops: WIND_SPEED_STOPS,
-  },
-  pressure: {
-    name: 'pressure',
-    unit: 'Pa',
-    valueMin: 92000,
-    valueMax: 106000,
-    stops: PRESSURE_STOPS,
-  },
-  cloud_cover: {
-    name: 'cloud_cover',
-    unit: '%',
-    valueMin: 0,
-    valueMax: 100,
-    stops: CLOUD_COVER_STOPS,
-  },
-  wave_height: {
-    name: 'wave_height',
-    unit: 'm',
-    valueMin: 0,
-    valueMax: 15,
-    stops: WAVE_HEIGHT_STOPS,
-  },
+/** Fetch the ramps into COLOR_RAMPS, once; a failed fetch is retried on the next call. */
+export function loadColorRamps(apiBase: string): Promise<void> {
+  loading ??= fetch(`${apiBase}/tiles/colormaps.json`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    })
+    .then((ramps: Record<string, ColorRampDef>) => { Object.assign(COLOR_RAMPS, ramps) })
+    .catch((err) => {
+      loading = null
+      throw err
+    })
+  return loading
 }
 
 // ── OKLAB color space conversions ────────────────────────────────
