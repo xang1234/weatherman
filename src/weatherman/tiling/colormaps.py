@@ -114,21 +114,40 @@ TEMPERATURE = WeatherColormap(
     stops=tuple(TEMPERATURE_STOPS),
 )
 
-# Wind speed: spectral blue→red by 35 kt (18 m/s), then purple (hurricane)
+# Wind speed: muted, Windy-style. Saturated colours drowned the coastlines
+# and the white particles drawn over them; these sit back so both read.
+# Stops are set in m/s and placed on the 0-50 m/s range.
+_WIND_SPEED_MS: list[tuple[float, tuple[int, int, int]]] = [
+    (0, (98, 113, 183)),     # calm: soft blue-violet
+    (1, (57, 97, 159)),
+    (3, (74, 148, 169)),     # light breeze: teal
+    (5, (77, 141, 123)),
+    (7, (83, 165, 83)),      # moderate: green
+    (9, (53, 159, 53)),
+    (11, (167, 157, 81)),    # fresh: olive
+    (13, (159, 127, 58)),
+    (15, (161, 108, 92)),    # strong: brown-rose
+    (17, (129, 58, 78)),     # gale: wine
+    (19, (175, 80, 136)),
+    (21, (117, 74, 147)),    # storm: purple
+    (24, (109, 97, 163)),
+    (27, (68, 105, 141)),
+    (29, (92, 144, 152)),
+    (36, (125, 68, 165)),    # hurricane force
+    (46, (231, 215, 215)),
+    (50, (221, 213, 152)),
+]
+
+
+def _soften(rgb: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    """Pull a colour towards the grey of its own lightness: less saturated, same brightness."""
+    grey = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    return tuple(round(c + (grey - c) * amount) for c in rgb)  # type: ignore[return-value]
+
+
+# Softened so coastlines, borders and labels read through at full opacity.
 WIND_SPEED_STOPS: list[tuple[float, tuple[int, int, int]]] = [
-    (0.00, (30, 50, 200)),    # blue (0 m/s, calm)
-    (0.07, (0, 90, 230)),     # bright blue (~3.5 m/s)
-    (0.12, (0, 180, 210)),    # vivid cyan (~6 m/s)
-    (0.18, (0, 200, 80)),     # bright green (~9 m/s)
-    (0.23, (80, 220, 20)),    # yellow-green (~11.5 m/s)
-    (0.27, (220, 220, 0)),    # pure yellow (~13.5 m/s)
-    (0.31, (255, 180, 0)),    # vivid orange (~15.5 m/s)
-    (0.34, (255, 100, 0)),    # bright orange (~17 m/s)
-    (0.36, (230, 30, 15)),    # vivid red (~18 m/s / 35 kt)
-    (0.50, (180, 0, 0)),      # deep red (~25 m/s)
-    (0.70, (130, 0, 80)),     # red-purple (~35 m/s)
-    (0.85, (90, 0, 140)),     # purple (~42.5 m/s)
-    (1.00, (60, 0, 160)),     # deep purple (50 m/s, hurricane)
+    (ms / 50.0, _soften(rgb, 0.22)) for ms, rgb in _WIND_SPEED_MS
 ]
 
 WIND_SPEED = WeatherColormap(

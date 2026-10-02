@@ -18,7 +18,8 @@ void main() {
 
     // Speed-dependent brightness: calm zones recede, strong wind glows.
     // pow < 1 lifts mid-range speeds so typical winds stay clearly visible.
-    float speedAlpha = mix(0.3, 1.0, pow(clamp(v_speed, 0.0, 1.0), 0.7));
+    // The floor keeps light-wind particles readable over the colour layer.
+    float speedAlpha = mix(0.55, 1.0, pow(clamp(v_speed, 0.0, 1.0), 0.7));
 
     // Hold full brightness through life; only ease in at spawn (hides the
     // respawn pop) and ease out near death. The trail buffer carries motion —
