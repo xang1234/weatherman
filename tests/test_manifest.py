@@ -217,3 +217,19 @@ class TestManifestSize:
         )
         raw = build_manifest_json(config)
         assert len(raw.encode()) < 10_000
+
+
+class TestDataRanges:
+    """Each run records the ranges its tiles were encoded with (#83)."""
+
+    def test_round_trip(self):
+        ranges = {"wind_u": ValueRange(min=-50.0, max=50.0), "temperature": ValueRange(min=-55.0, max=55.0)}
+        m = build_manifest(_make_config(data_ranges=ranges))
+        assert json.loads(m.to_json())["data_ranges"]["wind_u"] == {"min": -50.0, "max": 50.0}
+        assert UIManifest.from_json(m.to_json()).data_ranges == ranges
+
+    def test_a_manifest_from_before_has_none(self):
+        """Old manifests parse; an empty map tells the frontend to use the current ranges."""
+        old = json.loads(build_manifest(_make_config()).to_json())
+        del old["data_ranges"]
+        assert UIManifest.from_dict(old).data_ranges == {}

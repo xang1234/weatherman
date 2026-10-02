@@ -13,8 +13,9 @@ import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WindParticleLayer } from '@/layers/WindParticleLayer'
 import { particleInsertBeforeId } from './layer-order'
-import { COLOR_RAMPS } from '@/layers/color-ramps'
+import { encodingRange } from '@/layers/color-ramps'
 import { useColorRamps } from './useColorRamps'
+import type { DataRanges } from '@/types/manifest'
 
 export interface UseWindParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
@@ -28,6 +29,8 @@ export interface UseWindParticlesOptions {
   forecastHour: number
   /** When true, skip the config effect to avoid nuking tile caches during playback. */
   isPlaying?: boolean
+  /** The run's tile encoding ranges, from its manifest; undefined until it has loaded. */
+  dataRanges?: DataRanges
 }
 
 export interface WindParticleHandle {
@@ -45,6 +48,7 @@ export function useWindParticles({
   runId,
   forecastHour,
   isPlaying = false,
+  dataRanges,
 }: UseWindParticlesOptions): WindParticleHandle {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WindParticleLayer | null>(null)
@@ -101,14 +105,14 @@ export function useWindParticles({
       configuredRunRef.current = null
       return
     }
-    if (!pl || !runId || !rampsReady) return
+    if (!pl || !runId || !rampsReady || !dataRanges) return
     if (isPlaying && configuredRunRef.current === runId) return
 
-    // The range the U/V tiles were encoded with.
-    const { valueMin, valueMax } = COLOR_RAMPS['wind_u']
-    pl.setWindConfig(model, runId, forecastHour, valueMin, valueMax)
+    // The range this run's U/V tiles were encoded with (#83).
+    const { min, max } = encodingRange('wind_u', dataRanges)
+    pl.setWindConfig(model, runId, forecastHour, min, max)
     configuredRunRef.current = runId
-  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying, rampsReady])
+  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying, rampsReady, dataRanges])
 
   // Return imperative handle for playback integration
   const handle: WindParticleHandle = {

@@ -257,6 +257,11 @@ export class TileManager {
     return this._staleState() != null
   }
 
+  /** Run of the stale dataset — kept across several setLayer() calls, so not always the previous one. */
+  get staleRunId(): string | null {
+    return this._staleState()?.config.runId ?? null
+  }
+
   /** Forget the replaced dataset — call once the current one has taken over. */
   dropStale(): void {
     this._staleKey = null

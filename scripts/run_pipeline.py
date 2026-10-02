@@ -348,18 +348,19 @@ def step_generate_data_tiles(
     generated_layers: set[str],
     max_zoom: int = MAX_DATA_TILE_ZOOM,
     tile_formats: tuple[str, ...] = ("png", "f16"),
-) -> int:
+) -> dict[str, ValueRange]:
     """Pre-generate static data tiles for each layer/hour.
 
     These tiles are placed in staging alongside the COGs and auto-publish
     with the rest of the run artifacts.
 
-    Returns total tile count for logging.
+    Returns the range each tiled layer was encoded with, for the manifest.
     """
     from weatherman.tiling.colormaps import get_value_range
 
     logger.info("Step 3/5: Pre-generating data tiles (z0–z%d)", max_zoom)
     total = 0
+    ranges: dict[str, ValueRange] = {}
 
     for layer in sorted(generated_layers):
         try:
@@ -367,6 +368,7 @@ def step_generate_data_tiles(
         except KeyError:
             logger.warning("  No value range for layer '%s', skipping data tiles", layer)
             continue
+        ranges[layer] = ValueRange(min=vmin, max=vmax)
 
         for fhour in forecast_hours:
             cog_key = layout.staging_cog_path(run_id, layer, fhour)
@@ -402,7 +404,7 @@ def step_generate_data_tiles(
                 )
 
     logger.info("Generated %d data tiles total", total)
-    return total
+    return ranges
 
 
 def step_generate_zarr(
@@ -494,10 +496,12 @@ def step_write_manifest(
     *,
     model: str = "gfs",
     resolution_km: float = 25.0,
+    data_ranges: dict[str, ValueRange] | None = None,
 ) -> None:
     """Write the UI manifest for the frontend.
 
     Only includes layers that have actual COG data (from generated_layers).
+    `data_ranges` are the ranges the run's data tiles were encoded with.
     """
     logger.info("Step 4/5: Writing UI manifest")
     active_layers = [lc for lc in LAYER_CONFIGS if lc.id in generated_layers]
@@ -511,6 +515,7 @@ def step_write_manifest(
         resolution_km=resolution_km,
         layers=active_layers,
         forecast_hours=forecast_hours,
+        data_ranges=data_ranges or {},
     )
     manifest = build_manifest(config)
     manifest_path = layout.staging_manifest_path(run_id)
@@ -694,7 +699,7 @@ def main() -> None:
     )
 
     step_generate_zarr(run_id, forecast_hours, grib2_dir, data_dir, layout)
-    step_generate_data_tiles(
+    data_ranges = step_generate_data_tiles(
         run_id, forecast_hours, data_dir, store, layout, generated_layers,
         tile_formats=tile_formats,
     )
@@ -710,6 +715,7 @@ def main() -> None:
     step_write_manifest(
         run_id, forecast_hours, store, layout, generated_layers,
         model=model, resolution_km=model_config["resolution_km"],
+        data_ranges=data_ranges,
     )
     step_publish_run(run_id, store, layout, data_dir, model=model)
     published_catalog = RunCatalog.from_json(

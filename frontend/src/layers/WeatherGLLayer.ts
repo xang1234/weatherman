@@ -39,7 +39,9 @@ import {
 import {
   COLOR_RAMPS,
   createColorRampTexture,
+  encodingRange,
 } from './color-ramps'
+import type { DataRanges } from '@/types/manifest'
 import {
   TileManager,
   PanVelocityTracker,
@@ -81,7 +83,8 @@ function sameDraws(a: TileDraw[], b: TileDraw[]): boolean {
     const e = b[i]
     return d.z === e.z && d.x === e.x && d.y === e.y && d.wrap === e.wrap &&
       d.uvOffsetX === e.uvOffsetX && d.uvOffsetY === e.uvOffsetY && d.uvScale === e.uvScale &&
-      d.texT0 === e.texT0 && d.texT1 === e.texT1 && d.texV === e.texV && d.texVT1 === e.texVT1
+      d.texT0 === e.texT0 && d.texT1 === e.texT1 && d.texV === e.texV && d.texVT1 === e.texVT1 &&
+      d.stale === e.stale
   })
 }
 
@@ -100,6 +103,8 @@ interface TileDraw {
   texT1: WebGLTexture | null
   texV: WebGLTexture | null
   texVT1: WebGLTexture | null
+  /** From the dataset shown before the last change: decoded with its ranges. */
+  stale: boolean
 }
 
 export class WeatherGLLayer implements CustomLayerInterface {
@@ -129,6 +134,11 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _model = ''
   private _runId = ''
   private _forecastHour = 0
+
+  // Tile encoding ranges by run, for the current dataset and the stale one
+  // TileManager keeps (which may be several configurations back).
+  // ponytail: grows by one entry per run seen in a session — a few a day.
+  private _rangesByRun = new Map<string, DataRanges>()
 
   // Temporal interpolation state
   private _forecastHourT1 = -1
@@ -177,8 +187,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
   private _uOpacity: WebGLUniformLocation | null = null
   private _uTemporalMix: WebGLUniformLocation | null = null
   private _uIsVector: WebGLUniformLocation | null = null
-  private _uValueMin: WebGLUniformLocation | null = null
-  private _uValueMax: WebGLUniformLocation | null = null
+  private _uDataMin: WebGLUniformLocation | null = null
+  private _uDataMax: WebGLUniformLocation | null = null
+  private _uRampMin: WebGLUniformLocation | null = null
+  private _uRampMax: WebGLUniformLocation | null = null
   private _uOceanOnly: WebGLUniformLocation | null = null
   private _uIsFloat16: WebGLUniformLocation | null = null
 
@@ -226,8 +238,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
       this._uOpacity = gl.getUniformLocation(prog, 'u_opacity')
       this._uTemporalMix = gl.getUniformLocation(prog, 'u_temporalMix')
       this._uIsVector = gl.getUniformLocation(prog, 'u_isVector')
-      this._uValueMin = gl.getUniformLocation(prog, 'u_valueMin')
-      this._uValueMax = gl.getUniformLocation(prog, 'u_valueMax')
+      this._uDataMin = gl.getUniformLocation(prog, 'u_dataMin')
+      this._uDataMax = gl.getUniformLocation(prog, 'u_dataMax')
+      this._uRampMin = gl.getUniformLocation(prog, 'u_rampMin')
+      this._uRampMax = gl.getUniformLocation(prog, 'u_rampMax')
       this._uOceanOnly = gl.getUniformLocation(prog, 'u_oceanOnly')
       this._uIsFloat16 = gl.getUniformLocation(prog, 'u_isFloat16')
 
@@ -387,6 +401,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
           texVT1: blendHere && isVector
             ? this._tileManagerVT1?.getTexture(src.z, src.x, src.y) ?? null
             : null,
+          stale: stale != null,
         })
         if (stale || src.dz > 0) fallbackDraws++
         continue
@@ -410,7 +425,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
           tilesToDraw.push({
             z: cz, x: cx, y: cy, wrap: coord.wrap,
             uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
-            texT0, texV, texT1: null, texVT1: null,
+            texT0, texV, texT1: null, texVT1: null, stale: false,
           })
           fallbackDraws++
         }
@@ -557,23 +572,15 @@ export class WeatherGLLayer implements CustomLayerInterface {
     gl.uniform1i(this._uOceanOnly, OCEAN_ONLY_LAYERS.has(this._layerName) ? 1 : 0)
     gl.uniform1i(this._uIsFloat16, this._tileFormat === 'f16' ? 1 : 0)
 
-    // Pass value range for denormalization.
-    // Vector mode: Wind U/V components use symmetric range [-max, +max].
-    // Scalar mode with Float16: pass physical range for normalization.
-    // Scalar mode with PNG: values are pre-normalized [0,1].
-    if (isVector) {
-      const ramp = COLOR_RAMPS[this._layerName]
-      const max = ramp?.valueMax ?? 50
-      gl.uniform1f(this._uValueMin, -max)
-      gl.uniform1f(this._uValueMax, max)
-    } else if (this._tileFormat === 'f16') {
-      const ramp = COLOR_RAMPS[this._layerName]
-      gl.uniform1f(this._uValueMin, ramp?.valueMin ?? 0)
-      gl.uniform1f(this._uValueMax, ramp?.valueMax ?? 1)
-    } else {
-      gl.uniform1f(this._uValueMin, 0)
-      gl.uniform1f(this._uValueMax, 1)
-    }
+    // The colour ramp's range; the encoding range is set per tile below.
+    const ramp = COLOR_RAMPS[this._layerName]
+    gl.uniform1f(this._uRampMin, ramp?.valueMin ?? 0)
+    gl.uniform1f(this._uRampMax, ramp?.valueMax ?? 1)
+    // The tiles sampled: U (V is encoded alike) in vector mode, else the layer itself.
+    const dataLayer = isVector ? 'wind_u' : this._layerName
+    const dataRange = encodingRange(dataLayer, this._rangesByRun.get(this._runId))
+    const staleRun = this._tileManager?.staleRunId
+    const staleRange = encodingRange(dataLayer, staleRun ? this._rangesByRun.get(staleRun) : undefined)
 
     // Bind color ramp to texture unit 1 (shared across all tiles)
     gl.activeTexture(gl.TEXTURE1)
@@ -608,6 +615,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
       gl.uniform2f(this._uTileScale, scale, scale)
       gl.uniform2f(this._uUvOffset, tile.uvOffsetX, tile.uvOffsetY)
       gl.uniform2f(this._uUvScale, tile.uvScale, tile.uvScale)
+      // Each run's tiles decode with the ranges they were encoded with (#83).
+      const range = tile.stale ? staleRange : dataRange
+      gl.uniform1f(this._uDataMin, range.min)
+      gl.uniform1f(this._uDataMax, range.max)
 
       // Bind U/scalar data tile texture to unit 0
       gl.activeTexture(gl.TEXTURE0)
@@ -660,13 +671,17 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._cleanup()
   }
 
-  /** Update the dataset to render. Clears tile cache if params changed. */
-  setConfig(model: string, runId: string, layer: string, forecastHour: number): void {
+  /**
+   * Update the dataset to render. Clears tile cache if params changed.
+   * `dataRanges` are the run's tile encoding ranges, from its manifest.
+   */
+  setConfig(model: string, runId: string, layer: string, forecastHour: number, dataRanges?: DataRanges): void {
     const layerChanged = layer !== this._layerName
     // If advanceForecastHour already set all these fields synchronously,
     // skip _applyLayerConfig to avoid clearing T0's freshly-swapped tiles.
     const configUnchanged = model === this._model && runId === this._runId &&
       layer === this._layerName && forecastHour === this._forecastHour
+    if (dataRanges) this._rangesByRun.set(runId, dataRanges)
     this._model = model
     this._runId = runId
     this._layerName = layer
@@ -948,8 +963,10 @@ export class WeatherGLLayer implements CustomLayerInterface {
     this._uOpacity = null
     this._uTemporalMix = null
     this._uIsVector = null
-    this._uValueMin = null
-    this._uValueMax = null
+    this._uDataMin = null
+    this._uDataMax = null
+    this._uRampMin = null
+    this._uRampMax = null
     this._uOceanOnly = null
     this._uIsFloat16 = null
     this._gl = null

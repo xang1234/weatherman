@@ -28,4 +28,9 @@ export interface UIManifest {
   layers: LayerConfig[]
   forecast_hours: number[]
   tile_url_template: string
+  /** Range each data-tiled layer was encoded with, by layer; absent before #83. */
+  data_ranges?: DataRanges
 }
+
+/** Encoding range of a run's data tiles, by layer name. */
+export type DataRanges = Record<string, ValueRange>

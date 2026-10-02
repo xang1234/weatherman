@@ -1,3 +1,4 @@
+import type { DataRanges } from '@/types/manifest'
 import { useEffect, useRef, useCallback } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
@@ -39,6 +40,11 @@ export interface UseWeatherLayerOptions {
   forecastHourNext?: number
   /** Temporal blend factor 0.0 (= T0) to 1.0 (= T1). Default 0. WebGL pipeline only. */
   temporalMix?: number
+  /**
+   * The run's tile encoding ranges, from its manifest; undefined until that
+   * manifest has loaded. WebGL pipeline only: a run is drawn once they are in.
+   */
+  dataRanges?: DataRanges
 }
 
 const SOURCE_PREFIX = 'wx-raster'

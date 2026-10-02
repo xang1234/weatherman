@@ -23,14 +23,21 @@ Schema layout (v1):
         }
       ],
       "forecast_hours": [0, 3, 6, ...],
-      "tile_url_template": "/tiles/{model}/{run_id}/{layer}/{forecast_hour}/{z}/{x}/{y}.png"
+      "tile_url_template": "/tiles/{model}/{run_id}/{layer}/{forecast_hour}/{z}/{x}/{y}.png",
+      "data_ranges": { "wind_u": { "min": -50.0, "max": 50.0 }, ... }
     }
+
+``data_ranges`` holds the range each data-tiled layer was encoded with
+when this run was tiled, so the frontend decodes it correctly even after the
+global ranges in colormaps.py change (#83). Runs published before it existed
+have none; their tiles used the ranges of the time, which are still current
+unless changed since.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -81,6 +88,7 @@ class UIManifest:
         layers: Available layer configurations.
         forecast_hours: Sorted list of available forecast hours.
         tile_url_template: URL template with placeholders for tile requests.
+        data_ranges: Encoding range of each data-tiled layer, by layer name.
     """
 
     model: str
@@ -92,6 +100,7 @@ class UIManifest:
     forecast_hours: list[int]
     tile_url_template: str
     schema_version: int = SCHEMA_VERSION
+    data_ranges: dict[str, ValueRange] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict."""
@@ -136,6 +145,9 @@ class UIManifest:
             forecast_hours=data["forecast_hours"],
             tile_url_template=data["tile_url_template"],
             schema_version=version,
+            data_ranges={
+                name: ValueRange(**r) for name, r in data.get("data_ranges", {}).items()
+            },
         )
 
     @classmethod
@@ -156,6 +168,7 @@ class ManifestConfig:
         layers: Layer definitions for the frontend.
         forecast_hours: Available forecast hours (will be sorted).
         tile_url_template: URL template with placeholders.
+        data_ranges: Encoding range of each data-tiled layer, by layer name.
     """
 
     model: str
@@ -167,6 +180,7 @@ class ManifestConfig:
     tile_url_template: str = (
         "/tiles/{model}/{run_id}/{layer}/{forecast_hour}/{z}/{x}/{y}.png"
     )
+    data_ranges: dict[str, ValueRange] = field(default_factory=dict)
 
 
 def build_manifest(config: ManifestConfig) -> UIManifest:
@@ -187,6 +201,7 @@ def build_manifest(config: ManifestConfig) -> UIManifest:
         layers=config.layers,
         forecast_hours=sorted(config.forecast_hours),
         tile_url_template=config.tile_url_template,
+        data_ranges=dict(config.data_ranges),
     )
 
 
