@@ -467,6 +467,19 @@ test('dragging the forecast slider blends between hours, and settles on release'
   await expect(slider).toHaveValue('1')
 })
 
+test('a particle overlay is only offered when the run has its layer', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  // A run published without wave_height, as the pipeline does when its
+  // wave data fails the quality checks (#71). Registered later, so it wins.
+  await page.route(`**/api/manifest/gfs/${RUN_ID}`, (route) => route.fulfill({
+    json: { ...MANIFEST_RESPONSE, layers: MANIFEST_RESPONSE.layers.filter((l) => l.id !== 'wave_height') },
+  }))
+  await page.goto('/')
+  await expect(page.getByLabel('Wind particles', { exact: true })).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByLabel('Wave dashes', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Isobars', { exact: true })).toBeVisible()
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

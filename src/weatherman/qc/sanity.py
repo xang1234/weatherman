@@ -23,7 +23,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -46,10 +46,19 @@ class PhysicalBounds:
     max: float
     max_nan_fraction: float = 0.05  # default: flag if >5% NaN
     skip_all_zeros: bool = False    # True for accumulation fields (e.g. apcp)
+    units: str | None = None        # unit of min/max, when a store may use another
+
+    def in_units(self, stored: str | None) -> PhysicalBounds:
+        """These bounds expressed in the unit the array says it is stored in."""
+        if self.units == "°C" and stored == "K":
+            return replace(self, min=self.min + 273.15, max=self.max + 273.15, units="K")
+        return self
 
 
 # Bounds are wider than display ranges.  Sources:
-#   Temperature: record low ~184 K (Vostok), record high ~330 K (Death Valley)
+#   Temperature: in °C, as GDAL reads GRIB2 (it converts from Kelvin), and
+#     shifted for stores labelled K; record low about -89 °C (Vostok),
+#     record high about +57 °C (Death Valley)
 #   Wind components: jet stream peaks ~120 m/s, allow signed
 #   Precipitation: extreme event accumulations up to ~1000 kg/m^2
 #   Pressure: lowest recorded ~870 hPa, highest ~1084 hPa
@@ -58,7 +67,7 @@ class PhysicalBounds:
 #   Wave period: long swells up to ~30 s
 #   Wave direction: degrees [0, 360]
 PHYSICAL_BOUNDS: dict[str, PhysicalBounds] = {
-    "tmp_2m": PhysicalBounds(min=150.0, max=350.0),
+    "tmp_2m": PhysicalBounds(min=-100.0, max=70.0, units="°C"),
     "ugrd_10m": PhysicalBounds(min=-150.0, max=150.0),
     "vgrd_10m": PhysicalBounds(min=-150.0, max=150.0),
     "apcp_sfc": PhysicalBounds(min=0.0, max=2000.0, skip_all_zeros=True),
@@ -157,6 +166,7 @@ def check_sanity(
         arr = root[var_name]
         result.variables_checked += 1
 
+        var_bounds = var_bounds.in_units(arr.attrs.get("units"))
         _check_variable(arr, var_name, var_bounds, schema, result)
 
     if result.passed:
