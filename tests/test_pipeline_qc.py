@@ -30,7 +30,13 @@ GOOD = {
 WAVES = {"htsgw_sfc", "perpw_sfc", "dirpw_sfc"}
 
 
-def _stage(data_dir: Path, values: dict[str, float], *, empty: tuple[str, int] | None = None) -> None:
+def _stage(
+    data_dir: Path,
+    values: dict[str, float],
+    *,
+    empty: tuple[str, int] | None = None,
+    units: dict[str, str] | None = None,
+) -> None:
     """Write a staged Zarr store holding `values`, optionally one all-NaN hour."""
     grid = GridResolution.GFS_025
     root = zarr.open_group(str(data_dir / LAYOUT.staging_zarr_path(RUN)), mode="w")
@@ -44,7 +50,9 @@ def _stage(data_dir: Path, values: dict[str, float], *, empty: tuple[str, int] |
             data[:, :200, :] = np.nan  # "land": ocean-only fields have gaps
         if empty and empty[0] == name:
             data[HOURS.index(empty[1])] = np.nan
-        root.create_array(name, data=data)
+        array = root.create_array(name, data=data)
+        if units and name in units:
+            array.attrs["units"] = units[name]
 
 
 def _check(data_dir: Path) -> set[str]:
@@ -68,11 +76,17 @@ def test_a_missing_core_variable_blocks_publishing(tmp_path: Path):
         _check(tmp_path)
 
 
-def test_temperature_in_kelvin_is_out_of_bounds(tmp_path: Path):
-    """The store holds °C; Kelvin values mean the units went wrong somewhere."""
-    _stage(tmp_path, {**GOOD, "tmp_2m": 288.0})
+def test_kelvin_values_labelled_celsius_are_out_of_bounds(tmp_path: Path):
+    """Kelvin values in a store that says °C: the units went wrong somewhere."""
+    _stage(tmp_path, {**GOOD, "tmp_2m": 288.0}, units={"tmp_2m": "°C"})
     with pytest.raises(QualityCheckFailed, match="tmp_2m"):
         _check(tmp_path)
+
+
+def test_temperature_bounds_follow_the_stored_unit(tmp_path: Path):
+    """A store that keeps Kelvin (and says so) is checked in Kelvin."""
+    _stage(tmp_path, {**GOOD, "tmp_2m": 288.0}, units={"tmp_2m": "K"})
+    assert _check(tmp_path) == LAYERS
 
 
 def test_a_bad_wave_field_drops_only_the_wave_layer(tmp_path: Path):

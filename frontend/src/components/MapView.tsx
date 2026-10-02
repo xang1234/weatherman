@@ -68,8 +68,12 @@ export function MapView() {
     activeLayerId && layers.some((l) => l.id === activeLayerId)
       ? activeLayerId
       : layers[0]?.id ?? null
-  const windOn = overlays.wind.on ?? resolvedLayerId === 'wind_speed'
-  const wavesOn = overlays.waves.on ?? resolvedLayerId === 'wave_height'
+  // A particle overlay needs its layer in the run's manifest: the pipeline
+  // leaves out a layer whose data failed its checks (#71).
+  const windAvailable = layers.some((l) => l.id === 'wind_speed')
+  const wavesAvailable = layers.some((l) => l.id === 'wave_height')
+  const windOn = windAvailable && (overlays.wind.on ?? resolvedLayerId === 'wind_speed')
+  const wavesOn = wavesAvailable && (overlays.waves.on ?? resolvedLayerId === 'wave_height')
   const isobarsOn = overlays.isobars.on ?? false
   const updateOverlay = (id: OverlayId, change: Partial<OverlayState>) =>
     setOverlays((current) => ({ ...current, [id]: { ...current[id], ...change } }))
@@ -335,8 +339,8 @@ export function MapView() {
           opacity={opacity}
           onOpacityChange={setOpacity}
           overlays={[
-            { id: 'wind', label: 'Wind particles', on: windOn, opacity: overlays.wind.opacity },
-            { id: 'waves', label: 'Wave dashes', on: wavesOn, opacity: overlays.waves.opacity },
+            ...(windAvailable ? [{ id: 'wind' as const, label: 'Wind particles', on: windOn, opacity: overlays.wind.opacity }] : []),
+            ...(wavesAvailable ? [{ id: 'waves' as const, label: 'Wave dashes', on: wavesOn, opacity: overlays.waves.opacity }] : []),
             { id: 'isobars', label: 'Isobars', on: isobarsOn, opacity: overlays.isobars.opacity },
           ]}
           onOverlayChange={updateOverlay}
