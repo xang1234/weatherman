@@ -11,6 +11,7 @@
 
 import type { TileFetchClient, TileFetchError, TileFetchResult } from '@/workers/TileFetchClient'
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
+import { ensureTileDebugState } from './particleDebug'
 
 /** Receives the tile's texture, or null if the fetch failed. */
 export type SharedTileListener = (texture: WebGLTexture | null) => void
@@ -78,6 +79,8 @@ export class SharedTileStore {
       tile = { texture, loaded: false, refs: 0, listeners: new Set(), priority }
       this._tiles.set(url, tile)
       this._client.fetch(this._prefix + url, url, this._format, priority)
+      const { fetches } = ensureTileDebugState()
+      fetches[url] = (fetches[url] ?? 0) + 1
     } else if (priority < tile.priority) {
       // A tile first wanted as a prefetch may now be on screen.
       tile.priority = priority

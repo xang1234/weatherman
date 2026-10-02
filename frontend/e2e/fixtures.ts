@@ -150,6 +150,9 @@ export async function mockApiRoutes(page: Page) {
   })
 
   // SSE — return an open response that stays connected
+  // No basemap: weather draws without it, and the tests stay off the network.
+  await page.route('**/basemap/**', (route) => route.fulfill({ status: 404 }))
+
   await page.route('**/events/stream', (route) =>
     route.fulfill({
       status: 200,
