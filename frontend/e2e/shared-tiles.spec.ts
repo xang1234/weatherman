@@ -9,14 +9,15 @@ import type { TileFetchClient, TileFetchError, TileFetchResult } from '../src/wo
 function fakeGl() {
   let nextTexture = 0
   const deleted: number[] = []
+  const options = { contextLost: false }
   const gl = new Proxy({
-    createTexture: () => ({ id: ++nextTexture }),
+    createTexture: () => (options.contextLost ? null : { id: ++nextTexture }),
     deleteTexture: (texture: { id: number }) => { deleted.push(texture.id) },
   } as Record<string, unknown>, {
     // Any other GL call or constant is a no-op here.
     get: (target, name: string) => (name in target ? target[name] : () => 0),
   }) as unknown as WebGL2RenderingContext
-  return { gl, deleted }
+  return { gl, deleted, options }
 }
 
 /** A worker client that, like the real one, broadcasts results to every listener. */
@@ -46,10 +47,10 @@ function fakeClient() {
 }
 
 function setup() {
-  const { gl, deleted } = fakeGl()
+  const { gl, deleted, options } = fakeGl()
   const fake = fakeClient()
   const store = new SharedTileStore(gl, fake.client, 'png')
-  return { store, deleted, ...fake }
+  return { store, deleted, options, ...fake }
 }
 
 const URL_A = '/tiles/gfs/run/wind_u/0/data/3/2/2.png'
@@ -151,4 +152,18 @@ test('the last user of a store disposes of it', () => {
 
   // A new user gets a fresh store.
   expect(acquireSharedTileStore(gl, fake.client, 'png').store).not.toBe(first.store)
+})
+
+test('no texture (context lost) is a failure, and nothing is cached', () => {
+  const { store, fetched, options } = setup()
+  options.contextLost = true
+  const got: unknown[] = []
+  store.request(URL_A, 0, (t) => got.push(t))
+  expect(got).toEqual([null])
+  expect(fetched).toEqual([])
+
+  // Once textures can be made again, the retry fetches.
+  options.contextLost = false
+  store.request(URL_A, 0, () => {})
+  expect(fetched).toHaveLength(1)
 })

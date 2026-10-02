@@ -68,7 +68,14 @@ export class SharedTileStore {
       return () => {}
     }
     if (!tile) {
-      tile = { texture: this._placeholder(), loaded: false, refs: 0, listeners: new Set(), priority }
+      const texture = this._placeholder()
+      if (!texture) {
+        // Context lost or out of GPU memory: a failure the caller retries
+        // later, with nothing cached.
+        listener(null)
+        return () => {}
+      }
+      tile = { texture, loaded: false, refs: 0, listeners: new Set(), priority }
       this._tiles.set(url, tile)
       this._client.fetch(this._prefix + url, url, this._format, priority)
     } else if (priority < tile.priority) {
@@ -164,10 +171,11 @@ export class SharedTileStore {
     return true
   }
 
-  /** 1×1 texture with nearest filtering, filled in when the data arrives. */
-  private _placeholder(): WebGLTexture {
+  /** 1×1 texture with nearest filtering, filled in when the data arrives; null if none can be made. */
+  private _placeholder(): WebGLTexture | null {
     const gl = this._gl
-    const texture = gl.createTexture()!
+    const texture = gl.createTexture()
+    if (!texture) return null
     gl.bindTexture(gl.TEXTURE_2D, texture)
     if (this._format === 'f16') {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, 1, 1, 0, gl.RED, gl.HALF_FLOAT, new Uint16Array([0]))
