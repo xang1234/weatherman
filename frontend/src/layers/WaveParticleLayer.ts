@@ -37,7 +37,7 @@ import {
   type TileFormat,
 } from './TileManager'
 import { getTileFetchClient } from '@/workers/TileFetchClient'
-import { fadeForFrame, waveGridSpacingPx } from './particle-motion'
+import { createTrailDecay, waveGridSpacingPx } from './particle-motion'
 import { detectGpuTier, clampStateSize, type GpuTier } from './gpu-tier'
 import { ensureParticleDebugState, type ParticleDebugState } from './particleDebug'
 
@@ -161,6 +161,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _compositeProgram: GLProgram | null = null
   private _uCompositeTexture: WebGLUniformLocation | null = null
   private _uCompositeOpacity: WebGLUniformLocation | null = null
+  private _uCompositeEpsilon: WebGLUniformLocation | null = null
 
   private _trailTextures: [WebGLTexture | null, WebGLTexture | null] | null = null
   private _trailFbos: [WebGLFramebuffer | null, WebGLFramebuffer | null] | null = null
@@ -169,6 +170,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
   private _trailHeight = 0
   // View matrix of the previous frame — trails are dropped when the view moves
   private _lastMvp = new Float64Array(16)
+  private _trailDecay = createTrailDecay(TRAIL_FADE)
 
   private _atlasWaveH: WebGLTexture | null = null
   private _atlasPeriod: WebGLTexture | null = null
@@ -442,12 +444,14 @@ export class WaveParticleLayer implements CustomLayerInterface {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
     // Screen-space trail: keep it only while the view has not moved.
+    const decay = this._trailDecay(dt)
     if (!matrixChanged(this._lastMvp, options.modelViewProjectionMatrix)) {
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, this._trailTextures[trailRead])
       gl.useProgram(this._compositeProgram.program)
       gl.uniform1i(this._uCompositeTexture, 0)
-      gl.uniform1f(this._uCompositeOpacity, fadeForFrame(TRAIL_FADE, dt))
+      gl.uniform1f(this._uCompositeOpacity, decay.fade)
+      gl.uniform1f(this._uCompositeEpsilon, decay.epsilon) // defeats the RGBA8 decay stall
       gl.bindVertexArray(this._quad.vao)
       gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
       gl.bindVertexArray(null)
@@ -486,6 +490,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
     gl.useProgram(this._compositeProgram.program)
     gl.uniform1i(this._uCompositeTexture, 0)
     gl.uniform1f(this._uCompositeOpacity, this._opacity)
+    gl.uniform1f(this._uCompositeEpsilon, 0)
     gl.bindVertexArray(this._quad.vao)
     gl.drawArrays(gl.TRIANGLES, 0, this._quad.vertexCount)
     gl.bindVertexArray(null)
@@ -720,6 +725,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
     const cp = this._compositeProgram.program
     this._uCompositeTexture = gl.getUniformLocation(cp, 'u_texture')
     this._uCompositeOpacity = gl.getUniformLocation(cp, 'u_opacity')
+    this._uCompositeEpsilon = gl.getUniformLocation(cp, 'u_fadeEpsilon')
 
     const stateTexture0 = this._createStateTexture(gl)
     const stateTexture1 = this._createStateTexture(gl)
@@ -1226,6 +1232,7 @@ export class WaveParticleLayer implements CustomLayerInterface {
     this._uDrawSpeedMax = null
     this._uCompositeTexture = null
     this._uCompositeOpacity = null
+    this._uCompositeEpsilon = null
     this._gl = null
     this._map = null
   }

@@ -1,6 +1,7 @@
 /** Shared mock data and route helpers for e2e tests. */
 
 import type { Page } from '@playwright/test'
+import COLORMAPS_RESPONSE from './fixtures/colormaps.json' with { type: 'json' }
 
 export const RUN_ID = '20260310_00z'
 export const CYCLE_TIME = '2026-03-10T00:00:00Z'
@@ -116,6 +117,11 @@ export async function mockApiRoutes(page: Page) {
   // AIS tile requests — return empty PBF
   await page.route(/\/ais\/tiles\/\d{4}-\d{2}-\d{2}\/\d+\//, (route) =>
     route.fulfill({ body: Buffer.alloc(0), contentType: 'application/x-protobuf' }),
+  )
+
+  // Colour ramps — the backend's export, checked against it by test_tile_router.py
+  await page.route('**/tiles/colormaps.json', (route) =>
+    route.fulfill({ json: COLORMAPS_RESPONSE }),
   )
 
   // Weather TileJSON — return a minimal tile spec

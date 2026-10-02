@@ -596,11 +596,14 @@ export class TileManager {
 
       // Upload image data to texture
       gl.bindTexture(gl.TEXTURE_2D, texture)
+      // Data bytes, not colour: upload them untouched (as the worker path does).
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE)
       gl.texImage2D(
         gl.TEXTURE_2D, 0, gl.RGBA,
         gl.RGBA, gl.UNSIGNED_BYTE,
         img,
       )
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL)
       gl.bindTexture(gl.TEXTURE_2D, null)
 
       this._markLoaded(state, key, texture)
@@ -622,6 +625,11 @@ export class TileManager {
 
   /** Evict least-recently-used tiles when over the cache limit. */
   private _evict(): void {
+    // Called every frame: count first, and only list and sort when over the limit.
+    let count = 0
+    for (const state of this._datasets.values()) count += state.tiles.size
+    if (count <= this._maxTextures) return
+
     const currentDatasetKey = this._currentDatasetKey()
     const entries: Array<{ datasetKey: string; state: DatasetState; entry: TileEntry }> = []
     for (const [datasetKey, state] of this._datasets) {
@@ -629,8 +637,6 @@ export class TileManager {
         entries.push({ datasetKey, state, entry })
       }
     }
-    if (entries.length <= this._maxTextures) return
-
     entries.sort((a, b) => a.entry.lastAccess - b.entry.lastAccess)
 
     const toRemove = entries.length - this._maxTextures

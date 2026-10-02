@@ -12,6 +12,7 @@ import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { setWeatherOverlayOpacity } from '@/utils/basemap-style'
 import { WeatherGLLayer } from '@/layers/WeatherGLLayer'
+import { useColorRamps } from './useColorRamps'
 import type { UseWeatherLayerOptions } from './useWeatherLayer'
 
 /**
@@ -58,12 +59,14 @@ export function useWebGLWeatherLayer({
 }: UseWeatherLayerOptions): React.RefObject<WeatherGLLayer | null> {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WeatherGLLayer | null>(null)
+  const rampsReady = useColorRamps()
 
   // Create and add the WebGL custom layer when the map is ready.
   // Only depends on map/isLoaded/apiBase — dataset config is updated via methods.
   useEffect(() => {
     const m = map.current
-    if (!m || !isLoaded) return
+    // The layer builds its colour ramp when added, so it waits for the ramps.
+    if (!m || !isLoaded || !rampsReady) return
 
     const tileFormat = import.meta.env.VITE_USE_FLOAT16_TILES === 'true' ? 'f16' as const : 'png' as const
     const glLayer = new WeatherGLLayer({
@@ -88,7 +91,7 @@ export function useWebGLWeatherLayer({
       }
       setWeatherOverlayOpacity(m, false)
     }
-  }, [map, isLoaded, apiBase])
+  }, [map, isLoaded, apiBase, rampsReady])
 
   // Update dataset config when model/run/layer/forecastHour change.
   // Calls setConfig which clears the tile cache if params changed.
@@ -101,14 +104,14 @@ export function useWebGLWeatherLayer({
     if (!glLayer || !runId || !layer) return
     console.info(`[useWebGLWeatherLayer] setConfig: ${model}/${runId}/${layer}/fh${forecastHour}`)
     glLayer.setConfig(model, runId, layer, forecastHour)
-  }, [model, runId, layer, forecastHour, isLoaded])
+  }, [model, runId, layer, forecastHour, isLoaded, rampsReady])
 
   // Update temporal blend when forecastHourNext/temporalMix change.
   useEffect(() => {
     const glLayer = layerRef.current
     if (!glLayer) return
     glLayer.setTemporalBlend(forecastHourNext ?? -1, temporalMix)
-  }, [forecastHourNext, temporalMix, isLoaded])
+  }, [forecastHourNext, temporalMix, isLoaded, rampsReady])
 
   // Update opacity and basemap transparency when visibility/opacity change.
   useEffect(() => {
@@ -120,7 +123,7 @@ export function useWebGLWeatherLayer({
     console.info(`[useWebGLWeatherLayer] setOpacity(${effectiveOpacity}), setWeatherOverlayOpacity(active=${visible}, layer=${layer})`)
     glLayer.setOpacity(effectiveOpacity)
     setWeatherOverlayOpacity(m, visible, layer)
-  }, [map, isLoaded, opacity, visible, layer])
+  }, [map, isLoaded, opacity, visible, layer, rampsReady])
 
   return layerRef
 }

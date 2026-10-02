@@ -1,7 +1,9 @@
 """Tests for the XYZ / OGC Tiles API endpoint."""
 
 import io
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -589,7 +591,12 @@ class TestColormapsEndpoint:
 
     def test_cache_header(self, client):
         resp = client.get("/tiles/colormaps.json")
-        assert "max-age=86400" in resp.headers["cache-control"]
+        assert "max-age=300" in resp.headers["cache-control"]
+
+    def test_e2e_fixture_matches(self, client):
+        """The e2e mock serves a snapshot of this endpoint; regenerate it when the ramps change."""
+        fixture = Path(__file__).parents[1] / "frontend" / "e2e" / "fixtures" / "colormaps.json"
+        assert json.loads(fixture.read_text()) == client.get("/tiles/colormaps.json").json()
 
 
 # -- Pre-generated data tile tests --

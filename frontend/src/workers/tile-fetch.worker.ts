@@ -192,7 +192,10 @@ async function executeFetch(
 
       if (!isCurrent(key, abort)) return
 
-      const bitmap = await createImageBitmap(blob)
+      // The bytes are data, not colour: no colour-profile or gamma
+      // conversion, and no premultiplying (it would round RGB where alpha
+      // marks nodata).
+      const bitmap = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })
 
       if (!isCurrent(key, abort)) {
         bitmap.close()

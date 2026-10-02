@@ -14,6 +14,7 @@ import type maplibregl from 'maplibre-gl'
 import { WindParticleLayer } from '@/layers/WindParticleLayer'
 import { particleInsertBeforeId } from './useWebGLWeatherLayer'
 import { COLOR_RAMPS } from '@/layers/color-ramps'
+import { useColorRamps } from './useColorRamps'
 
 export interface UseWindParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
@@ -48,6 +49,7 @@ export function useWindParticles({
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WindParticleLayer | null>(null)
   const configuredRunRef = useRef<string | null>(null)
+  const rampsReady = useColorRamps()
   const isActive = enabled
 
   // Create the particle layer once when the map is ready.
@@ -99,14 +101,14 @@ export function useWindParticles({
       configuredRunRef.current = null
       return
     }
-    if (!pl || !runId) return
+    if (!pl || !runId || !rampsReady) return
     if (isPlaying && configuredRunRef.current === runId) return
 
-    const ramp = COLOR_RAMPS['wind_speed']
-    const max = ramp?.valueMax ?? 50
-    pl.setWindConfig(model, runId, forecastHour, -max, max)
+    // The range the U/V tiles were encoded with.
+    const { valueMin, valueMax } = COLOR_RAMPS['wind_u']
+    pl.setWindConfig(model, runId, forecastHour, valueMin, valueMax)
     configuredRunRef.current = runId
-  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying])
+  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying, rampsReady])
 
   // Return imperative handle for playback integration
   const handle: WindParticleHandle = {
