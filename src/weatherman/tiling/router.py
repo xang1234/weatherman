@@ -10,6 +10,7 @@ URL patterns:
 """
 
 import asyncio
+import math
 from typing import Annotated, Callable, Optional
 from urllib.parse import quote, urlencode
 
@@ -37,7 +38,6 @@ router = APIRouter(prefix="/tiles", tags=["tiles"])
 # The app provides a function that loads a RunCatalog for a given model name.
 CatalogLoader = Callable[[str], RunCatalog]
 
-_DATA_TILE_SIDE = 256 + 2 * TILE_GUTTER
 
 
 def _read_geotiff_band(content: bytes) -> tuple[np.ndarray, float | None]:
@@ -326,6 +326,7 @@ class TileService:
                     tile_format="f16",
                 )
                 f16_bytes = await asyncio.to_thread(self._store.read_bytes, tile_key)
+                side = math.isqrt(len(f16_bytes) // 2)
                 cache = self.CACHE_LATEST if is_latest else self.CACHE_IMMUTABLE
                 return Response(
                     content=f16_bytes,
@@ -333,7 +334,8 @@ class TileService:
                     headers={
                         "Cache-Control": cache,
                         "X-Tile-Format": "float16",
-                        "X-Tile-Size": f"{_DATA_TILE_SIDE},{_DATA_TILE_SIDE}",
+                        # From the payload: runs tiled before the gutter have 256 x 256.
+                        "X-Tile-Size": f"{side},{side}",
                     },
                 )
             except (FileNotFoundError, OSError):

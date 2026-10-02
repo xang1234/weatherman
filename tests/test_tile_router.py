@@ -712,10 +712,20 @@ class TestPreGeneratedDataTiles:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/octet-stream"
         assert resp.headers["x-tile-format"] == "float16"
+        assert resp.headers["x-tile-size"] == "256,256"  # tiled before the gutter
         decoded, mask = decode_f16_to_float(resp.content, 256, 256)
         assert decoded.shape == (256, 256)
         assert not mask.all()
         mock_get.assert_not_called()
+
+    def test_float16_tile_size_follows_the_payload(self, store_app):
+        """A gutter tile says 258 x 258; the header comes from the bytes, not a constant."""
+        app, store = store_app
+        key = StorageLayout("gfs").data_tile_path(RUN, "temperature", 0, 3, 5, 2, tile_format="f16")
+        store.write_bytes(key, encode_float_to_f16(np.full((258, 258), 20.0, dtype=np.float32)))
+        resp = TestClient(app).get("/tiles/gfs/20260306T12Z/temperature/0/data/3/5/2.bin")
+        assert resp.status_code == 200
+        assert resp.headers["x-tile-size"] == "258,258"
 
     def test_float16_tile_fallback_missing(self, store_client):
         """Missing pre-generated Float16 tile should fall through to TiTiler."""
