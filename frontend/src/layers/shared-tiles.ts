@@ -25,18 +25,34 @@ interface SharedTile {
   priority: TilePriority
 }
 
+let nextStoreId = 0
+
 export class SharedTileStore {
   private _tiles = new Map<string, SharedTile>()
   private _gl: WebGL2RenderingContext
   private _client: TileFetchClient
   private _format: 'png' | 'f16'
+  /** Worker keys are prefixed with it: the client broadcasts every result to every store. */
+  private _prefix = `shared${nextStoreId++}::`
+  private _unsubscribe: () => void
 
   constructor(gl: WebGL2RenderingContext, client: TileFetchClient, format: 'png' | 'f16') {
     this._gl = gl
     this._client = client
     this._format = format
-    client.addLoadedListener((result) => this._onLoaded(result))
-    client.addErrorListener((error) => this._onError(error))
+    const offLoaded = client.addLoadedListener((result) => this._onLoaded(result))
+    const offError = client.addErrorListener((error) => this._onError(error))
+    this._unsubscribe = () => { offLoaded(); offError() }
+  }
+
+  /** Stop listening and free whatever is left. The store is unusable after. */
+  dispose(): void {
+    this._unsubscribe()
+    for (const [url, tile] of this._tiles) {
+      if (!tile.loaded) this._client.cancel(this._prefix + url)
+      this._gl.deleteTexture(tile.texture)
+    }
+    this._tiles.clear()
   }
 
   /**
@@ -54,17 +70,17 @@ export class SharedTileStore {
     if (!tile) {
       tile = { texture: this._placeholder(), loaded: false, refs: 0, listeners: new Set(), priority }
       this._tiles.set(url, tile)
-      this._client.fetch(url, url, this._format, priority)
+      this._client.fetch(this._prefix + url, url, this._format, priority)
     } else if (priority < tile.priority) {
       // A tile first wanted as a prefetch may now be on screen.
       tile.priority = priority
-      this._client.fetch(url, url, this._format, priority)
+      this._client.fetch(this._prefix + url, url, this._format, priority)
     }
     const pending = tile
     pending.listeners.add(listener)
     return () => {
       if (pending.loaded || !pending.listeners.delete(listener) || pending.listeners.size > 0) return
-      this._client.cancel(url)
+      this._client.cancel(this._prefix + url)
       this._gl.deleteTexture(pending.texture)
       this._tiles.delete(url)
     }
@@ -75,7 +91,7 @@ export class SharedTileStore {
     const tile = this._tiles.get(url)
     if (!tile || tile.loaded || priority >= tile.priority) return
     tile.priority = priority
-    this._client.fetch(url, url, this._format, priority)
+    this._client.fetch(this._prefix + url, url, this._format, priority)
   }
 
   /** Drop one reference to a loaded tile; the last one frees the texture. */
@@ -94,14 +110,17 @@ export class SharedTileStore {
   }
 
   private _onLoaded(result: TileFetchResult): void {
-    const tile = this._tiles.get(result.key)
+    // Another store's result: leave it alone, its owner will use it.
+    if (!result.key.startsWith(this._prefix)) return
+    const url = result.key.slice(this._prefix.length)
+    const tile = this._tiles.get(url)
     if (!tile || tile.loaded) {
       // Withdrawn while in flight.
       if (typeof ImageBitmap !== 'undefined' && result.data instanceof ImageBitmap) result.data.close()
       return
     }
     if (!this._upload(tile.texture, result)) {
-      this._fail(result.key, tile)
+      this._fail(url, tile)
       return
     }
     tile.loaded = true
@@ -112,8 +131,10 @@ export class SharedTileStore {
   }
 
   private _onError(error: TileFetchError): void {
-    const tile = this._tiles.get(error.key)
-    if (tile && !tile.loaded) this._fail(error.key, tile)
+    if (!error.key.startsWith(this._prefix)) return
+    const url = error.key.slice(this._prefix.length)
+    const tile = this._tiles.get(url)
+    if (tile && !tile.loaded) this._fail(url, tile)
   }
 
   /** Tell every waiter the fetch failed; each retries on its own schedule. */
@@ -163,13 +184,33 @@ export class SharedTileStore {
   }
 }
 
-const stores = new WeakMap<WebGL2RenderingContext, Map<string, SharedTileStore>>()
+const stores = new WeakMap<WebGL2RenderingContext, Map<string, { store: SharedTileStore; users: number }>>()
 
-/** The store for a GL context and tile format. */
-export function sharedTileStore(gl: WebGL2RenderingContext, client: TileFetchClient, format: 'png' | 'f16'): SharedTileStore {
+/**
+ * The store for a GL context and tile format, counted as used until the
+ * returned function is called. The last user's call disposes of the store,
+ * so a map that is removed does not leave its context behind.
+ */
+export function acquireSharedTileStore(
+  gl: WebGL2RenderingContext,
+  client: TileFetchClient,
+  format: 'png' | 'f16',
+): { store: SharedTileStore; done: () => void } {
   let byFormat = stores.get(gl)
   if (!byFormat) stores.set(gl, (byFormat = new Map()))
-  let store = byFormat.get(format)
-  if (!store) byFormat.set(format, (store = new SharedTileStore(gl, client, format)))
-  return store
+  let entry = byFormat.get(format)
+  if (!entry) byFormat.set(format, (entry = { store: new SharedTileStore(gl, client, format), users: 0 }))
+  entry.users++
+  const held = entry
+  let released = false
+  return {
+    store: held.store,
+    done: () => {
+      if (released) return
+      released = true
+      if (--held.users > 0) return
+      held.store.dispose()
+      byFormat!.delete(format)
+    },
+  }
 }

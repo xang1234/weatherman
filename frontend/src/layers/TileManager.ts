@@ -20,7 +20,7 @@
 
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
 import type { TileFetchClient } from '@/workers/TileFetchClient'
-import { sharedTileStore, type SharedTileStore } from './shared-tiles'
+import { acquireSharedTileStore, type SharedTileStore } from './shared-tiles'
 
 /** Loading state for a single tile. */
 export type TileState = 'pending' | 'loaded' | 'error'
@@ -133,6 +133,7 @@ export class TileManager {
 
   /** Textures shared by URL with the other managers on this GL context (worker path). */
   private _store: SharedTileStore | null = null
+  private _releaseStore: (() => void) | null = null
 
   /** Callback invoked when a tile for the current dataset finishes loading. */
   onTileLoaded: ((key: string) => void) | null = null
@@ -149,7 +150,11 @@ export class TileManager {
     this._format = options.format ?? 'png'
     this._fetchClient = options.fetchClient ?? null
     this._requestRender = options.requestRender ?? null
-    if (this._fetchClient) this._store = sharedTileStore(gl, this._fetchClient, this._format)
+    if (this._fetchClient) {
+      const { store, done } = acquireSharedTileStore(gl, this._fetchClient, this._format)
+      this._store = store
+      this._releaseStore = done
+    }
   }
 
   /**
@@ -329,6 +334,9 @@ export class TileManager {
     this.clear()
     this.onTileLoaded = null
     this._requestRender = null
+    this._releaseStore?.()
+    this._releaseStore = null
+    this._store = null
   }
 
   // ── Private ──────────────────────────────────────────────────────
