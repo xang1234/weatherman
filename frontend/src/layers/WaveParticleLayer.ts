@@ -12,6 +12,8 @@ import updateFragSource from './shaders/wave-particle-update.frag.glsl?raw'
 import drawVertSource from './shaders/wave-particle-draw.vert.glsl?raw'
 import drawFragSource from './shaders/wave-particle-draw.frag.glsl?raw'
 import { waveGridSpacingPx } from './particle-motion'
+import { encodingRange } from './color-ramps'
+import type { DataRanges } from '@/types/manifest'
 import {
   ParticleLayer,
   type ParticleFrame,
@@ -33,6 +35,8 @@ export type WaveParticleLayerOptions = ParticleLayerOptions
 export class WaveParticleLayer extends ParticleLayer {
   /** Dashes this frame: one per grid cell, up to the slots there are. */
   private _dashCount = 0
+  /** The run's tile encoding ranges, from its manifest (#83). */
+  private _dataRanges: DataRanges | undefined
 
   constructor(options: WaveParticleLayerOptions = {}) {
     super({
@@ -54,7 +58,8 @@ export class WaveParticleLayer extends ParticleLayer {
     }, options)
   }
 
-  setWaveConfig(model: string, runId: string, forecastHour: number): void {
+  setWaveConfig(model: string, runId: string, forecastHour: number, dataRanges?: DataRanges): void {
+    this._dataRanges = dataRanges
     this._configure(model, runId, forecastHour)
   }
 
@@ -83,12 +88,15 @@ export class WaveParticleLayer extends ParticleLayer {
     this._dashCount = Math.min(this._particleCount, gridCols * gridRows)
     this._debug.gridTruncated = gridCols * gridRows > this._particleCount
 
-    gl.uniform1f(u('u_valueMinHeight'), 0)
-    gl.uniform1f(u('u_valueMaxHeight'), 15)
-    gl.uniform1f(u('u_valueMinPeriod'), 0)
-    gl.uniform1f(u('u_valueMaxPeriod'), 25)
-    gl.uniform1f(u('u_valueMinDir'), -1)
-    gl.uniform1f(u('u_valueMaxDir'), 1)
+    const height = encodingRange('wave_height', this._dataRanges)
+    const period = encodingRange('wave_period', this._dataRanges)
+    const dir = encodingRange('wave_dir_u', this._dataRanges) // dir_v is encoded alike
+    gl.uniform1f(u('u_valueMinHeight'), height.min)
+    gl.uniform1f(u('u_valueMaxHeight'), height.max)
+    gl.uniform1f(u('u_valueMinPeriod'), period.min)
+    gl.uniform1f(u('u_valueMaxPeriod'), period.max)
+    gl.uniform1f(u('u_valueMinDir'), dir.min)
+    gl.uniform1f(u('u_valueMaxDir'), dir.max)
     gl.uniform1f(u('u_time'), frame.now)
     gl.uniform1f(u('u_gridOriginX'), gridOriginX)
     gl.uniform1f(u('u_gridOriginY'), gridOriginY)

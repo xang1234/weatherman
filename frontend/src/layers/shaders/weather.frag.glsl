@@ -34,11 +34,15 @@ uniform int u_isVector;
 // When 1, sampleWithFallback tries surrounding texels if bilinear returns nodata.
 uniform int u_oceanOnly;
 
-// Value range for denormalization in vector mode.
-// Decoded [0,1] values are mapped back to [u_valueMin, u_valueMax].
-// Also used to normalize reconstructed speed to [0,1] for the color ramp.
-uniform float u_valueMin;
-uniform float u_valueMax;
+// Range the PNG tiles were encoded with, from the run's manifest (#83):
+// decoded [0,1] values map back to [u_dataMin, u_dataMax].
+uniform float u_dataMin;
+uniform float u_dataMax;
+
+// Range the color ramp spans. Separate from the encoding range, which may
+// differ for a run tiled before the ramp's range changed.
+uniform float u_rampMin;
+uniform float u_rampMax;
 
 // Float16 mode flag: 0 = 8-bit PNG tiles, 1 = R16F Float16 binary tiles.
 // When 1, textures contain physical values directly (no decode needed).
@@ -172,14 +176,14 @@ float temporalBlend(float v0, float v1) {
 // In Float16 mode, values are already physical. In PNG mode, denormalize.
 float toPhysical(float val) {
     if (u_isFloat16 == 1) return val;
-    return val * (u_valueMax - u_valueMin) + u_valueMin;
+    return val * (u_dataMax - u_dataMin) + u_dataMin;
 }
 
-// Normalize a physical value to [0,1] for color ramp lookup.
-float toNormalized(float physical) {
-    float range = u_valueMax - u_valueMin;
+// Position of a physical value on the color ramp, in [0,1].
+float rampPosition(float physical) {
+    float range = u_rampMax - u_rampMin;
     if (range == 0.0) return 0.0;
-    return clamp((physical - u_valueMin) / range, 0.0, 1.0);
+    return clamp((physical - u_rampMin) / range, 0.0, 1.0);
 }
 
 void main() {
@@ -201,7 +205,7 @@ void main() {
             float uWind = toPhysical(u1);
             float vWind = toPhysical(v1);
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
+            normalized = rampPosition(speed);
         } else if (u_temporalMix > 0.0) {
             float u1 = sampleWithFallback(u_dataTileT1, v_uv);
             float v1 = sampleWithFallback(u_dataTileVT1, v_uv);
@@ -210,12 +214,12 @@ void main() {
             float uWind = toPhysical(uBlend);
             float vWind = toPhysical(vBlend);
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
+            normalized = rampPosition(speed);
         } else {
             float uWind = toPhysical(u0);
             float vWind = toPhysical(v0);
             float speed = sqrt(uWind * uWind + vWind * vWind);
-            normalized = clamp(speed / u_valueMax, 0.0, 1.0);
+            normalized = rampPosition(speed);
         }
     } else {
         // Scalar mode: single data tile per timestep
@@ -231,9 +235,7 @@ void main() {
             if (isNodata(v0)) discard;
         }
 
-        // In Float16 mode, v0 is physical — normalize for color ramp.
-        // In PNG mode, v0 is already normalized [0,1].
-        normalized = (u_isFloat16 == 1) ? toNormalized(v0) : v0;
+        normalized = rampPosition(toPhysical(v0));
     }
 
     // Color ramp lookup — sample the 1D texture at the normalized position.

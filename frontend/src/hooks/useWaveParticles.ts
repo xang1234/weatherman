@@ -13,6 +13,8 @@ import { useEffect, useRef } from 'react'
 import type maplibregl from 'maplibre-gl'
 import { WaveParticleLayer } from '@/layers/WaveParticleLayer'
 import { particleInsertBeforeId } from './layer-order'
+import { useColorRamps } from './useColorRamps'
+import type { DataRanges } from '@/types/manifest'
 
 export interface UseWaveParticlesOptions {
   map: React.RefObject<maplibregl.Map | null>
@@ -26,6 +28,8 @@ export interface UseWaveParticlesOptions {
   forecastHour: number
   /** When true, skip the config effect to avoid nuking tile caches during playback. */
   isPlaying?: boolean
+  /** The run's tile encoding ranges, from its manifest; undefined until it has loaded. */
+  dataRanges?: DataRanges
 }
 
 export interface WaveParticleHandle {
@@ -43,10 +47,13 @@ export function useWaveParticles({
   runId,
   forecastHour,
   isPlaying = false,
+  dataRanges,
 }: UseWaveParticlesOptions): WaveParticleHandle {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WaveParticleLayer | null>(null)
   const configuredRunRef = useRef<string | null>(null)
+  // Runs tiled before #83 fall back to the ramps' ranges.
+  const rampsReady = useColorRamps()
   const isActive = enabled
 
   // Create the particle layer once when the map is ready.
@@ -97,12 +104,12 @@ export function useWaveParticles({
       configuredRunRef.current = null
       return
     }
-    if (!pl || !runId) return
+    if (!pl || !runId || !rampsReady || !dataRanges) return
     if (isPlaying && configuredRunRef.current === runId) return
 
-    pl.setWaveConfig(model, runId, forecastHour)
+    pl.setWaveConfig(model, runId, forecastHour, dataRanges)
     configuredRunRef.current = runId
-  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying])
+  }, [model, runId, forecastHour, enabled, isLoaded, isPlaying, rampsReady, dataRanges])
 
   // Return imperative handle for playback integration
   const handle: WaveParticleHandle = {

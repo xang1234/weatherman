@@ -24,10 +24,11 @@ import { VoyageDrawButton } from '@/components/VoyageDrawButton'
 import { VoyageWeatherPanel } from '@/components/VoyageWeatherPanel'
 import { WeatherInspector } from '@/components/WeatherInspector'
 import { WeatherHoverHud } from '@/components/WeatherHoverHud'
-import type { LayerConfig } from '@/types/manifest'
+import type { DataRanges, LayerConfig } from '@/types/manifest'
 
 const EMPTY_LAYERS: LayerConfig[] = []
 const EMPTY_FORECAST_HOURS: number[] = []
+const NO_DATA_RANGES: DataRanges = {}
 
 function forecastHourFromUrl(forecastHours: number[]): number | null {
   const params = new URLSearchParams(window.location.search)
@@ -61,6 +62,9 @@ export function MapView() {
 
   const runId = dataAge?.runId ?? null
   const manifest = useManifest({ model, runId })
+  // This run's tile encoding ranges, once its manifest is in (#83). Runs
+  // tiled before have none: the layers then use the current ones.
+  const dataRanges = manifest && manifest.run_id === runId ? manifest.data_ranges ?? NO_DATA_RANGES : undefined
 
   // Auto-select first layer when manifest loads (or if active layer is no longer available)
   const layers = manifest?.layers ?? EMPTY_LAYERS
@@ -140,6 +144,7 @@ export function MapView() {
     prefetchForecastHours,
     forecastHourNext: isPlaying ? undefined : forecastHourNext,
     temporalMix: isPlaying ? undefined : scrubMix,
+    dataRanges,
   })
 
   // Keep handle and forecastHours in refs so the RAF callback always reads the
@@ -245,6 +250,7 @@ export function MapView() {
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
     isPlaying,
+    dataRanges,
   })
 
   // Keep particle handles in refs for the RAF loop
@@ -260,6 +266,7 @@ export function MapView() {
     runId: runId ?? '',
     forecastHour: forecastHour ?? 0,
     isPlaying,
+    dataRanges,
   })
 
   const waveParticlesRef = useRef<WaveParticleHandle>(waveParticles)

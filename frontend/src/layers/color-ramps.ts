@@ -51,6 +51,18 @@ export function loadColorRamps(apiBase: string): Promise<void> {
   return loading
 }
 
+/**
+ * The range a run's `layer` tiles were encoded with: from the run's
+ * manifest, else the current one — what runs tiled before #83 used,
+ * unless it has changed since.
+ */
+export function encodingRange(layer: string, dataRanges?: Record<string, { min: number; max: number }>): { min: number; max: number } {
+  const recorded = dataRanges?.[layer]
+  if (recorded) return recorded
+  const ramp = COLOR_RAMPS[layer]
+  return { min: ramp?.valueMin ?? 0, max: ramp?.valueMax ?? 1 }
+}
+
 // ── OKLAB color space conversions ────────────────────────────────
 // OKLAB is a perceptually uniform color space where linear
 // interpolation produces visually smooth, non-muddy gradients.

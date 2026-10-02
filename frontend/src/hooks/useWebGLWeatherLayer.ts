@@ -27,6 +27,7 @@ export function useWebGLWeatherLayer({
   visible = true,
   forecastHourNext,
   temporalMix = 0,
+  dataRanges,
 }: UseWeatherLayerOptions): React.RefObject<WeatherGLLayer | null> {
   const apiBase = import.meta.env.VITE_API_BASE_URL || ''
   const layerRef = useRef<WeatherGLLayer | null>(null)
@@ -72,10 +73,12 @@ export function useWebGLWeatherLayer({
   // when the creation effect finally sets it (since data deps are unchanged).
   useEffect(() => {
     const glLayer = layerRef.current
-    if (!glLayer || !runId || !layer) return
+    // A run is configured once its encoding ranges are in; until then the
+    // previous run stays up (#83).
+    if (!glLayer || !runId || !layer || !dataRanges) return
     console.info(`[useWebGLWeatherLayer] setConfig: ${model}/${runId}/${layer}/fh${forecastHour}`)
-    glLayer.setConfig(model, runId, layer, forecastHour)
-  }, [model, runId, layer, forecastHour, isLoaded, rampsReady])
+    glLayer.setConfig(model, runId, layer, forecastHour, dataRanges)
+  }, [model, runId, layer, forecastHour, isLoaded, rampsReady, dataRanges])
 
   // Update temporal blend when forecastHourNext/temporalMix change.
   useEffect(() => {

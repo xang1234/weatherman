@@ -119,12 +119,16 @@ class TestColormaps:
 
     def test_colormap_values_are_valid_rgba(self):
         for cmap in COLORMAPS.values():
+            # Opaque unless a stop sets alpha (precipitation is clear at zero).
+            sets_alpha = any(len(color) == 4 for _, color in cmap.stops)
             for key, (r, g, b, a) in cmap.colormap.items():
                 assert 0 <= key <= 255
                 assert 0 <= r <= 255
                 assert 0 <= g <= 255
                 assert 0 <= b <= 255
-                assert a == 255
+                assert 0 <= a <= 255
+                if not sets_alpha:
+                    assert a == 255, cmap.name
 
     def test_to_json_is_valid(self):
         raw = TEMPERATURE.to_json()
