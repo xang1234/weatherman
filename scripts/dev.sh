@@ -9,8 +9,10 @@
 # Optional environment:
 #   SAMPLE_HOURS=0,3,6        forecast hours to fetch when seeding (default 0,3,6)
 #   WEATHERMAN_DATA_DIR=path  use a data directory other than .data/
-#   VITE_BASEMAP_URL=url      basemap PMTiles URL (default: newest Protomaps daily build)
-#   NODE_BIN=path             directory holding a Node >= 20 binary
+#   VITE_BASEMAP_URL=url      basemap PMTiles URL (default: the extract below)
+#   NODE_BIN=path             directory holding the node binary to run Vite with
+#                             (default: the first Node on PATH, else nvm, that
+#                             Vite supports: ^20.19 or >= 22.12)
 
 set -euo pipefail
 
@@ -20,11 +22,29 @@ cd "$ROOT"
 # ── Pre-flight ───────────────────────────────────────────────────────
 DATA_DIR="${WEATHERMAN_DATA_DIR:-$ROOT/.data}"
 SAMPLE_HOURS="${SAMPLE_HOURS:-0,3,6}"
-NODE_BIN="${NODE_BIN:-/Users/admin/.nvm/versions/node/v22.18.0/bin}"
+# Vite 7 needs Node ^20.19 or >= 22.12. The node on PATH may be older (some
+# machines ship v14), so fall back to an nvm install (#73).
+node_ok() {
+  [ -x "$1/node" ] && "$1/node" -e '
+    const [major, minor] = process.versions.node.split(".").map(Number)
+    process.exit(major > 22 || (major === 22 && minor >= 12) || (major === 20 && minor >= 19) ? 0 : 1)
+  ' 2>/dev/null
+}
+if [ -z "${NODE_BIN:-}" ]; then
+  path_node="$(command -v node 2>/dev/null || true)"
+  for candidate in ${path_node:+"$(dirname "$path_node")"} "$HOME"/.nvm/versions/node/*/bin; do
+    if node_ok "$candidate"; then NODE_BIN="$candidate"; break; fi
+  done
+fi
+if [ -z "${NODE_BIN:-}" ] || ! node_ok "$NODE_BIN"; then
+  echo "ERROR: Vite needs Node ^20.19 or >= 22.12, and none was found on PATH or"
+  echo "in ~/.nvm. Install one, or set NODE_BIN to the directory holding it."
+  exit 1
+fi
 
 if [ ! -x frontend/node_modules/.bin/vite ]; then
   echo "ERROR: frontend dependencies are not installed. Run:"
-  echo "  (cd frontend && PATH=\"$NODE_BIN:/usr/bin:/bin\" npm install)"
+  echo "  (cd frontend && PATH=\"$NODE_BIN:\$PATH\" npm install)"
   exit 1
 fi
 
@@ -39,18 +59,14 @@ if [ ! -f "$DATA_DIR/models/gfs/catalog.json" ]; then
 fi
 
 # ── Basemap ──────────────────────────────────────────────────────────
-# Protomaps daily builds need no API key but expire after about a week, so
-# pick the newest one that exists rather than pinning a date. This overrides
-# VITE_BASEMAP_URL from frontend/.env; set it in your shell to choose another.
-if [ -z "${VITE_BASEMAP_URL:-}" ]; then
-  for days_ago in 1 2 3 4 5 6; do
-    day="$(date -v-"${days_ago}"d +%Y%m%d 2>/dev/null || date -d "$days_ago days ago" +%Y%m%d)"
-    if curl -sfI --max-time 5 "https://build.protomaps.com/$day.pmtiles" >/dev/null; then
-      # /basemap is proxied to build.protomaps.com by the Vite dev server.
-      export VITE_BASEMAP_URL="/basemap/$day.pmtiles"
-      break
-    fi
-  done
+# A low-zoom extract of the Protomaps planet, served by the backend at
+# /basemap (#70). Protomaps' own builds can't be read from most origins (CORS)
+# and get pruned, so the app keeps its own copy. Fetched once, about 190 MB.
+BASEMAP="$DATA_DIR/basemap/basemap.pmtiles"
+if [ -z "${VITE_BASEMAP_URL:-}" ] && [ ! -f "$BASEMAP" ]; then
+  echo "No basemap in $DATA_DIR — fetching a zoom 0-7 extract of the Protomaps planet (about 190 MB) ..."
+  uv run python scripts/fetch_basemap.py --out "$BASEMAP" \
+    || echo "WARNING: basemap fetch failed; weather will show without coastlines. Retry with: uv run python scripts/fetch_basemap.py"
 fi
 
 # ── Cleanup on exit ──────────────────────────────────────────────────
@@ -125,7 +141,7 @@ wait_for "Backend" "http://localhost:8000/health/live"
 # and go through the Vite proxy — works on whichever port Vite ends up on.
 echo "Starting frontend (Vite dev server) ..."
 # --host 127.0.0.1 so Vite sees a port already taken on IPv4 and moves on.
-(cd frontend && PATH="$NODE_BIN:/usr/bin:/bin" VITE_API_BASE_URL="" exec ./node_modules/.bin/vite --host 127.0.0.1) &
+(cd frontend && PATH="$NODE_BIN:$PATH" VITE_API_BASE_URL="" exec ./node_modules/.bin/vite --host 127.0.0.1) &
 PIDS+=($!)
 
 # ── Ready ────────────────────────────────────────────────────────────
@@ -134,7 +150,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  Frontend:  the \"Local:\" URL Vite prints below (5173 unless taken)"
 echo "  Backend:   http://localhost:8000"
 echo "  TiTiler:   http://localhost:8080"
-echo "  Basemap:   ${VITE_BASEMAP_URL:-from frontend/.env}  (/basemap = build.protomaps.com)"
+echo "  Basemap:   ${VITE_BASEMAP_URL:-/basemap/basemap.pmtiles (served from $BASEMAP)}"
+echo "  Node:      $("$NODE_BIN/node" --version) from $NODE_BIN"
 if [ "$NEPTUNE_LIVE_ENABLE" = "true" ]; then
   echo "  AIS Live:  enabled (shared DuckDB at $AIS_DB_PATH)"
 fi
