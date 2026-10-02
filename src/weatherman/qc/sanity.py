@@ -49,7 +49,8 @@ class PhysicalBounds:
 
 
 # Bounds are wider than display ranges.  Sources:
-#   Temperature: record low ~184 K (Vostok), record high ~330 K (Death Valley)
+#   Temperature: °C, as GDAL reads GRIB2 (it converts from Kelvin); record
+#     low about -89 °C (Vostok), record high about +57 °C (Death Valley)
 #   Wind components: jet stream peaks ~120 m/s, allow signed
 #   Precipitation: extreme event accumulations up to ~1000 kg/m^2
 #   Pressure: lowest recorded ~870 hPa, highest ~1084 hPa
@@ -58,7 +59,7 @@ class PhysicalBounds:
 #   Wave period: long swells up to ~30 s
 #   Wave direction: degrees [0, 360]
 PHYSICAL_BOUNDS: dict[str, PhysicalBounds] = {
-    "tmp_2m": PhysicalBounds(min=150.0, max=350.0),
+    "tmp_2m": PhysicalBounds(min=-100.0, max=70.0),
     "ugrd_10m": PhysicalBounds(min=-150.0, max=150.0),
     "vgrd_10m": PhysicalBounds(min=-150.0, max=150.0),
     "apcp_sfc": PhysicalBounds(min=0.0, max=2000.0, skip_all_zeros=True),

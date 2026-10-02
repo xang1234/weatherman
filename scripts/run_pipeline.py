@@ -56,9 +56,13 @@ from weatherman.storage.manifest import (
     ValueRange,
     build_manifest,
 )
+from weatherman.qc.completeness import check_completeness
+from weatherman.qc.geometry import check_geometry
+from weatherman.qc.sanity import check_sanity
 from weatherman.storage.object_store import LocalObjectStore
 from weatherman.storage.paths import RunID, StorageLayout
 from weatherman.storage.publish import publish_run
+from weatherman.storage.zarr_schema import PHASE1_VARIABLES, GridResolution, ZarrSchema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -416,6 +420,72 @@ def step_generate_zarr(
     logger.info("  Zarr: %s (%d variables)", zarr_path, len(written))
 
 
+# Quality checks before publishing (#71). The variables behind the core
+# layers must be complete and plausible or the run is not published; the
+# optional ones only cost the layer they feed (None: no manifest layer).
+QC_REQUIRED_VARIABLES = ("tmp_2m", "ugrd_10m", "vgrd_10m")
+QC_OPTIONAL_VARIABLES: dict[str, str | None] = {
+    "htsgw_sfc": "wave_height",
+    "perpw_sfc": "wave_height",
+    "dirpw_sfc": "wave_height",
+    "prmsl": None,  # isobars, served from the Zarr store on request
+}
+
+
+class QualityCheckFailed(RuntimeError):
+    """The staged run failed a check that blocks publishing."""
+
+
+def step_quality_check(
+    run_id: RunID,
+    forecast_hours: list[int],
+    data_dir: Path,
+    layout: StorageLayout,
+    generated_layers: set[str],
+) -> set[str]:
+    """Check the staged Zarr store; return the layers fit to publish.
+
+    Raises QualityCheckFailed when the grid geometry is wrong, or a core
+    variable (temperature, wind) is missing, has an empty forecast hour or
+    has implausible values. A failing optional variable drops its layer.
+    """
+    logger.info("Quality checks")
+    zarr_path = data_dir / layout.staging_zarr_path(run_id)
+
+    def schema(names) -> ZarrSchema:
+        return ZarrSchema(
+            grid=GridResolution.GFS_025,
+            forecast_hours=tuple(sorted(forecast_hours)),
+            variables={name: PHASE1_VARIABLES[name] for name in names},
+        )
+
+    required = schema(QC_REQUIRED_VARIABLES)
+    problems: list[str] = []
+    # Geometry on the core variables only: ocean-only fields are NaN at the poles.
+    for result in (
+        check_geometry(zarr_path, required),
+        check_completeness(zarr_path, required),
+        check_sanity(zarr_path, required),
+    ):
+        logger.info("  %s", result.summary)
+        problems += [str(issue) for issue in result.issues]
+    if problems:
+        raise QualityCheckFailed("; ".join(problems))
+
+    layers = set(generated_layers)
+    for name, layer in QC_OPTIONAL_VARIABLES.items():
+        optional = schema([name])
+        issues = [*check_completeness(zarr_path, optional).issues, *check_sanity(zarr_path, optional).issues]
+        if not issues:
+            continue
+        if layer in layers:
+            layers.discard(layer)
+            logger.warning("  Dropping layer %s: %s", layer, issues[0])
+        else:
+            logger.warning("  %s unavailable: %s", name, issues[0])
+    return layers
+
+
 def step_write_manifest(
     run_id: RunID,
     forecast_hours: list[int],
@@ -629,6 +699,15 @@ def main() -> None:
         run_id, forecast_hours, data_dir, store, layout, generated_layers,
         tile_formats=tile_formats,
     )
+    try:
+        generated_layers = step_quality_check(
+            run_id, forecast_hours, data_dir, layout, generated_layers,
+        )
+    except QualityCheckFailed as exc:
+        # Not published: the current run stays current, and the next pipeline
+        # run tries this cycle again (NOAA may have finished posting it).
+        logger.error("Run %s failed quality checks; not publishing: %s", run_id, exc)
+        sys.exit(1)
     step_write_manifest(
         run_id, forecast_hours, store, layout, generated_layers,
         model=model, resolution_km=model_config["resolution_km"],
