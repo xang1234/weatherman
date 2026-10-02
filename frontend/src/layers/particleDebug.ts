@@ -27,6 +27,8 @@ export interface WeatherDebugState {
   hour?: number
   /** Opacity last set on the layer. */
   opacity?: number
+  /** Blend towards the next hour actually drawn (0 when not blending). */
+  mix?: number
   /** Frames that redrew the tiles into the offscreen buffer. */
   tilePasses: number
   /** Frames that composited the buffer onto the map. */

@@ -428,6 +428,45 @@ test('wind colour layer and particles fetch each tile once between them', async 
   expect(wind.filter(([, count]) => count > 1)).toEqual([])
 })
 
+test('dragging the forecast slider blends between hours, and settles on release', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Temperature' }).click()
+  const weather = () => page.evaluate(() => {
+    const state = (window as unknown as { __weathermanDebug?: Record<string, { hour?: number; mix?: number }> }).__weathermanDebug
+    return { hour: state?.weather?.hour, mix: state?.weather?.mix ?? 0 }
+  })
+  await expect.poll(async () => (await weather()).hour).toBe(0)
+
+  const slider = page.locator('input[aria-label="Forecast hour"]')
+  const label = page.getByText(/^\w{3}, \w{3} \d{2}, \d{2}:\d{2}$/)
+  const box = (await slider.boundingBox())!
+  const thumb = 8 // half the thumb: the track's ends are inset by it
+  const xAt = (position: number) => box.x + thumb + (position / 2) * (box.width - 2 * thumb)
+
+  // Hours are [0, 3, 6]. Drag to 40 % of the way from hour 0 to hour 3 (#24).
+  await page.mouse.move(xAt(0), box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(xAt(0.4), box.y + box.height / 2, { steps: 5 })
+  await expect.poll(async () => (await weather()).mix).toBeGreaterThan(0.2)
+  const during = await weather()
+  expect(during.hour).toBe(0)
+  expect(during.mix).toBeLessThan(0.6)
+  // The label shows the time in between (about 01:12), not either hour.
+  await expect(label).not.toHaveText(/00:00$|03:00$/)
+
+  await page.mouse.up()
+  await expect(slider).toHaveValue('0')
+  await expect.poll(async () => (await weather()).mix).toBe(0)
+  await expect(label).toHaveText(/00:00$/)
+
+  // Arrow keys still step whole hours.
+  await slider.focus()
+  await page.keyboard.press('ArrowRight')
+  await expect(slider).toHaveValue('1')
+})
+
 test('wave layer stays mounted across visibility toggles', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

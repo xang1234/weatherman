@@ -476,6 +476,7 @@ export class WeatherGLLayer implements CustomLayerInterface {
     // The mix only shows while blending: playback sets it every frame, also
     // while it waits for the next hour, and that must not force a pass.
     const mix = blending ? this._temporalMix : 0
+    this._debug.mix = mix
     if (this._dirty || moved || mix !== this._lastMix || !sameDraws(this._lastDraws, tilesToDraw)) {
       this._dirty = false
       this._lastDraws = tilesToDraw

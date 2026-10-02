@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import { useRef, type CSSProperties } from 'react'
 import { formatForecastDateTime } from '@/utils/format'
 
 export interface ForecastControlsProps {
@@ -8,6 +8,10 @@ export interface ForecastControlsProps {
   isPlaying: boolean
   onChange: (forecastHour: number) => void
   onTogglePlay: () => void
+  /** Slider position while it is dragged: a fractional index into forecastHours. */
+  scrubPosition: number | null
+  /** Called with each position while dragging, and with null on release. */
+  onScrub: (position: number | null) => void
 }
 
 export function ForecastControls({
@@ -17,13 +21,23 @@ export function ForecastControls({
   isPlaying,
   onChange,
   onTogglePlay,
+  scrubPosition,
+  onScrub,
 }: ForecastControlsProps) {
+  const dragging = useRef(false)
   if (forecastHours.length === 0 || forecastHour == null) return null
 
   const index = Math.max(0, forecastHours.indexOf(forecastHour))
   const atStart = index <= 0
   const atEnd = index >= forecastHours.length - 1
-  const currentLabel = formatForecastDateTime(cycleTime, forecastHour)
+  const currentLabel = formatForecastDateTime(cycleTime, hourAt(forecastHours, scrubPosition ?? index))
+
+  /** Release: settle on the nearest forecast hour. */
+  const commit = (position: number) => {
+    dragging.current = false
+    onScrub(null)
+    onChange(forecastHours[Math.round(position)])
+  }
 
   const stepBack = () => {
     if (!atStart) onChange(forecastHours[index - 1])
@@ -59,13 +73,36 @@ export function ForecastControls({
         aria-label="Forecast hour"
         min={0}
         max={forecastHours.length - 1}
-        step={1}
-        value={index}
-        onChange={(e) => onChange(forecastHours[Number(e.target.value)])}
+        // Fine steps while dragging, so the map can blend between hours (#24).
+        step="any"
+        value={scrubPosition ?? index}
+        onPointerDown={() => { dragging.current = true }}
+        onPointerUp={(e) => commit(Number(e.currentTarget.value))}
+        onPointerCancel={(e) => commit(Number(e.currentTarget.value))}
+        onChange={(e) => {
+          const position = Number(e.target.value)
+          if (dragging.current) onScrub(position)
+          else commit(position) // set without a pointer: keyboard, or a test
+        }}
+        onKeyDown={(e) => {
+          // Arrow keys step whole hours rather than the fine drag step.
+          const step = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[e.key]
+          if (step == null) return
+          e.preventDefault()
+          const next = Math.min(forecastHours.length - 1, Math.max(0, index + step))
+          if (next !== index) onChange(forecastHours[next])
+        }}
         style={{ flex: 1, minWidth: 80, accentColor: '#58a6ff' }}
       />
     </div>
   )
+}
+
+/** Forecast hour at a fractional index, interpolated between neighbours. */
+function hourAt(hours: number[], position: number): number {
+  const i = Math.min(Math.floor(position), hours.length - 1)
+  const next = hours[i + 1]
+  return next == null ? hours[i] : hours[i] + (position - i) * (next - hours[i])
 }
 
 const barStyle: CSSProperties = {

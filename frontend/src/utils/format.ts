@@ -15,7 +15,7 @@ export function formatForecastDateTime(
 ): string {
   const cycleDate = cycleTime ? new Date(cycleTime) : null
   if (!cycleDate || Number.isNaN(cycleDate.getTime())) {
-    return `F${forecastHour.toString().padStart(3, '0')}`
+    return `F${Math.round(forecastHour).toString().padStart(3, '0')}`
   }
   const validDate = new Date(cycleDate.getTime() + forecastHour * 60 * 60 * 1000)
   return FORECAST_DATE_FORMATTER.format(validDate)

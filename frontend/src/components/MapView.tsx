@@ -100,6 +100,19 @@ export function MapView() {
   const forecastHourNext = forecastIndex >= 0
     ? forecastHours[(forecastIndex + 1) % forecastHours.length]
     : undefined
+  // While the slider is dragged: its fractional position, shown as the hour
+  // before it blended towards the hour after (#24).
+  const [scrubPosition, setScrubPosition] = useState<number | null>(null)
+  const scrubMix = scrubPosition == null || forecastIndex < 0
+    ? 0
+    : Math.min(1, Math.max(0, scrubPosition - forecastIndex))
+  const handleScrub = (position: number | null) => {
+    setScrubPosition(position)
+    if (position == null) return
+    setIsPlaying(false)
+    const hour = forecastHours[Math.min(Math.floor(position), forecastHours.length - 1)]
+    if (hour !== forecastHour) setSelectedForecastHour(hour)
+  }
   const prefetchForecastHours = forecastIndex >= 0
     ? [
         forecastHours[forecastIndex - 1],
@@ -122,7 +135,7 @@ export function MapView() {
     visible: resolvedLayerId !== null,
     prefetchForecastHours,
     forecastHourNext: isPlaying ? undefined : forecastHourNext,
-    temporalMix: isPlaying ? undefined : 0,
+    temporalMix: isPlaying ? undefined : scrubMix,
   })
 
   // Keep handle and forecastHours in refs so the RAF callback always reads the
@@ -248,6 +261,16 @@ export function MapView() {
   const waveParticlesRef = useRef<WaveParticleHandle>(waveParticles)
   waveParticlesRef.current = waveParticles
 
+  // Dragging the slider blends the particle fields too; otherwise (paused)
+  // they show the selected hour alone, as before.
+  const scrubbing = scrubPosition != null
+  useEffect(() => {
+    if (isPlaying) return
+    const next = scrubbing && forecastHourNext != null ? forecastHourNext : -1
+    windParticlesRef.current.setTemporalBlend?.(next, scrubbing ? scrubMix : 0)
+    waveParticlesRef.current.setTemporalBlend?.(next, scrubbing ? scrubMix : 0)
+  }, [isPlaying, scrubbing, forecastHourNext, scrubMix])
+
   useIsobars({
     map,
     isLoaded,
@@ -326,6 +349,8 @@ export function MapView() {
         isPlaying={isPlaying}
         onChange={setSelectedForecastHour}
         onTogglePlay={() => setIsPlaying((playing) => !playing)}
+        scrubPosition={scrubPosition}
+        onScrub={handleScrub}
       />
       {!isLoaded && (
         <div
