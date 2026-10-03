@@ -108,6 +108,21 @@ def _sample_trajectory(
     n_lon = len(lon_coords)
     use_slab = i_span < n_lon // 2  # if span > half the globe, fall back to column reads
 
+    if not use_slab:
+        corners = sorted({
+            c for p in plans
+            for c in ((p.j0, p.i0), (p.j0, p.i1), (p.j1, p.i0), (p.j1, p.i1))
+        })
+        column = {c: k for k, c in enumerate(corners)}
+        corner_columns = [
+            (column[(p.j0, p.i0)], column[(p.j0, p.i1)], column[(p.j1, p.i0)], column[(p.j1, p.i1)])
+            for p in plans
+        ]
+        # Broadcast to times x corners for the coordinate selection.
+        t_idx = np.arange(n_times)[:, None]
+        corner_j = np.array([j for j, _ in corners])[None, :]
+        corner_i = np.array([i for _, i in corners])[None, :]
+
     ranges: dict[str, Any] = {}
     parameters: dict[str, Any] = {}
 
@@ -139,14 +154,16 @@ def _sample_trajectory(
                 )
                 values[s_idx, :] = blended
         else:
+            # Long or antimeridian routes: one coordinate selection of every
+            # distinct corner, all times. Zarr reads each chunk it touches
+            # once, instead of once per sample corner (#91), and holds only
+            # times x corners values.
+            series = np.asarray(arr.vindex[t_idx, corner_j, corner_i])
             for s_idx, plan in enumerate(plans):
-                v00 = np.asarray(arr[:, plan.j0, plan.i0])
-                v01 = np.asarray(arr[:, plan.j0, plan.i1])
-                v10 = np.asarray(arr[:, plan.j1, plan.i0])
-                v11 = np.asarray(arr[:, plan.j1, plan.i1])
+                c00, c01, c10, c11 = corner_columns[s_idx]
                 values[s_idx, :] = (
-                    v00 * plan.w00 + v01 * plan.w01
-                    + v10 * plan.w10 + v11 * plan.w11
+                    series[:, c00] * plan.w00 + series[:, c01] * plan.w01
+                    + series[:, c10] * plan.w10 + series[:, c11] * plan.w11
                 )
 
         values_list = [

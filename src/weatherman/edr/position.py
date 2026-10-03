@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -164,6 +165,33 @@ class _InterpolationPlan:
     w11: float
 
 
+def _time_selection(time_indices: np.ndarray) -> slice | np.ndarray:
+    """The selected time steps as a slice when they are contiguous (they
+    usually are: one hour, or a range), else as indices."""
+    if len(time_indices) > 0 and np.all(np.diff(time_indices) == 1):
+        return slice(int(time_indices[0]), int(time_indices[-1]) + 1)
+    return time_indices
+
+
+def _read_corners(
+    arr: Any, plan: _InterpolationPlan, times: slice | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The four corner series (v00, v01, v10, v11) at the selected times.
+
+    One 2x2 read, so each chunk is read once rather than once per corner
+    (#91). Across the antimeridian (i0 the last column, i1 the first) two
+    one-column reads instead — never a slice across the whole world.
+    """
+    rows = slice(plan.j0, plan.j1 + 1)  # j1 is always j0 + 1
+    if plan.i1 == plan.i0 + 1:
+        block = np.asarray(arr.oindex[times, rows, plan.i0:plan.i1 + 1])
+        left, right = block[:, :, 0], block[:, :, 1]
+    else:
+        left = np.asarray(arr.oindex[times, rows, plan.i0:plan.i0 + 1])[:, :, 0]
+        right = np.asarray(arr.oindex[times, rows, plan.i1:plan.i1 + 1])[:, :, 0]
+    return left[:, 0], right[:, 0], left[:, 1], right[:, 1]
+
+
 def _build_interpolation_plan(
     lat_coords: np.ndarray,
     lon_coords: np.ndarray,
@@ -304,6 +332,9 @@ class EDRService:
         self._catalog_loader = catalog_loader
         self._zarr_opener = zarr_opener
         self._point_cache: OrderedDict[tuple[object, ...], _InterpolationPlan] = OrderedDict()
+        # Requests run in FastAPI's threadpool: guards the cache's dict
+        # operations only, never a Zarr read.
+        self._point_cache_lock = threading.Lock()
 
     def _point_cache_key(
         self,
@@ -339,15 +370,18 @@ class EDRService:
     ) -> tuple[_InterpolationPlan, bool]:
         """Return a cached interpolation plan for a point, or build one."""
         key = self._point_cache_key(model, run_id, lat_coords, lon_coords, lat, lon)
-        cached = self._point_cache.get(key)
-        if cached is not None:
-            self._point_cache.move_to_end(key)
-            return cached, True
+        with self._point_cache_lock:
+            cached = self._point_cache.get(key)
+            if cached is not None:
+                self._point_cache.move_to_end(key)
+                return cached, True
 
         plan = _build_interpolation_plan(lat_coords, lon_coords, lat, lon)
-        self._point_cache[key] = plan
-        if len(self._point_cache) > _POINT_CACHE_SIZE:
-            self._point_cache.popitem(last=False)
+        with self._point_cache_lock:
+            self._point_cache[key] = plan
+            self._point_cache.move_to_end(key)
+            while len(self._point_cache) > _POINT_CACHE_SIZE:
+                self._point_cache.popitem(last=False)
         return plan, False
 
     def resolve_run_id(self, model: str, run_id_or_latest: str) -> RunID:
@@ -466,7 +500,7 @@ class EDRService:
         parameters: dict[str, list[float | None]] = {}
         variable_metadata: dict[str, dict[str, str]] = {}
 
-        time_indices = np.where(time_mask)[0]
+        times = _time_selection(np.where(time_mask)[0])
 
         for var_name in query_vars:
             arr = root[var_name]
@@ -475,10 +509,7 @@ class EDRService:
                 "units": str(arr.attrs.get("units", "")),
             }
 
-            v00 = np.asarray(arr[:, plan.j0, plan.i0])[time_mask]
-            v01 = np.asarray(arr[:, plan.j0, plan.i1])[time_mask]
-            v10 = np.asarray(arr[:, plan.j1, plan.i0])[time_mask]
-            v11 = np.asarray(arr[:, plan.j1, plan.i1])[time_mask]
+            v00, v01, v10, v11 = _read_corners(arr, plan, times)
             blended = (
                 v00 * plan.w00
                 + v01 * plan.w01
@@ -550,7 +581,7 @@ def get_edr_service() -> EDRService:
     "/collections/{model}/instances/{run_id}/position",
     summary="EDR position query — point forecast time-series",
 )
-async def edr_position(
+def edr_position(
     model: str,
     run_id: str,
     coords: Annotated[
@@ -578,6 +609,9 @@ async def edr_position(
     svc: EDRService = Depends(get_edr_service),
 ) -> Response:
     """Return a CoverageJSON time-series at the given point.
+
+    A plain ``def``: FastAPI runs it in its threadpool, so the Zarr reads do
+    not hold up the event loop (#91).
 
     Supports 'latest' as run_id to resolve to the current published run.
     Responses include ETag and Cache-Control headers for HTTP caching.
