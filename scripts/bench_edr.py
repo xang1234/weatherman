@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import statistics
 import subprocess
@@ -56,7 +57,8 @@ class CountingStore(zarr.storage.WrapperStore):
 
 def _stats(ms: list[float]) -> dict[str, float]:
     s = sorted(ms)
-    return {"n": len(s), "median_ms": round(statistics.median(s), 2), "p95_ms": round(s[int(0.95 * (len(s) - 1))], 2)}
+    p95 = s[max(0, math.ceil(0.95 * len(s)) - 1)]  # nearest rank
+    return {"n": len(s), "median_ms": round(statistics.median(s), 2), "p95_ms": round(p95, 2)}
 
 
 def reads(args: argparse.Namespace) -> None:
@@ -75,6 +77,8 @@ def reads(args: argparse.Namespace) -> None:
     svc = EDRService(lambda _m: catalog, opener)
 
     def run(name: str, fn, reps: int) -> None:
+        if args.cases and args.cases not in name:
+            return
         for _ in range(args.warmup):
             fn()
         times, chunks = [], []
@@ -138,6 +142,7 @@ def main() -> None:
     r.add_argument("--reps", type=int, default=30)
     r.add_argument("--traj-reps", type=int, default=5, help="trajectories are slow before #91: a 200-sample transpacific one is about a minute")
     r.add_argument("--warmup", type=int, default=3)
+    r.add_argument("--cases", help="only the cases whose name contains this, e.g. 'position'")
     r.add_argument("--label", default="")
     h = sub.add_parser("http")
     h.add_argument("--url", default="http://localhost:8000")
