@@ -81,9 +81,20 @@ export function useHoverProbe({
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     let currentController: AbortController | null = null
     let isDragging = false
+    // Pointer handling runs once per animation frame, on the latest move:
+    // the mouse can report several moves per frame (#94).
+    let frame = 0
+    let latest: maplibregl.MapMouseEvent | null = null
+
+    function cancelFrame() {
+      if (frame) cancelAnimationFrame(frame)
+      frame = 0
+      latest = null
+    }
 
     function onDragStart() {
       isDragging = true
+      cancelFrame()
       if (debounceTimer) {
         clearTimeout(debounceTimer)
         debounceTimer = null
@@ -97,6 +108,7 @@ export function useHoverProbe({
     }
 
     function clearProbe() {
+      cancelFrame()
       if (debounceTimer) {
         clearTimeout(debounceTimer)
         debounceTimer = null
@@ -108,6 +120,15 @@ export function useHoverProbe({
     }
 
     function onMouseMove(e: maplibregl.MapMouseEvent) {
+      latest = e
+      if (!frame) frame = requestAnimationFrame(onFrame)
+    }
+
+    function onFrame() {
+      const e = latest
+      frame = 0
+      latest = null
+      if (!e) return
       if (disabledRef.current || isDragging) {
         clearProbe()
         return
@@ -208,6 +229,7 @@ export function useHoverProbe({
       activeMap.off('dragend', onDragEnd)
       activeMap.off('zoomstart', onDragStart)
       activeMap.off('zoomend', onDragEnd)
+      cancelFrame()
       if (debounceTimer) clearTimeout(debounceTimer)
       currentController?.abort()
     }

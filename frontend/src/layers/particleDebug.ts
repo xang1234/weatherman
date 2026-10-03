@@ -40,6 +40,8 @@ export interface WeatherDebugState {
 }
 
 interface ParticleDebugRoot {
+  ui?: UiDebugState
+  voyage?: VoyageDebugState
   wind?: ParticleDebugState
   wave?: ParticleDebugState
   weather?: WeatherDebugState
@@ -52,6 +54,30 @@ export interface TileDebugState {
   fetches: Record<string, number>
   /** Pending requests withdrawn because their dataset became obsolete (#92). */
   withdrawn: number
+}
+
+/** React work in the map view (#94). */
+export interface UiDebugState {
+  /** Commits of MapView. */
+  mapViewCommits: number
+}
+
+export function ensureUiDebugState(): UiDebugState {
+  const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
+  const root = (globalWithDebug.__weathermanDebug ??= {})
+  return (root.ui ??= { mapViewCommits: 0 })
+}
+
+/** The voyage panel's heatmap (#94). */
+export interface VoyageDebugState {
+  /** Times the grid of heatmap cells was built. */
+  gridBuilds: number
+}
+
+export function ensureVoyageDebugState(): VoyageDebugState {
+  const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
+  const root = (globalWithDebug.__weathermanDebug ??= {})
+  return (root.voyage ??= { gridBuilds: 0 })
 }
 
 /** What the isobar overlay last put on the map. */

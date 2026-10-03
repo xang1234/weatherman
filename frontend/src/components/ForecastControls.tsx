@@ -1,4 +1,4 @@
-import { useRef, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { formatForecastDateTime } from '@/utils/format'
 
 export interface ForecastControlsProps {
@@ -8,9 +8,11 @@ export interface ForecastControlsProps {
   isPlaying: boolean
   onChange: (forecastHour: number) => void
   onTogglePlay: () => void
-  /** Slider position while it is dragged: a fractional index into forecastHours. */
-  scrubPosition: number | null
-  /** Called with each position while dragging, and with null on release. */
+  /**
+   * Called while dragging with the slider's position, a fractional index
+   * into forecastHours — at most once per animation frame — and with null
+   * on release.
+   */
   onScrub: (position: number | null) => void
 }
 
@@ -21,10 +23,15 @@ export function ForecastControls({
   isPlaying,
   onChange,
   onTogglePlay,
-  scrubPosition,
   onScrub,
 }: ForecastControlsProps) {
   const dragging = useRef(false)
+  // The live drag position is this component's alone: each input re-renders
+  // the slider and its label, and the map hears of it once a frame (#94).
+  const [scrubPosition, setScrubPosition] = useState<number | null>(null)
+  const frame = useRef(0)
+  const latest = useRef(0)
+  useEffect(() => () => cancelAnimationFrame(frame.current), [])
   if (forecastHours.length === 0 || forecastHour == null) return null
 
   const index = Math.max(0, forecastHours.indexOf(forecastHour))
@@ -35,6 +42,9 @@ export function ForecastControls({
   /** Release: settle on the nearest forecast hour. */
   const commit = (position: number) => {
     dragging.current = false
+    cancelAnimationFrame(frame.current)
+    frame.current = 0
+    setScrubPosition(null)
     onScrub(null)
     onChange(forecastHours[Math.round(position)])
   }
@@ -81,8 +91,18 @@ export function ForecastControls({
         onPointerCancel={(e) => commit(Number(e.currentTarget.value))}
         onChange={(e) => {
           const position = Number(e.target.value)
-          if (dragging.current) onScrub(position)
-          else commit(position) // set without a pointer: keyboard, or a test
+          if (!dragging.current) {
+            commit(position) // set without a pointer: keyboard, or a test
+            return
+          }
+          setScrubPosition(position)
+          latest.current = position
+          if (!frame.current) {
+            frame.current = requestAnimationFrame(() => {
+              frame.current = 0
+              onScrub(latest.current)
+            })
+          }
         }}
         onKeyDown={(e) => {
           // Arrow keys step whole hours rather than the fine drag step.
