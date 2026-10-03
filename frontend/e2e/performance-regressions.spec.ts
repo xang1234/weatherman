@@ -254,6 +254,34 @@ test('wind particle count follows the viewport area, not the pixel density', asy
   expect(await drawn(400, 320, 1)).toBe(512)
 })
 
+test('particle trails are drawn at CSS resolution and follow a resize (#93)', async ({ browser }) => {
+  const { baseURL } = test.info().project.use
+  type Trail = { trailWidth?: number; trailHeight?: number; trailPixelRatio?: number }
+  const trail = (page: Page, layer: 'wind' | 'wave', width: number) =>
+    page.waitForFunction(({ layer, width }) => {
+      const debugState = (window as unknown as { __weathermanDebug?: Record<string, Trail | undefined> }).__weathermanDebug
+      const state = debugState?.[layer]
+      return state?.trailWidth === width ? state : undefined
+    }, { layer, width }).then((h) => h.jsonValue() as Promise<Trail>)
+
+  for (const deviceScaleFactor of [1, 2]) {
+    const page = await browser.newPage({ baseURL, viewport: { width: 640, height: 400 }, deviceScaleFactor })
+    await mockPerformanceRoutes(page)
+    await page.goto('/')
+    await expect(page.locator('button').filter({ hasText: 'Wave Height' })).toBeVisible({ timeout: 10_000 })
+    await page.locator('button').filter({ hasText: 'Wave Height' }).click()
+    await page.getByLabel('Wind particles', { exact: true }).check()
+
+    // CSS pixels, whatever the pixel density: a quarter of the device pixels at DPR 2.
+    for (const layer of ['wind', 'wave'] as const) {
+      expect(await trail(page, layer, 640)).toMatchObject({ trailWidth: 640, trailHeight: 400, trailPixelRatio: 1 })
+    }
+    await page.setViewportSize({ width: 500, height: 300 })
+    expect(await trail(page, 'wind', 500)).toMatchObject({ trailWidth: 500, trailHeight: 300 })
+    await page.close()
+  }
+})
+
 test('overlays: wind particles over temperature, each layer with its own opacity', async ({ page }) => {
   await mockPerformanceRoutes(page)
   await page.goto('/')

@@ -110,8 +110,8 @@ export class WaveParticleLayer extends ParticleLayer {
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, frame.state)
     gl.uniform1i(u('u_stateTex'), 0)
-    // gl_PointSize is in device pixels; POINT_SIZE, like the grid, is in CSS pixels.
-    gl.uniform1f(u('u_pointSize'), POINT_SIZE * frame.pixelRatio)
+    // gl_PointSize is in trail pixels; POINT_SIZE, like the grid, is in CSS pixels.
+    gl.uniform1f(u('u_pointSize'), POINT_SIZE * frame.trailPixelRatio)
     gl.uniform1f(u('u_speedMax'), SPEED_MAX)
     gl.uniformMatrix4fv(u('u_matrix'), false, frame.mercatorMatrix)
 
