@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { ensureVoyageDebugState } from '@/layers/particleDebug'
 import type { CSSProperties } from 'react'
 import type { VoyageCorridorState } from '@/hooks/useVoyageCorridor'
 import type { VoyageRouteState } from '@/hooks/useVoyageRoute'
@@ -49,7 +50,7 @@ export function VoyageWeatherPanel({
     return layers.find((l) => l.id === layerId) ?? null
   }, [activeVar, layers])
 
-  const colorStops = layerConfig?.color_stops ?? []
+  const colorStops = layerConfig?.color_stops ?? NO_COLOR_STOPS
   const vMin = layerConfig?.value_range.min ?? 0
   const vMax = layerConfig?.value_range.max ?? 1
 
@@ -115,6 +116,12 @@ export function VoyageWeatherPanel({
   )
 }
 
+/** One empty list for every render, so the heatmap's memoized cells hold (#94). */
+const NO_COLOR_STOPS: { position: number; color: [number, number, number] }[] = []
+
+const HEATMAP_PAD_L = 40
+const HEATMAP_PAD_T = 20
+
 function Heatmap({
   values,
   times,
@@ -137,20 +144,32 @@ function Heatmap({
   const nSamples = values.length
   const nTimes = times.length
 
+  const cellW = Math.max(6, Math.min(12, 280 / Math.max(1, nSamples)))
+  const cellH = Math.max(8, Math.min(16, 200 / Math.max(1, nTimes)))
+
+  // The cells (up to 40 x 41) change only with the data: built once, they
+  // are left alone when only the selected hour, and its line, moves (#94).
   // useMemo must be called before any early returns (React hooks rules)
-  const colorGrid = useMemo(() =>
-    values.map((row) => row.map((val) => valueToColor(val, vMin, vMax, colorStops))),
-    [values, vMin, vMax, colorStops],
-  )
+  const cells = useMemo(() => {
+    ensureVoyageDebugState().gridBuilds += 1
+    return values.map((row, sIdx) => row.map((val, tIdx) => (
+      <rect
+        key={`${sIdx}-${tIdx}`}
+        x={HEATMAP_PAD_L + sIdx * cellW}
+        y={HEATMAP_PAD_T + tIdx * cellH}
+        width={cellW}
+        height={cellH}
+        fill={valueToColor(val, vMin, vMax, colorStops)}
+      />
+    )))
+  }, [values, vMin, vMax, colorStops, cellW, cellH])
 
   if (nSamples === 0 || nTimes === 0) return null
 
-  const padL = 40
+  const padL = HEATMAP_PAD_L
   const padR = 8
-  const padT = 20
+  const padT = HEATMAP_PAD_T
   const padB = 30
-  const cellW = Math.max(6, Math.min(12, 280 / nSamples))
-  const cellH = Math.max(8, Math.min(16, 200 / nTimes))
   const gridW = nSamples * cellW
   const gridH = nTimes * cellH
   const width = padL + gridW + padR
@@ -178,18 +197,7 @@ function Heatmap({
       style={{ width: '100%', height: 'auto', borderRadius: 8, background: 'rgba(22, 27, 34, 0.9)' }}
     >
       {/* Heatmap cells */}
-      {colorGrid.map((row, sIdx) =>
-        row.map((fill, tIdx) => (
-          <rect
-            key={`${sIdx}-${tIdx}`}
-            x={padL + sIdx * cellW}
-            y={padT + tIdx * cellH}
-            width={cellW}
-            height={cellH}
-            fill={fill}
-          />
-        )),
-      )}
+      {cells}
 
       {/* Forecast hour highlight line */}
       {highlightedTimeIdx >= 0 && (

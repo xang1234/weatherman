@@ -1,5 +1,5 @@
-import type { CSSProperties } from 'react'
-import type { HoverProbeState } from '@/hooks/useHoverProbe'
+import { memo, type CSSProperties } from 'react'
+import { useHoverProbe, type HoverProbeState, type UseHoverProbeOptions } from '@/hooks/useHoverProbe'
 import type { CoverageParameter } from '@/types/edr'
 import { formatForecastDateTime, formatLatLon, formatWithUnit } from '@/utils/format'
 
@@ -11,6 +11,17 @@ export interface WeatherHoverHudProps {
   /** Preferred variable to show first + emphasized (the currently active map layer). */
   activeVariable: string | null
 }
+
+/**
+ * The hover probe and its HUD. The probe's state changes with every pointer
+ * move, so it lives here: a move re-renders this, not the whole map view (#94).
+ */
+export const HoverProbeOverlay = memo(function HoverProbeOverlay({
+  map, isLoaded, model, runId, disabled, ...hud
+}: UseHoverProbeOptions & Omit<WeatherHoverHudProps, 'probe'>) {
+  const probe = useHoverProbe({ map, isLoaded, model, runId, disabled })
+  return <WeatherHoverHud probe={probe} {...hud} />
+})
 
 /**
  * Cursor-following readout of weather values at the hovered point for the

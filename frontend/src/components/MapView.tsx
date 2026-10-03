@@ -5,7 +5,6 @@ import { useDataAge } from '@/hooks/useDataAge'
 import { useLatestAISSnapshot } from '@/hooks/useLatestAISSnapshot'
 import { useManifest } from '@/hooks/useManifest'
 import { useWeatherInspector } from '@/hooks/useWeatherInspector'
-import { useHoverProbe } from '@/hooks/useHoverProbe'
 import { useWeatherLayer, type WeatherLayerHandle } from '@/hooks/useWeatherLayer'
 import { useAISLayer } from '@/hooks/useAISLayer'
 import { useVesselPopup } from '@/hooks/useVesselPopup'
@@ -23,7 +22,8 @@ import { ModelSelector, type ModelId } from '@/components/ModelSelector'
 import { VoyageDrawButton } from '@/components/VoyageDrawButton'
 import { VoyageWeatherPanel } from '@/components/VoyageWeatherPanel'
 import { WeatherInspector } from '@/components/WeatherInspector'
-import { WeatherHoverHud } from '@/components/WeatherHoverHud'
+import { HoverProbeOverlay } from '@/components/WeatherHoverHud'
+import { ensureUiDebugState } from '@/layers/particleDebug'
 import type { DataRanges, LayerConfig } from '@/types/manifest'
 
 const EMPTY_LAYERS: LayerConfig[] = []
@@ -108,18 +108,41 @@ export function MapView() {
   const forecastHourNext = forecastIndex >= 0
     ? forecastHours[(forecastIndex + 1) % forecastHours.length]
     : undefined
-  // While the slider is dragged: its fractional position, shown as the hour
-  // before it blended towards the hour after (#24).
-  const [scrubPosition, setScrubPosition] = useState<number | null>(null)
-  const scrubMix = scrubPosition == null || forecastIndex < 0
-    ? 0
-    : Math.min(1, Math.max(0, scrubPosition - forecastIndex))
+  // While the slider is dragged, the map shows the hour before its
+  // fractional position blended towards the hour after (#24). The position
+  // stays in ForecastControls, which hands it over once per animation frame:
+  // the layers are blended directly, and React only hears of the drag
+  // starting and ending and of each hour it crosses (#94).
+  const [scrubbing, setScrubbing] = useState(false)
+  /** Position to blend to once the layers have taken the hour it crossed into. */
+  const pendingScrubRef = useRef<number | null>(null)
+  const forecastHourRef = useRef(forecastHour)
+  forecastHourRef.current = forecastHour
+  const applyScrub = (position: number) => {
+    const hours = forecastHoursRef.current
+    const index = Math.min(Math.floor(position), hours.length - 1)
+    const next = hours[index + 1] ?? -1
+    const mix = next < 0 ? 0 : Math.min(1, Math.max(0, position - index))
+    handleRef.current.setTemporalBlend?.(next, mix)
+    windParticlesRef.current.setTemporalBlend?.(next, mix)
+    waveParticlesRef.current.setTemporalBlend?.(next, mix)
+  }
   const handleScrub = (position: number | null) => {
-    setScrubPosition(position)
-    if (position == null) return
+    if (position == null) {
+      pendingScrubRef.current = null
+      setScrubbing(false)
+      return
+    }
+    setScrubbing(true)
     setIsPlaying(false)
-    const hour = forecastHours[Math.min(Math.floor(position), forecastHours.length - 1)]
-    if (hour !== forecastHour) setSelectedForecastHour(hour)
+    const hours = forecastHoursRef.current
+    const hour = hours[Math.min(Math.floor(position), hours.length - 1)]
+    if (hour !== forecastHourRef.current) {
+      pendingScrubRef.current = position
+      setSelectedForecastHour(hour)
+    } else {
+      applyScrub(position)
+    }
   }
   const prefetchForecastHours = forecastIndex >= 0
     ? [
@@ -143,7 +166,8 @@ export function MapView() {
     visible: resolvedLayerId !== null,
     prefetchForecastHours,
     forecastHourNext: isPlaying ? undefined : forecastHourNext,
-    temporalMix: isPlaying ? undefined : scrubMix,
+    // The blend itself is set directly, while dragging (see applyScrub).
+    temporalMix: 0,
     dataRanges,
   })
 
@@ -274,15 +298,20 @@ export function MapView() {
   const waveParticlesRef = useRef<WaveParticleHandle>(waveParticles)
   waveParticlesRef.current = waveParticles
 
-  // Dragging the slider blends the particle fields too; otherwise (paused)
-  // they show the selected hour alone, as before.
-  const scrubbing = scrubPosition != null
+  // After the layers' own effects (declared above, so run first): while
+  // dragging, blend to a position that crossed into a new hour now that they
+  // have it; otherwise (paused) each shows the selected hour alone.
   useEffect(() => {
     if (isPlaying) return
-    const next = scrubbing && forecastHourNext != null ? forecastHourNext : -1
-    windParticlesRef.current.setTemporalBlend?.(next, scrubbing ? scrubMix : 0)
-    waveParticlesRef.current.setTemporalBlend?.(next, scrubbing ? scrubMix : 0)
-  }, [isPlaying, scrubbing, forecastHourNext, scrubMix])
+    if (scrubbing) {
+      if (pendingScrubRef.current != null) applyScrub(pendingScrubRef.current)
+      pendingScrubRef.current = null
+      return
+    }
+    handleRef.current.setTemporalBlend?.(forecastHourNext ?? -1, 0)
+    windParticlesRef.current.setTemporalBlend?.(-1, 0)
+    waveParticlesRef.current.setTemporalBlend?.(-1, 0)
+  }, [isPlaying, scrubbing, forecastHour, forecastHourNext])
 
   useIsobars({
     map,
@@ -310,13 +339,10 @@ export function MapView() {
     runId,
     disabled: voyageRoute.isDrawing,
   })
-  const hoverProbe = useHoverProbe({
-    map,
-    isLoaded,
-    model,
-    runId,
-    disabled: voyageRoute.isDrawing || inspector.point !== null,
-  })
+
+  // Counts this component's commits, for the e2e suite: hovering and
+  // dragging the slider should cause hardly any (#94).
+  useEffect(() => { ensureUiDebugState().mapViewCommits += 1 })
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -324,8 +350,12 @@ export function MapView() {
       <ModelSelector model={model} onChange={setModel} />
       {dataAge && <DataAgeIndicator state={dataAge} />}
       <WeatherInspector inspector={inspector} forecastHour={forecastHour} cycleTime={manifest?.cycle_time ?? null} />
-      <WeatherHoverHud
-        probe={hoverProbe}
+      <HoverProbeOverlay
+        map={map}
+        isLoaded={isLoaded}
+        model={model}
+        runId={runId}
+        disabled={voyageRoute.isDrawing || inspector.point !== null}
         forecastHour={forecastHour}
         cycleTime={manifest?.cycle_time ?? null}
         activeVariable={resolvedLayerId}
@@ -362,7 +392,6 @@ export function MapView() {
         isPlaying={isPlaying}
         onChange={setSelectedForecastHour}
         onTogglePlay={() => setIsPlaying((playing) => !playing)}
-        scrubPosition={scrubPosition}
         onScrub={handleScrub}
       />
       {!isLoaded && (

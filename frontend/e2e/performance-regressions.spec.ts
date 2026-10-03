@@ -200,6 +200,89 @@ test('the weather tile pass does not rerun on a steady view while particles anim
   await expect.poll(async () => (await weatherCounters()).tilePasses).toBeGreaterThan(steadyEnd.tilePasses)
 })
 
+const mapViewCommits = (page: Page) => page.evaluate(() =>
+  (window as unknown as { __weathermanDebug?: { ui?: { mapViewCommits: number } } }).__weathermanDebug?.ui?.mapViewCommits ?? 0)
+
+test('hovering and dragging the forecast slider leave the map view alone (#94)', async ({ page }) => {
+  test.setTimeout(60_000) // each move waits for a SwiftShader frame
+  await mockPerformanceRoutes(page)
+  await page.route('**/v1/edr/**/position**', (route) => route.fulfill({ status: 404 }))
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  // A pointer sweep: the hover pill follows, the map view does not re-render.
+  const box = (await page.locator('canvas.maplibregl-canvas').boundingBox())!
+  const beforeSweep = await mapViewCommits(page)
+  for (let i = 0; i < 30; i++) {
+    await page.mouse.move(box.x + box.width * (0.3 + 0.4 * (i / 30)), box.y + box.height * (0.4 + 0.1 * Math.sin(i / 3)))
+  }
+  await expect(page.getByText(/\d°[NS]/).first()).toBeVisible()
+  expect(await mapViewCommits(page) - beforeSweep).toBeLessThanOrEqual(2)
+
+  // A dense drag to between hours 3 and 6: the colour layer blends, while
+  // the map view commits only at the start and at the hour crossed.
+  const slider = page.locator('input[aria-label="Forecast hour"]')
+  const track = (await slider.boundingBox())!
+  const y = track.y + track.height / 2
+  const beforeDrag = await mapViewCommits(page)
+  await page.mouse.move(track.x + 4, y)
+  await page.mouse.down()
+  for (let i = 1; i <= 25; i++) await page.mouse.move(track.x + 4 + (track.width - 8) * 0.75 * (i / 25), y)
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __weathermanDebug: { weather: { hour?: number; mix?: number } } }).__weathermanDebug.weather),
+  ).toMatchObject({ hour: 3, mix: expect.closeTo(0.5, 1) })
+  expect(await mapViewCommits(page) - beforeDrag).toBeLessThanOrEqual(4)
+
+  // Release settles on the nearest hour, unblended.
+  await page.mouse.up()
+  await expect(slider).toHaveValue('2')
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __weathermanDebug: { weather: { hour?: number; mix?: number } } }).__weathermanDebug.weather),
+  ).toMatchObject({ hour: 6, mix: 0 })
+})
+
+test('moving the forecast hour moves the voyage heatmap line, not its cells (#94)', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  const samples = 40
+  const hours = MANIFEST_RESPONSE.forecast_hours
+  await page.route('**/v1/edr/collections/gfs/instances/*/trajectory', (route) => route.fulfill({
+    json: {
+      type: 'Coverage',
+      domain: { axes: { composite: { values: Array.from({ length: samples }, (_, i) => [i, 0]) }, t: { values: hours } } },
+      parameters: { tmp_2m: { type: 'Parameter', observedProperty: { label: { en: 'Temperature' } }, unit: { symbol: 'C' } } },
+      ranges: {
+        tmp_2m: {
+          type: 'NdArray', dataType: 'float', axisNames: ['composite', 't'], shape: [samples, hours.length],
+          values: Array.from({ length: samples }, (_, i) => hours.map((h) => i - 20 + h)),
+        },
+      },
+      route: { distances_nm: Array.from({ length: samples }, (_, i) => i * 10), total_nm: (samples - 1) * 10 },
+    },
+  }))
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Draw Route' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Draw Route' }).click()
+  const box = (await page.locator('canvas.maplibregl-canvas').boundingBox())!
+  for (const [fx, fy] of [[0.35, 0.5], [0.5, 0.45], [0.65, 0.5]]) {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy)
+  }
+  await page.locator('button').filter({ hasText: /^Done/ }).click()
+  const cells = page.locator('svg rect')
+  await expect(cells).toHaveCount(samples * hours.length)
+
+  const state = () => page.evaluate(() => ({
+    builds: (window as unknown as { __weathermanDebug: { voyage: { gridBuilds: number } } }).__weathermanDebug.voyage.gridBuilds,
+    line: document.querySelector('svg line')?.getAttribute('y1') ?? null,
+  }))
+  const before = await state()
+  await page.locator('button').filter({ hasText: '❯' }).click()
+  await expect.poll(async () => (await state()).line).not.toBe(before.line)
+  expect((await state()).builds).toBe(before.builds)
+  await expect(cells).toHaveCount(samples * hours.length)
+})
+
 test('weather is drawn while the basemap is still loading', async ({ page }) => {
   await mockPerformanceRoutes(page)
   // Basemap tiles that never arrive used to hold the whole app behind
