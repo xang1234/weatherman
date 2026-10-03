@@ -200,6 +200,55 @@ test('the weather tile pass does not rerun on a steady view while particles anim
   await expect.poll(async () => (await weatherCounters()).tilePasses).toBeGreaterThan(steadyEnd.tilePasses)
 })
 
+test('a settled view skips tile preparation while particles animate (#96)', async ({ page }) => {
+  await mockPerformanceRoutes(page)
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  const counters = () => page.evaluate(() => {
+    const d = (window as unknown as { __weathermanDebug: Record<string, Record<string, number>> }).__weathermanDebug
+    return {
+      prep: { weather: d.weather.preparations, wind: d.wind.preparations, windAtlas: d.wind.atlasLayouts },
+      composites: d.weather.composites,
+    }
+  })
+  // Settled: no preparation for 500 ms (tile arrivals and the like are done).
+  await expect.poll(async () => {
+    const before = await counters()
+    await page.waitForTimeout(500)
+    return JSON.stringify((await counters()).prep) === JSON.stringify(before.prep)
+  }, { timeout: 15_000 }).toBe(true)
+
+  // An idle window: the particles keep the map repainting (the colour layer
+  // composites every frame), but nothing is prepared again.
+  const start = await counters()
+  await page.waitForTimeout(1_500)
+  const end = await counters()
+  expect(end.composites - start.composites).toBeGreaterThan(5)
+  expect(end.prep).toEqual(start.prep)
+
+  // A move within the same tiles still prepares again (pan prefetch, viewport).
+  const canvas = page.locator('canvas.maplibregl-canvas')
+  const box = (await canvas.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 15, box.y + box.height / 2 + 10, { steps: 3 })
+  await page.mouse.up()
+  await expect.poll(async () => (await counters()).prep.weather).toBeGreaterThan(end.prep.weather)
+  expect((await counters()).prep.wind).toBeGreaterThan(end.prep.wind)
+
+  // So does a zoom, which ends fully drawn at the new level.
+  const beforeZoom = await counters()
+  await page.mouse.wheel(0, -400)
+  await expect.poll(async () => (await counters()).prep.windAtlas).toBeGreaterThan(beforeZoom.prep.windAtlas)
+  await page.waitForFunction(() => {
+    const w = (window as unknown as { __weathermanDebug?: { weather?: { drawn: number; fallback: number } } }).__weathermanDebug?.weather
+    return Boolean(w && w.drawn > 0 && w.fallback === 0)
+  }, undefined, { timeout: 10_000 })
+})
+
 test('weather is drawn while the basemap is still loading', async ({ page }) => {
   await mockPerformanceRoutes(page)
   // Basemap tiles that never arrive used to hold the whole app behind

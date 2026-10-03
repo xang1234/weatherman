@@ -130,6 +130,15 @@ export class TileManager {
    */
   private _withdrawDue = false
 
+  /**
+   * Bumped on every change a draw could see: dataset switch, fetch start,
+   * arrival, error, retry, withdrawal, eviction, stand-in dropped or expired.
+   * Layers cache their per-frame preparation against it (#96).
+   */
+  private _revision = 0
+  /** Earliest retry or stand-in deadline still ahead; tick() bumps the revision there. */
+  private _dueAt = Infinity
+
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
 
@@ -191,6 +200,7 @@ export class TileManager {
       const shown = previous != null && [...previous.tiles.values()].some((t) => t.state === 'loaded')
       this._staleKey = shown ? this._datasetKey(previous.config) : null
       this._staleUntil = performance.now() + STALE_FALLBACK_MS
+      if (this._staleKey) this._dueAt = Math.min(this._dueAt, this._staleUntil)
     }
     // Otherwise a stand-in is still up (rapid scrubbing A→B→C with B not yet
     // loaded): A is what the user is looking at, so keep it rather than
@@ -201,6 +211,29 @@ export class TileManager {
     this._forecastHour = forecastHour
     this._ensureCurrentState()
     this._withdrawDue = true
+    this._revision++
+  }
+
+  /** Changes with anything a draw from this manager could show (#96). */
+  get revision(): number {
+    return this._revision
+  }
+
+  /**
+   * Bump the revision if a retry or the stand-in's time limit has come due
+   * since, so a cached preparation is redone then. Call once per frame
+   * before reading `revision`.
+   */
+  tick(now = performance.now()): void {
+    if (now < this._dueAt) return
+    this._revision++
+    let next = this._staleKey && this._staleUntil > now ? this._staleUntil : Infinity
+    for (const state of this._datasets.values()) {
+      for (const entry of state.tiles.values()) {
+        if (entry.retryAt != null && entry.retryAt > now) next = Math.min(next, entry.retryAt)
+      }
+    }
+    this._dueAt = next
   }
 
   /**
@@ -273,6 +306,7 @@ export class TileManager {
 
   /** Forget the replaced dataset — call once the current one has taken over. */
   dropStale(): void {
+    if (this._staleKey) this._revision++
     this._staleKey = null
   }
 
@@ -341,6 +375,7 @@ export class TileManager {
     this._datasets.clear()
     this._staleKey = null
     this._accessCounter = 0
+    this._revision++
   }
 
   /** Release all GL resources. Call when done with this manager. */
@@ -424,6 +459,7 @@ export class TileManager {
   private _markLoaded(state: DatasetState, key: string, texture: WebGLTexture, url?: string): void {
     state.failures.delete(key)
     state.tiles.set(key, { key, texture, url, state: 'loaded', lastAccess: ++this._accessCounter })
+    this._revision++
     this._notifyTileLoaded(state, key)
   }
 
@@ -435,13 +471,16 @@ export class TileManager {
     const failures = (state.failures.get(key) ?? 0) + 1
     state.failures.set(key, failures)
     const delay = RETRY_DELAYS_MS[Math.min(failures, RETRY_DELAYS_MS.length) - 1]
+    const retryAt = performance.now() + delay
     state.tiles.set(key, {
       key,
       texture,
       state: 'error',
       lastAccess: ++this._accessCounter,
-      retryAt: performance.now() + delay,
+      retryAt,
     })
+    this._revision++
+    this._dueAt = Math.min(this._dueAt, retryAt)
     setTimeout(() => this._requestRender?.(), delay)
   }
 
@@ -451,6 +490,7 @@ export class TileManager {
   }
 
   private _fetchTile(state: DatasetState, z: number, x: number, y: number, priority: TilePriority = 0): void {
+    this._revision++ // now pending
     if (this._fetchClient) {
       this._fetchTileViaWorker(state, z, x, y, priority)
     } else if (this._format === 'f16') {
@@ -660,6 +700,7 @@ export class TileManager {
       const { datasetKey, state, entry } = entries[i]
       this._freeEntry(entry)
       state.tiles.delete(entry.key)
+      this._revision++ // a stand-in drawn from it may be gone
       if (
         state.tiles.size === 0 &&
         state.pending.size === 0 &&
@@ -691,7 +732,10 @@ export class TileManager {
       withdrawn += this._withdrawPending(state)
       if (state.tiles.size === 0) this._datasets.delete(key)
     }
-    if (withdrawn) ensureTileDebugState().withdrawn += withdrawn
+    if (withdrawn) {
+      ensureTileDebugState().withdrawn += withdrawn
+      this._revision++
+    }
   }
 
   /** Cancel a dataset's pending requests; returns how many there were. */

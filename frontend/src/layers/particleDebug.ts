@@ -7,6 +7,10 @@ export interface ParticleDebugState {
   atlasClears: number
   atlasFlushes: number
   pendingDirtyTiles: number
+  /** Frames that recomputed visible tiles, pan prefetch and tile demand (#96). */
+  preparations: number
+  /** Frames that recomputed the atlas layout (#96). */
+  atlasLayouts: number
   /** Opacity last set on the layer. */
   opacity?: number
   /** Wind only: forecast hour of the current (T0) tiles. */
@@ -37,6 +41,8 @@ export interface WeatherDebugState {
   tilePasses: number
   /** Frames that composited the buffer onto the map. */
   composites: number
+  /** Frames that recomputed visible tiles, tile demand and the draw list (#96). */
+  preparations: number
 }
 
 interface ParticleDebugRoot {
@@ -66,6 +72,8 @@ const DEFAULT_STATE: ParticleDebugState = {
   atlasClears: 0,
   atlasFlushes: 0,
   pendingDirtyTiles: 0,
+  preparations: 0,
+  atlasLayouts: 0,
 }
 
 export function ensureParticleDebugState(layer: ParticleDebugLayer): ParticleDebugState {
@@ -80,7 +88,7 @@ export function ensureParticleDebugState(layer: ParticleDebugLayer): ParticleDeb
 export function ensureWeatherDebugState(): WeatherDebugState {
   const globalWithDebug = globalThis as typeof globalThis & { __weathermanDebug?: ParticleDebugRoot }
   const root = (globalWithDebug.__weathermanDebug ??= {})
-  return (root.weather ??= { drawn: 0, fallback: 0, tilePasses: 0, composites: 0 })
+  return (root.weather ??= { drawn: 0, fallback: 0, tilePasses: 0, composites: 0, preparations: 0 })
 }
 
 export function ensureIsobarsDebugState(): IsobarsDebugState {

@@ -227,6 +227,8 @@ export abstract class ParticleLayer implements CustomLayerInterface {
   private _atlasDirtyT1 = new Set<string>()
 
   private _panTracker = new PanVelocityTracker()
+  /** The last preparation (see _prepare), reused while _prepKey() matches its key. */
+  private _prep: { key: string; visibleCoords: TileCoord[]; viewport: MercatorBounds } | null = null
 
   // ── Timing & performance watchdog ──
   private _lastFrameTime = 0
@@ -329,26 +331,13 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     this._watchFrameTime(dt * 1000)
 
     // ── Update tile managers with the current viewport ──
-    const zoom = dataTileZoom(this._map.getZoom())
-    const bounds = this._map.getBounds()
-    const visibleCoords = computeVisibleTiles({
-      west: bounds.getWest(),
-      north: bounds.getNorth(),
-      east: bounds.getEast(),
-      south: bounds.getSouth(),
-    }, zoom)
-
-    // When crossing the antimeridian, east < west (e.g. west=170°, east=-170°).
-    // Adding 360° to east gives a contiguous range, so the shaders'
-    // out-of-bounds checks and the pan tracker work across it.
-    let east = bounds.getEast()
-    const west = bounds.getWest()
-    if (east < west) east += 360
-
-    // Pan prefetch: detect movement and prefetch one tile ring ahead
-    const panDir = this._panTracker.update((west + east) / 2, (bounds.getNorth() + bounds.getSouth()) / 2)
-    const prefetchCoords = panDir ? computePanPrefetchTiles(visibleCoords, panDir, zoom) : []
-    this._updateManagers(visibleCoords, prefetchCoords)
+    // Only when the view, the hours or a manager's tiles changed: a steady
+    // view would otherwise redo all of it every animation frame (#96).
+    for (const m of this._t0) m?.tick()
+    for (const m of this._t1) m?.tick()
+    const prepared = this._prep == null || this._prep.key !== this._prepKey()
+    if (prepared) this._prepare()
+    const { visibleCoords, viewport } = this._prep!
 
     // ── Save MapLibre GL state BEFORE any GL calls ──
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
@@ -364,7 +353,7 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     const prevBlendEqAlpha = gl.getParameter(gl.BLEND_EQUATION_ALPHA) as number
 
     // ── Pack visible tiles into atlas textures ──
-    const atlas = this._packAtlas(gl, visibleCoords)
+    const atlas = this._packAtlas(gl, visibleCoords, prepared)
     const hasData = atlas?.hasAnyTile ?? false
 
     // ── Resize trail textures if canvas size changed ──
@@ -410,12 +399,7 @@ export abstract class ParticleLayer implements CustomLayerInterface {
       dt,
       worldSize,
       pixelRatio,
-      viewport: {
-        minLon: (west + 180) / 360,
-        maxLon: (east + 180) / 360,
-        minLat: latToMercatorY(bounds.getNorth()),
-        maxLat: latToMercatorY(bounds.getSouth()),
-      },
+      viewport,
       canvasWidth,
       canvasHeight,
       trailWidth,
@@ -619,6 +603,58 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     }
   }
 
+  /**
+   * What the frame's preparation depends on: the view, the next hour, and
+   * every manager's revision (tiles, hour, run, retries, stand-in expiry —
+   * see TileManager.revision). Unchanged, the last preparation still holds.
+   */
+  private _prepKey(): string {
+    const m = this._map!
+    const c = m.getCenter()
+    let key = `${c.lng},${c.lat},${m.getZoom()},${m.getBearing()},${m.getPitch()},${m.transform.width},${m.transform.height},${this._forecastHourT1}`
+    for (const t of this._t0) key += `,${t?.revision}`
+    for (const t of this._t1) key += `,${t?.revision}`
+    return key
+  }
+
+  /** Visible tiles, pan prefetch and manager demand for the current view. */
+  private _prepare(): void {
+    const map = this._map!
+    const zoom = dataTileZoom(map.getZoom())
+    const bounds = map.getBounds()
+    const visibleCoords = computeVisibleTiles({
+      west: bounds.getWest(),
+      north: bounds.getNorth(),
+      east: bounds.getEast(),
+      south: bounds.getSouth(),
+    }, zoom)
+
+    // When crossing the antimeridian, east < west (e.g. west=170°, east=-170°).
+    // Adding 360° to east gives a contiguous range, so the shaders'
+    // out-of-bounds checks and the pan tracker work across it.
+    let east = bounds.getEast()
+    const west = bounds.getWest()
+    if (east < west) east += 360
+
+    // Pan prefetch: detect movement and prefetch one tile ring ahead
+    const panDir = this._panTracker.update((west + east) / 2, (bounds.getNorth() + bounds.getSouth()) / 2)
+    const prefetchCoords = panDir ? computePanPrefetchTiles(visibleCoords, panDir, zoom) : []
+    this._updateManagers(visibleCoords, prefetchCoords)
+    this._debug.preparations += 1
+
+    this._prep = {
+      // After the demand update: the fetches it started are part of this state.
+      key: this._prepKey(),
+      visibleCoords,
+      viewport: {
+        minLon: (west + 180) / 360,
+        maxLon: (east + 180) / 360,
+        minLat: latToMercatorY(bounds.getNorth()),
+        maxLat: latToMercatorY(bounds.getSouth()),
+      },
+    }
+  }
+
   private _updateManagers(visibleCoords: TileCoord[], prefetchCoords: TileCoord[]): void {
     this._lastVisible = visibleCoords
     // Priority: P0 = visible current time, P1 = visible next time, P2 = prefetch.
@@ -732,6 +768,9 @@ export abstract class ParticleLayer implements CustomLayerInterface {
   // ── Tile Atlas ─────────────────────────────────────────────────────
 
   private _invalidateAtlas(): void {
+    // Also prepare afresh: after a T0/T1 swap the managers' revisions could
+    // line up into the old key.
+    this._prep = null
     this._atlasLayout = null
     this._atlasLayoutKey = ''
     this._atlasSlotsByKey.clear()
@@ -809,7 +848,21 @@ export abstract class ParticleLayer implements CustomLayerInterface {
    * Pack all visible tile textures into the atlas textures for GPU sampling.
    * Returns the atlas layout for setting shader uniforms.
    */
-  private _packAtlas(gl: WebGL2RenderingContext, visibleCoords: TileCoord[]): AtlasLayout | null {
+  private _packAtlas(gl: WebGL2RenderingContext, visibleCoords: TileCoord[], prepared: boolean): AtlasLayout | null {
+    // Same visible tiles and tiles as last frame: only dirty tiles (none,
+    // usually) need anything done.
+    if (!prepared && this._atlasLayout) {
+      const blits = this._flushDirtyAtlas(gl, this._atlasDirtyT0, this._t0, this._atlasT0)
+        + (this._forecastHourT1 >= 0 ? this._flushDirtyAtlas(gl, this._atlasDirtyT1, this._t1, this._atlasT1) : 0)
+      if (blits > 0) {
+        this._debug.atlasFlushes += 1
+        this._debug.atlasBlits += blits
+        this._atlasLayout.hasAnyTile = this._hasVisibleTile()
+        this._updateDebugPendingDirtyTiles()
+      }
+      return this._atlasLayout
+    }
+    this._debug.atlasLayouts += 1
     const computed = this._computeAtlasLayout(visibleCoords)
     if (!computed) {
       this._invalidateAtlas()

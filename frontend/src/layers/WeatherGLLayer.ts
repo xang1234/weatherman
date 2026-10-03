@@ -58,6 +58,16 @@ import { getTileFetchClient } from '@/workers/TileFetchClient'
 /** Layers that use U/V vector component tiles instead of scalar tiles. */
 const VECTOR_LAYERS = new Set(['wind_speed'])
 
+/** A frame's preparation, reused while the view, hours and tiles are unchanged (#96). */
+interface WeatherPrep {
+  key: string
+  visibleCoords: TileCoord[]
+  tilesToDraw: TileDraw[]
+  fallbackDraws: number
+  useStale: boolean
+  blending: boolean
+}
+
 /** Layers that only have data over ocean — enables shader coastal fallback. */
 const OCEAN_ONLY_LAYERS = new Set(['wave_height'])
 
@@ -146,6 +156,8 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
   // Pan prefetch: tracks viewport movement to prefetch tiles ahead of the pan
   private _panTracker = new PanVelocityTracker()
+  /** The last preparation (see _prepare), reused while _prepKey() matches its key. */
+  private _prep: WeatherPrep | null = null
 
   // Tiles covering the viewport in the last rendered frame
   private _lastVisible: TileCoord[] = []
@@ -306,136 +318,15 @@ export class WeatherGLLayer implements CustomLayerInterface {
 
     const isVector = this._isVector
 
-    // Compute visible tiles from current map viewport
-    const zoom = dataTileZoom(this._map.getZoom())
-    const bounds = this._map.getBounds()
-    const visibleCoords = computeVisibleTiles({
-      west: bounds.getWest(),
-      north: bounds.getNorth(),
-      east: bounds.getEast(),
-      south: bounds.getSouth(),
-    }, zoom)
-
-    // Pan prefetch: detect viewport movement and prefetch one tile ring
-    // in the direction of movement to prevent blank edges during panning.
-    let panEast = bounds.getEast()
-    const panWest = bounds.getWest()
-    if (panEast < panWest) panEast += 360
-    const centerLng = (panWest + panEast) / 2
-    const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2
-    const panDir = this._panTracker.update(centerLng, centerLat)
-    const prefetchCoords = panDir
-      ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
-      : []
-
-    // Update tile managers with priority-differentiated fetches:
-    //   P0 = visible tiles, current time (what user sees now)
-    //   P1 = visible tiles, next time step (temporal blend) — fetched whenever
-    //        a next step is configured, so playback and stepping start warm
-    //   P2 = prefetch tiles (speculative, for smooth panning)
-    this._lastVisible = visibleCoords
-    this._tileManager.updateVisibleTiles(visibleCoords, 0)
-    if (prefetchCoords.length > 0) {
-      this._tileManager.updateVisibleTiles(prefetchCoords, 2)
-    }
-    const wantT1 = this._forecastHourT1 >= 0 && this._tileManagerT1 != null
-    if (wantT1) {
-      this._tileManagerT1!.updateVisibleTiles(visibleCoords, 1)
-      if (prefetchCoords.length > 0) {
-        this._tileManagerT1!.updateVisibleTiles(prefetchCoords, 2)
-      }
-    }
-    if (isVector && this._tileManagerV) {
-      this._tileManagerV.updateVisibleTiles(visibleCoords, 0)
-      if (prefetchCoords.length > 0) {
-        this._tileManagerV.updateVisibleTiles(prefetchCoords, 2)
-      }
-      if (wantT1 && this._tileManagerVT1) {
-        this._tileManagerVT1.updateVisibleTiles(visibleCoords, 1)
-        if (prefetchCoords.length > 0) {
-          this._tileManagerVT1.updateVisibleTiles(prefetchCoords, 2)
-        }
-      }
-    }
-    // Blend the whole viewport or none of it: tile by tile would show a
-    // checkerboard of hours while T1 loads (#36).
-    const blending = wantT1 && this._temporalMix > 0 && this._t1Covers(false)
-
-    // Collect what to draw for each visible tile. A tile that has not loaded
-    // is covered by a stand-in rather than left blank, in this order:
-    //   1. the previous hour/run, while the newly selected one is loading
-    //   2. the nearest loaded ancestor (after zooming in)
-    //   3. any loaded children (after zooming out)
-    const tilesToDraw: TileDraw[] = []
-    let fallbackDraws = 0
-
-    // The previous dataset is shown for the whole viewport until every tile of
-    // the new one has settled — swapping tile by tile would show a patchwork
-    // of two timesteps.
-    const tm = this._tileManager
-    const tmV = this._tileManagerV
-    const isPending = (m: TileManager | null, c: TileCoord) => m?.getTileState(c.z, c.x, c.y) === 'pending'
-    const loading = visibleCoords.some((c) => isPending(tm, c) || (isVector && isPending(tmV, c)))
-    if (!loading) {
-      // The new dataset has taken over; a later zoom must not bring the old one back.
-      tm.dropStale()
-      tmV?.dropStale()
-    }
-    const useStale = loading && tm.hasStale
-
-    for (const coord of visibleCoords) {
-      const stale = useStale ? this._findSource(coord, true) : null
-      const src = stale ?? this._findSource(coord, false)
-      if (src) {
-        // T1 belongs to the current dataset, so never blend it into stale tiles.
-        const blendHere = blending && !stale
-        const uvScale = 1 / 2 ** src.dz
-        tilesToDraw.push({
-          z: coord.z, x: coord.x, y: coord.y, wrap: coord.wrap,
-          uvOffsetX: (coord.x - (src.x << src.dz)) * uvScale,
-          uvOffsetY: (coord.y - (src.y << src.dz)) * uvScale,
-          uvScale,
-          texT0: src.texT0,
-          texV: src.texV,
-          texT1: blendHere ? this._tileManagerT1!.getTexture(src.z, src.x, src.y) : null,
-          texVT1: blendHere && isVector
-            ? this._tileManagerVT1?.getTexture(src.z, src.x, src.y) ?? null
-            : null,
-          stale: stale != null,
-        })
-        if (stale || src.dz > 0) fallbackDraws++
-        continue
-      }
-
-      // Each quadrant is covered by its loaded child, or failing that by that
-      // child's own descendants — a zoom-out can skip levels, leaving only
-      // grandchildren cached.
-      const pushDescendants = (z: number, x: number, y: number) => {
-        if (z >= MAX_DATA_TILE_ZOOM) return
-        for (let i = 0; i < 4; i++) {
-          const cz = z + 1
-          const cx = x * 2 + (i & 1)
-          const cy = y * 2 + (i >> 1)
-          const texT0 = tm.getTexture(cz, cx, cy)
-          const texV = isVector ? tmV?.getTexture(cz, cx, cy) ?? null : null
-          if (!texT0 || (isVector && !texV)) {
-            pushDescendants(cz, cx, cy)
-            continue
-          }
-          tilesToDraw.push({
-            z: cz, x: cx, y: cy, wrap: coord.wrap,
-            uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
-            texT0, texV, texT1: null, texVT1: null, stale: false,
-          })
-          fallbackDraws++
-        }
-      }
-      pushDescendants(coord.z, coord.x, coord.y)
-    }
-
+    // Visible tiles, tile demand and the draw list change only with the
+    // view, the layer/hours or a manager's tiles; the particles repaint every
+    // frame, so redo them only then (#96).
+    for (const m of this._managers()) m.tick()
+    if (this._prep == null || this._prep.key !== this._prepKey()) this._prep = this._prepare(isVector)
+    const { visibleCoords, tilesToDraw, useStale, blending } = this._prep
     this._debug.drawn = tilesToDraw.length
-    this._debug.fallback = fallbackDraws
-    this._debug.hour = tm.currentForecastHour
+    this._debug.fallback = this._prep.fallbackDraws
+    this._debug.hour = this._tileManager.currentForecastHour
 
     // Keep rendering while stale tiles are up so their time limit is noticed.
     if (useStale) this._map.triggerRepaint()
@@ -760,12 +651,173 @@ export class WeatherGLLayer implements CustomLayerInterface {
   // ── Private ──────────────────────────────────────────────────────
 
   /**
+   * What the preparation depends on: the view, the layer and hours, whether
+   * a blend shows, and every manager's revision (tiles, hour, run, retries,
+   * stand-in expiry — see TileManager.revision).
+   */
+  private _prepKey(): string {
+    const m = this._map!
+    const c = m.getCenter()
+    let key = `${c.lng},${c.lat},${m.getZoom()},${m.getBearing()},${m.getPitch()},${m.transform.width},${m.transform.height}`
+    key += `,${this._layerName},${this._forecastHourT1},${this._temporalMix > 0}`
+    for (const t of this._managers()) key += `,${t.revision}`
+    return key
+  }
+
+  /** The tile managers in use, T0 first. */
+  private _managers(): TileManager[] {
+    return [this._tileManager, this._tileManagerT1, this._tileManagerV, this._tileManagerVT1]
+      .filter((t): t is TileManager => t != null)
+  }
+
+  /** Visible tiles, pan prefetch, tile demand and the draw list for the current view. */
+  private _prepare(isVector: boolean): WeatherPrep {
+    const map = this._map!
+    const tm = this._tileManager!
+    const zoom = dataTileZoom(map.getZoom())
+    const bounds = map.getBounds()
+    const visibleCoords = computeVisibleTiles({
+      west: bounds.getWest(),
+      north: bounds.getNorth(),
+      east: bounds.getEast(),
+      south: bounds.getSouth(),
+    }, zoom)
+
+    // Pan prefetch: detect viewport movement and prefetch one tile ring
+    // in the direction of movement to prevent blank edges during panning.
+    let panEast = bounds.getEast()
+    const panWest = bounds.getWest()
+    if (panEast < panWest) panEast += 360
+    const centerLng = (panWest + panEast) / 2
+    const centerLat = (bounds.getNorth() + bounds.getSouth()) / 2
+    const panDir = this._panTracker.update(centerLng, centerLat)
+    const prefetchCoords = panDir
+      ? computePanPrefetchTiles(visibleCoords, panDir, zoom)
+      : []
+
+    // Update tile managers with priority-differentiated fetches:
+    //   P0 = visible tiles, current time (what user sees now)
+    //   P1 = visible tiles, next time step (temporal blend) — fetched whenever
+    //        a next step is configured, so playback and stepping start warm
+    //   P2 = prefetch tiles (speculative, for smooth panning)
+    this._lastVisible = visibleCoords
+    tm.updateVisibleTiles(visibleCoords, 0)
+    if (prefetchCoords.length > 0) {
+      tm.updateVisibleTiles(prefetchCoords, 2)
+    }
+    const wantT1 = this._forecastHourT1 >= 0 && this._tileManagerT1 != null
+    if (wantT1) {
+      this._tileManagerT1!.updateVisibleTiles(visibleCoords, 1)
+      if (prefetchCoords.length > 0) {
+        this._tileManagerT1!.updateVisibleTiles(prefetchCoords, 2)
+      }
+    }
+    if (isVector && this._tileManagerV) {
+      this._tileManagerV.updateVisibleTiles(visibleCoords, 0)
+      if (prefetchCoords.length > 0) {
+        this._tileManagerV.updateVisibleTiles(prefetchCoords, 2)
+      }
+      if (wantT1 && this._tileManagerVT1) {
+        this._tileManagerVT1.updateVisibleTiles(visibleCoords, 1)
+        if (prefetchCoords.length > 0) {
+          this._tileManagerVT1.updateVisibleTiles(prefetchCoords, 2)
+        }
+      }
+    }
+    // Blend the whole viewport or none of it: tile by tile would show a
+    // checkerboard of hours while T1 loads (#36).
+    const blending = wantT1 && this._temporalMix > 0 && this._t1Covers(false)
+
+    // Collect what to draw for each visible tile. A tile that has not loaded
+    // is covered by a stand-in rather than left blank, in this order:
+    //   1. the previous hour/run, while the newly selected one is loading
+    //   2. the nearest loaded ancestor (after zooming in)
+    //   3. any loaded children (after zooming out)
+    const tilesToDraw: TileDraw[] = []
+    let fallbackDraws = 0
+
+    // The previous dataset is shown for the whole viewport until every tile of
+    // the new one has settled — swapping tile by tile would show a patchwork
+    // of two timesteps.
+    const tmV = this._tileManagerV
+    const isPending = (m: TileManager | null, c: TileCoord) => m?.getTileState(c.z, c.x, c.y) === 'pending'
+    const loading = visibleCoords.some((c) => isPending(tm, c) || (isVector && isPending(tmV, c)))
+    if (!loading) {
+      // The new dataset has taken over; a later zoom must not bring the old one back.
+      tm.dropStale()
+      tmV?.dropStale()
+    }
+    const useStale = loading && tm.hasStale
+
+    for (const coord of visibleCoords) {
+      const stale = useStale ? this._findSource(coord, true) : null
+      const src = stale ?? this._findSource(coord, false)
+      if (src) {
+        // T1 belongs to the current dataset, so never blend it into stale tiles.
+        const blendHere = blending && !stale
+        const uvScale = 1 / 2 ** src.dz
+        tilesToDraw.push({
+          z: coord.z, x: coord.x, y: coord.y, wrap: coord.wrap,
+          uvOffsetX: (coord.x - (src.x << src.dz)) * uvScale,
+          uvOffsetY: (coord.y - (src.y << src.dz)) * uvScale,
+          uvScale,
+          texT0: src.texT0,
+          texV: src.texV,
+          texT1: blendHere ? this._tileManagerT1!.getTexture(src.z, src.x, src.y) : null,
+          texVT1: blendHere && isVector
+            ? this._tileManagerVT1?.getTexture(src.z, src.x, src.y) ?? null
+            : null,
+          stale: stale != null,
+        })
+        if (stale || src.dz > 0) fallbackDraws++
+        continue
+      }
+
+      // Each quadrant is covered by its loaded child, or failing that by that
+      // child's own descendants — a zoom-out can skip levels, leaving only
+      // grandchildren cached.
+      const pushDescendants = (z: number, x: number, y: number) => {
+        if (z >= MAX_DATA_TILE_ZOOM) return
+        for (let i = 0; i < 4; i++) {
+          const cz = z + 1
+          const cx = x * 2 + (i & 1)
+          const cy = y * 2 + (i >> 1)
+          const texT0 = tm.getTexture(cz, cx, cy)
+          const texV = isVector ? tmV?.getTexture(cz, cx, cy) ?? null : null
+          if (!texT0 || (isVector && !texV)) {
+            pushDescendants(cz, cx, cy)
+            continue
+          }
+          tilesToDraw.push({
+            z: cz, x: cx, y: cy, wrap: coord.wrap,
+            uvOffsetX: 0, uvOffsetY: 0, uvScale: 1,
+            texT0, texV, texT1: null, texVT1: null, stale: false,
+          })
+          fallbackDraws++
+        }
+      }
+      pushDescendants(coord.z, coord.x, coord.y)
+    }
+
+    this._debug.preparations += 1
+
+    return {
+      // After the demand update and dropStale(): what they changed is part of this state.
+      key: this._prepKey(),
+      visibleCoords, tilesToDraw, fallbackDraws, useStale, blending,
+    }
+  }
+
+  /**
    * Apply the current dataset config to all tile managers.
    * In vector mode, the main manager fetches wind_u and the V manager
    * fetches wind_v. In scalar mode, only the main manager is used.
    */
   private _applyLayerConfig(): void {
     if (!this._model || !this._runId) return
+    // Prepare afresh: a T0/T1 swap below could line the managers' revisions
+    // up into the old key.
+    this._prep = null
 
     const targetLayer = this._isVector ? 'wind_u' : this._layerName
 

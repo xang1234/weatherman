@@ -7,11 +7,13 @@
  * rather than the display rate. For each scenario and device pixel ratio it
  * records rAF intervals for --seconds after --warmup, the GPU time of each
  * frame's commands (EXT_disjoint_timer_query_webgl2, where the GPU offers
- * it: unlike the intervals, it holds up while the CPU is busy), and the
- * trail buffer size from the debug state (or the canvas, before #93).
+ * it: unlike the intervals, it holds up while the CPU is busy), main-thread
+ * task and script time per frame (CDP Performance metrics), preparations
+ * per second where the build counts them (#96), and the trail buffer size
+ * from the debug state (or the canvas, before #93).
  *
  *   node scripts/bench-particle-frames.mjs --url http://localhost:4173 \
- *     --seconds 30 --reps 3 [--dpr 1,2] [--scenarios wind,both] [--label after] [--shots out-dir]
+ *     --seconds 30 --reps 3 [--dpr 1,2] [--scenarios wind,both] [--cpu 4] [--label after] [--shots out-dir]
  *
  * Not for CI: SwiftShader frame times say nothing about a GPU.
  */
@@ -30,6 +32,7 @@ const { values: args } = parseArgs({
     height: { type: 'string', default: '900' },
     label: { type: 'string', default: '' },
     scenarios: { type: 'string', default: 'colour-only,wind,waves,both' },
+    cpu: { type: 'string', default: '1' },
     shots: { type: 'string' },
   },
 })
@@ -106,6 +109,18 @@ async function run(scenario, dpr, rep) {
   }, scenario, { timeout: 30_000 })
   await page.waitForTimeout(Number(args.warmup) * 1000)
 
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: Number(args.cpu) })
+  await cdp.send('Performance.enable')
+  const metrics = async () => {
+    const { metrics } = await cdp.send('Performance.getMetrics')
+    const m = Object.fromEntries(metrics.map(({ name, value }) => [name, value]))
+    const d = await page.evaluate(() => globalThis.__weathermanDebug ?? {})
+    const prep = ['weather', 'wind', 'wave'].reduce((n, k) => n + (d[k]?.preparations ?? 0), 0)
+    const counted = ['weather', 'wind', 'wave'].some((k) => d[k]?.preparations != null)
+    return { task: m.TaskDuration, script: m.ScriptDuration, prep, counted }
+  }
+  const m0 = await metrics()
   const result = await page.evaluate((ms) => new Promise((resolve) => {
     const gl = document.querySelector('canvas.maplibregl-canvas').getContext('webgl2')
     const info = gl.getExtension('WEBGL_debug_renderer_info')
@@ -133,6 +148,7 @@ async function run(scenario, dpr, rep) {
     requestAnimationFrame(tick)
   }), Number(args.seconds) * 1000)
 
+  const m1 = await metrics()
   if (args.shots && rep === 0) {
     mkdirSync(args.shots, { recursive: true })
     await page.screenshot({ path: `${args.shots}/${args.label || 'run'}-${scenario.name}-dpr${dpr}.png` })
@@ -148,6 +164,9 @@ async function run(scenario, dpr, rep) {
     medianMs: +percentile(sorted, 0.5).toFixed(2),
     p95Ms: +percentile(sorted, 0.95).toFixed(2),
     slowFrames: sorted.filter((ms) => ms > 33.4).length,
+    taskMsPerFrame: +((m1.task - m0.task) * 1000 / sorted.length).toFixed(3),
+    scriptMsPerFrame: +((m1.script - m0.script) * 1000 / sorted.length).toFixed(3),
+    preparationsPerSec: m1.counted ? +((m1.prep - m0.prep) / Number(args.seconds)).toFixed(2) : null,
     gpuFrames: gpu.length,
     gpuMedianMs: gpu.length ? +percentile(gpu, 0.5).toFixed(3) : null,
     gpuP95Ms: gpu.length ? +percentile(gpu, 0.95).toFixed(3) : null,
