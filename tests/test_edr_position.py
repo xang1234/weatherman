@@ -589,3 +589,134 @@ class TestCachingHeaders:
         )
         assert "immutable" in resp.headers["Cache-Control"]
         assert "31536000" in resp.headers["Cache-Control"]
+
+
+# ---------------------------------------------------------------------------
+# Reads (#91): time selection first, each chunk once, the dateline pair
+# ---------------------------------------------------------------------------
+
+
+class _CountingStore(zarr.storage.WrapperStore):
+    """Counts chunk reads."""
+
+    chunks = 0
+
+    async def get(self, key, prototype, byte_range=None):
+        if "/c/" in key:
+            _CountingStore.chunks += 1
+        return await super().get(key, prototype, byte_range)
+
+
+@pytest.fixture()
+def global_grid(tmp_path):
+    """A 1 degree global grid like GFS's (columns -180..179, rows 90..-90),
+    4 hours, 64 x 64 chunks one hour deep, with patches of NaN."""
+    model, run_id = "gfs", RunID("20260306T00Z")
+    path = tmp_path / StorageLayout(model).zarr_path(run_id)
+    root = zarr.open_group(str(path), mode="w")
+    lat = np.arange(90.0, -90.5, -1.0, dtype=np.float32)
+    lon = np.arange(-180.0, 180.0, 1.0, dtype=np.float32)
+    root.create_array("lat", data=lat)
+    root.create_array("lon", data=lon)
+    root.create_array("time", data=np.array([0, 3, 6, 9], dtype=np.int32))
+    rng = np.random.default_rng(3)
+    data = rng.uniform(-20, 40, size=(4, lat.size, lon.size)).astype(np.float32)
+    data[:, 40:44, 10:20] = np.nan  # "land": 50-47N, 170-161W
+    data[:, 60:62, -1] = np.nan     # at the last column, by the dateline
+    arr = root.create_array("tmp_2m", shape=data.shape, dtype="float32", chunks=(1, 64, 64), fill_value=np.nan)
+    arr[:] = data
+
+    catalog = RunCatalog.new(model)
+    catalog.publish_run(run_id, layout=StorageLayout(model))
+
+    def opener(p: str) -> zarr.Group:
+        return zarr.open_group(_CountingStore(zarr.storage.LocalStore(str(tmp_path / p), read_only=True)), mode="r")
+
+    return EDRService(lambda _m: catalog, opener), model, run_id, lat, lon, data
+
+
+def _reference(lat_c, lon_c, data, lon, lat, hours):
+    """Bilinear interpolation straight from the in-memory array."""
+    from weatherman.edr.position import _build_interpolation_plan
+
+    p = _build_interpolation_plan(lat_c, lon_c, lat, lon)
+    v = (data[:, p.j0, p.i0] * p.w00 + data[:, p.j0, p.i1] * p.w01
+         + data[:, p.j1, p.i0] * p.w10 + data[:, p.j1, p.i1] * p.w11)[hours]
+    return [None if np.isnan(x) else round(float(x), 4) for x in v]
+
+
+class TestPositionReads:
+    @pytest.mark.parametrize(("lon", "lat"), [
+        (12.3, 33.7),     # ordinary
+        (179.4, -29.5),   # between the last column and the first, across the dateline
+        (179.5, -61.2),   # by the dateline, next to NaN
+        (-165.5, 48.5),   # in the NaN patch
+        (-180.0, 0.0),
+    ])
+    @pytest.mark.parametrize(("dt", "hours"), [(None, [0, 1, 2, 3]), ("6", [2]), ("3/6", [1, 2])])
+    def test_values_match_the_grid(self, global_grid, lon, lat, dt, hours):
+        svc, model, run_id, lat_c, lon_c, data = global_grid
+        out = svc.query_position(model, run_id, lon, lat, ["tmp_2m"], dt)
+        assert out["domain"]["axes"]["t"]["values"] == [[0, 3, 6, 9][h] for h in hours]
+        assert out["ranges"]["tmp_2m"]["values"] == _reference(lat_c, lon_c, data, lon, lat, hours)
+
+    def test_nan_is_null(self, global_grid):
+        svc, model, run_id, *_ = global_grid
+        values = svc.query_position(model, run_id, -165.5, 48.5, ["tmp_2m"], None)["ranges"]["tmp_2m"]["values"]
+        assert values == [None] * 4
+
+    @pytest.mark.parametrize(("lon", "dt", "chunks"), [
+        (12.3, "6", 1),    # one hour: one chunk, not four (one per corner)
+        (12.3, None, 4),   # every hour: one chunk each
+        (179.4, None, 8),  # the dateline pair: the last column's chunk and the first's, each hour
+    ])
+    def test_each_chunk_is_read_once(self, global_grid, lon, dt, chunks):
+        svc, model, run_id, *_ = global_grid
+        svc.query_position(model, run_id, lon, 33.7, ["tmp_2m"], dt)  # coordinates and plan cached
+        _CountingStore.chunks = 0
+        svc.query_position(model, run_id, lon, 33.7, ["tmp_2m"], dt)
+        assert _CountingStore.chunks == chunks + 3  # + the lat/lon/time coordinates
+
+    def test_plan_cache_stays_bounded_under_concurrency(self, global_grid):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from weatherman.edr.position import _POINT_CACHE_SIZE
+
+        svc, model, run_id, lat_c, lon_c, _ = global_grid
+        points = [(lon, lat) for lon in np.arange(-179.0, 179.0, 2.3) for lat in (-30.5, 10.5, 50.5)]
+
+        def plan(point):
+            return svc._get_interpolation_plan(model, run_id, lat_c, lon_c, point[1], point[0])[0]
+
+        with ThreadPoolExecutor(8) as pool:
+            plans = list(pool.map(plan, points * 3))
+        assert len(svc._point_cache) == _POINT_CACHE_SIZE
+        assert plans[:len(points)] == plans[len(points):2 * len(points)]
+
+
+def test_position_route_runs_in_the_threadpool():
+    """A plain def: FastAPI runs it off the event loop (#91)."""
+    import inspect
+
+    from weatherman.edr.position import edr_position
+
+    assert not inspect.iscoroutinefunction(edr_position)
+
+
+class TestTrajectoryReads:
+    def test_a_dateline_route_reads_each_chunk_once(self, global_grid):
+        from weatherman.edr.position import _build_interpolation_plan
+        from weatherman.edr.resample import resample_linestring
+        from weatherman.edr.trajectory import _sample_trajectory
+
+        svc, model, run_id, lat_c, lon_c, data = global_grid
+        samples = resample_linestring([(140.0, 35.0), (-125.0, 40.0)], num_samples=200)
+        _CountingStore.chunks = 0
+        out = _sample_trajectory(svc, model, run_id, samples)
+
+        plans = [_build_interpolation_plan(lat_c, lon_c, s.lat, s.lon) for s in samples]
+        touched = {(j // 64, i // 64) for p in plans for j in (p.j0, p.j1) for i in (p.i0, p.i1)}
+        assert _CountingStore.chunks == len(touched) * 4 + 3  # each chunk once per hour, + coordinates
+        expected = [_reference(lat_c, lon_c, data, s.lon, s.lat, [0, 1, 2, 3]) for s in samples]
+        assert out["ranges"]["tmp_2m"]["values"] == expected
+        assert out["ranges"]["tmp_2m"]["shape"] == [200, 4]
