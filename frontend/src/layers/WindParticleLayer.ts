@@ -95,8 +95,8 @@ export class WindParticleLayer extends ParticleLayer {
     gl.bindTexture(gl.TEXTURE_2D, frame.prevState)
     gl.uniform1i(u('u_stateTex'), 0)
     gl.uniform1i(u('u_prevStateTex'), 1)
-    gl.uniform2f(u('u_viewport'), frame.canvasWidth, frame.canvasHeight)
-    gl.uniform1f(u('u_lineWidth'), LINE_WIDTH * frame.pixelRatio)
+    gl.uniform2f(u('u_viewport'), frame.trailWidth, frame.trailHeight)
+    gl.uniform1f(u('u_lineWidth'), LINE_WIDTH * frame.trailPixelRatio)
     gl.uniform1f(u('u_speedMax'), SPEED_MAX)
     gl.uniformMatrix4fv(u('u_matrix'), false, frame.mercatorMatrix)
 

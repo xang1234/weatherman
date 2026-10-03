@@ -55,6 +55,8 @@ import { ensureParticleDebugState, type ParticleDebugLayer, type ParticleDebugSt
 
 /** Particles per axis until the GPU tier is known. */
 const DEFAULT_STATE_SIZE = 50
+/** Trail buffer pixels per CSS pixel (#93). Particles are a few CSS pixels wide, and the upscale onto the map keeps them so. */
+const TRAIL_PIXEL_RATIO = 1
 /** Frames of frame-time history for the performance watchdog. */
 const PERF_WINDOW = 60
 /** Frame time in ms above which the watchdog warns. */
@@ -113,10 +115,17 @@ export interface ParticleFrame {
   dt: number
   /** Pixels per mercator unit at the current zoom. */
   worldSize: number
+  /** Device pixels per CSS pixel. */
   pixelRatio: number
   viewport: MercatorBounds
+  /** The map's drawing buffer, in device pixels. */
   canvasWidth: number
   canvasHeight: number
+  /** The trail buffer the particles are drawn into, upscaled onto the map. */
+  trailWidth: number
+  trailHeight: number
+  /** Trail pixels per CSS pixel: sizes given in CSS pixels times this. */
+  trailPixelRatio: number
   /** MapLibre's matrix, rescaled for positions in mercator [0,1]. */
   mercatorMatrix: Float32Array
   /** State after this frame's update. */
@@ -359,12 +368,25 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     const hasData = atlas?.hasAnyTile ?? false
 
     // ── Resize trail textures if canvas size changed ──
+    // The trails are drawn at CSS resolution and upscaled onto the map
+    // (#93): at DPR 2 that is a quarter of the pixels to fade and draw each
+    // frame. Never more than the drawing buffer, which MapLibre caps at
+    // maxCanvasSize without lowering getPixelRatio() — so the size comes
+    // from the map's CSS size, not from the buffer and the ratio.
     const canvasWidth = gl.drawingBufferWidth
     const canvasHeight = gl.drawingBufferHeight
-    if (canvasWidth !== this._trailWidth || canvasHeight !== this._trailHeight) {
-      this._resizeTrailTextures(gl, canvasWidth, canvasHeight)
+    const pixelRatio = this._map.getPixelRatio()
+    const { width: cssWidth, height: cssHeight } = this._map.transform
+    const trailWidth = Math.max(1, Math.min(canvasWidth, Math.round(cssWidth * TRAIL_PIXEL_RATIO)))
+    const trailHeight = Math.max(1, Math.min(canvasHeight, Math.round(cssHeight * TRAIL_PIXEL_RATIO)))
+    if (!this._trailTextures || trailWidth !== this._trailWidth || trailHeight !== this._trailHeight) {
+      this._resizeTrailTextures(gl, trailWidth, trailHeight)
     }
     if (!this._trailTextures || !this._trailFbos) return
+    const trailPixelRatio = trailWidth / Math.max(1, cssWidth)
+    this._debug.trailWidth = trailWidth
+    this._debug.trailHeight = trailHeight
+    this._debug.trailPixelRatio = trailPixelRatio
 
     this._debug.hour = this._t0[0]?.currentForecastHour
     const worldSize = 512 * Math.pow(2, this._map.getZoom())
@@ -387,7 +409,7 @@ export abstract class ParticleLayer implements CustomLayerInterface {
       now,
       dt,
       worldSize,
-      pixelRatio: this._map.getPixelRatio(),
+      pixelRatio,
       viewport: {
         minLon: (west + 180) / 360,
         maxLon: (east + 180) / 360,
@@ -396,6 +418,9 @@ export abstract class ParticleLayer implements CustomLayerInterface {
       },
       canvasWidth,
       canvasHeight,
+      trailWidth,
+      trailHeight,
+      trailPixelRatio,
       mercatorMatrix,
       state: this._stateTextures[stateWrite]!,
       prevState: this._stateTextures[stateRead]!,
@@ -675,7 +700,7 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     return createTexture(gl, gl.RGBA32F, this._stateSize, this._stateSize, gl.RGBA, gl.FLOAT, gl.NEAREST, data)
   }
 
-  /** Create or recreate the trail textures to match the canvas. */
+  /** Create or recreate the trail textures at the given size. */
   private _resizeTrailTextures(gl: WebGL2RenderingContext, width: number, height: number): void {
     this._deleteTrail(gl)
     this._trailWidth = width

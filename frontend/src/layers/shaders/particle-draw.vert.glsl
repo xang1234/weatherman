@@ -5,7 +5,7 @@ precision highp float;
 uniform sampler2D u_stateTex;      // after this frame's update
 uniform sampler2D u_prevStateTex;  // before it
 uniform mat4 u_matrix;     // MapLibre model-view-projection
-uniform vec2 u_viewport;   // drawing buffer size in pixels
+uniform vec2 u_viewport;   // trail buffer size in pixels
 uniform float u_lineWidth; // trail width in pixels
 uniform float u_speedMax;  // Maximum wind speed for normalization
 
