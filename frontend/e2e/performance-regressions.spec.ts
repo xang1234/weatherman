@@ -90,9 +90,10 @@ async function mockPerformanceRoutes(page: Page, options: PerformanceRouteOption
     ) {
       await new Promise((resolve) => setTimeout(resolve, options.delayedResponseMs))
     }
+    // The page may have aborted the request meanwhile (#92).
     await route.fulfill({
       path: TILE_FIXTURE_PATH,
-    })
+    }).catch(() => {})
   })
 
   // No basemap: weather draws without it, and the tests stay off the network.
@@ -716,6 +717,38 @@ test('wind atlas ignores delayed loads from a scrubbed-away forecast hour', asyn
   expect(countersAfterLateLoads).toEqual(countersBeforeLateLoads)
 })
 
+test('a scrubbed-past hour stops holding up the chosen one (#92)', async ({ page }) => {
+  // Hour 3's wind tiles take 8 s; they are requested at hour 0 already, as
+  // the next hour. Stepping 0 → 3 → 6, they fill the worker's slots at the
+  // same priority as hour 6's; unless withdrawn, hour 6 waits behind them.
+  await mockPerformanceRoutes(page, { delayedForecastHour: 3, delayedResponseMs: 8_000 })
+  const aborted: string[] = []
+  page.on('requestfailed', (request) => { if (/\/wind_[uv]\/3\/data\//.test(request.url())) aborted.push(request.url()) })
+  await page.goto('/')
+  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
+  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await waitForWindSettled(page)
+
+  const slider = page.locator('input[aria-label="Forecast hour"]')
+  await page.locator('button').filter({ hasText: '❯' }).click()
+  await expect(slider).toHaveValue('1')
+  const chosen = Date.now()
+  await page.locator('button').filter({ hasText: '❯' }).click()
+
+  // Hour 6 fully drawn, every tile its own, well before hour 3's tiles would arrive.
+  await page.waitForFunction(() => {
+    const weather = (window as unknown as { __weathermanDebug?: { weather?: { hour?: number; drawn: number; fallback: number } } })
+      .__weathermanDebug?.weather
+    return weather?.hour === 6 && weather.drawn > 0 && weather.fallback === 0
+  }, undefined, { timeout: 3_000 })
+  expect(Date.now() - chosen).toBeLessThan(3_000)
+
+  const withdrawn = await page.evaluate(() =>
+    (window as unknown as { __weathermanDebug: { tiles?: { withdrawn: number } } }).__weathermanDebug.tiles?.withdrawn ?? 0)
+  expect(withdrawn).toBeGreaterThan(0)
+  expect(aborted.length).toBeGreaterThan(0) // the worker aborted the network fetches too
+})
+
 test('data tiles are never requested above the pre-generated max zoom', async ({ page }) => {
   await mockPerformanceRoutes(page)
   const zooms = new Set<number>()
@@ -827,24 +860,32 @@ test('a failed tile is fetched again and drawn', async ({ page }) => {
 
 test('tile fetches preempted by higher-priority ones are still delivered', async ({ page }) => {
   await mockPerformanceRoutes(page)
-  // Slow tiles keep every fetch slot busy, so the wind layer's visible tiles
-  // preempt the next-hour tiles already in flight for the initial layer.
+  // Slow tiles keep every fetch slot busy, so the wind particles' visible
+  // tiles preempt the temperature layer's next-hour tiles already in flight,
+  // which it still wants. (Stay on temperature: a layer switched away from
+  // has its requests withdrawn, #92, and those are never delivered.)
   await page.route(/\/tiles\/gfs\/.*\/data\/\d+\/\d+\/\d+\.png/, async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 1_000))
     await route.fulfill({ path: TILE_FIXTURE_PATH }).catch(() => undefined) // aborted meanwhile
   })
   const requested = new Set<string>()
   const delivered = new Set<string>()
+  const preempted = new Set<string>()
+  const isData = (url: string) => url.includes('/data/')
   page.on('request', (request) => {
-    if (request.url().includes('/data/')) requested.add(request.url())
+    if (isData(request.url())) requested.add(request.url())
   })
   page.on('requestfinished', (request) => {
-    if (request.url().includes('/data/')) delivered.add(request.url())
+    if (isData(request.url())) delivered.add(request.url())
+  })
+  page.on('requestfailed', (request) => {
+    if (isData(request.url())) preempted.add(request.url())
   })
 
   await page.goto('/')
-  await expect(page.locator('button').filter({ hasText: 'Wind Speed' })).toBeVisible({ timeout: 10_000 })
-  await page.locator('button').filter({ hasText: 'Wind Speed' }).click()
+  await expect(page.locator('button').filter({ hasText: 'Temperature' })).toBeVisible({ timeout: 10_000 })
+  await expect.poll(() => requested.size).toBeGreaterThan(0)
+  await page.getByLabel('Wind particles', { exact: true }).check()
   await waitForWindSettled(page)
 
   // Require the requests to have actually gone out: "nothing undelivered" is
@@ -853,4 +894,5 @@ test('tile fetches preempted by higher-priority ones are still delivered', async
     () => requested.size > 12 && [...requested].every((url) => delivered.has(url)),
     { timeout: 20_000 },
   ).toBe(true)
+  expect(preempted.size).toBeGreaterThan(0) // some were aborted midway, then delivered
 })

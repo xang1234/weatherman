@@ -20,6 +20,7 @@
 
 import type { TilePriority } from '@/workers/tile-fetch-protocol'
 import type { TileFetchClient } from '@/workers/TileFetchClient'
+import { ensureTileDebugState } from './particleDebug'
 import { acquireSharedTileStore, recordTileSide, type SharedTileStore } from './shared-tiles'
 
 /** Loading state for a single tile. */
@@ -123,6 +124,12 @@ export class TileManager {
   private _staleKey: string | null = null
   private _staleUntil = 0
 
+  /**
+   * A setLayer() has left datasets behind whose pending requests no one
+   * here needs any more; the next updateVisibleTiles() withdraws them (#92).
+   */
+  private _withdrawDue = false
+
   /** Monotonically increasing counter for LRU tracking. */
   private _accessCounter = 0
 
@@ -193,6 +200,7 @@ export class TileManager {
     this._layer = layer
     this._forecastHour = forecastHour
     this._ensureCurrentState()
+    this._withdrawDue = true
   }
 
   /**
@@ -205,6 +213,7 @@ export class TileManager {
   updateVisibleTiles(coords: TileCoord[], priority: TilePriority = 0): void {
     const state = this._ensureCurrentState()
     if (!state) return
+    if (this._withdrawDue) this._withdrawObsolete()
     state.lastUsed = ++this._accessCounter
 
     const now = performance.now()
@@ -663,7 +672,31 @@ export class TileManager {
     }
   }
 
-  private _disposeDatasetState(state: DatasetState): void {
+  /**
+   * Withdraw the pending requests of every dataset but the current one and
+   * the stand-in still drawn, so a scrubbed-past hour does not hold up the
+   * one chosen (#92). Their loaded tiles stay, for the LRU to keep or evict.
+   *
+   * Deferred from setLayer() to the next updateVisibleTiles(): when playback
+   * moves T1 on, the manager taking over its hour (T0, or another layer's)
+   * claims the same URLs earlier in that frame, so the shared store keeps
+   * those fetches rather than cancelling and starting them again.
+   */
+  private _withdrawObsolete(): void {
+    this._withdrawDue = false
+    const keep = new Set([this._currentDatasetKey(), this._staleState() ? this._staleKey : null])
+    let withdrawn = 0
+    for (const [key, state] of this._datasets) {
+      if (keep.has(key)) continue
+      withdrawn += this._withdrawPending(state)
+      if (state.tiles.size === 0) this._datasets.delete(key)
+    }
+    if (withdrawn) ensureTileDebugState().withdrawn += withdrawn
+  }
+
+  /** Cancel a dataset's pending requests; returns how many there were. */
+  private _withdrawPending(state: DatasetState): number {
+    const count = state.pending.size + state.pendingF16.size + state.pendingWorker.size
     for (const { image, texture } of state.pending.values()) {
       image.onload = null
       image.onerror = null
@@ -678,9 +711,15 @@ export class TileManager {
     }
     state.pendingF16.clear()
 
+    // Last waiter out cancels the fetch; a late result is given back (see
+    // the identity check in _fetchTileViaWorker).
     for (const { cancel } of state.pendingWorker.values()) cancel()
     state.pendingWorker.clear()
+    return count
+  }
 
+  private _disposeDatasetState(state: DatasetState): void {
+    this._withdrawPending(state)
     for (const entry of state.tiles.values()) {
       this._freeEntry(entry)
     }
