@@ -278,6 +278,13 @@ test('particle trails are drawn at CSS resolution and follow a resize (#93)', as
     }
     await page.setViewportSize({ width: 500, height: 300 })
     expect(await trail(page, 'wind', 500)).toMatchObject({ trailWidth: 500, trailHeight: 300 })
+    if (deviceScaleFactor === 2) {
+      // MapLibre caps the drawing buffer at 4096 px but keeps reporting DPR
+      // 2; the trail still follows the CSS width, not the capped buffer / 2.
+      await page.setViewportSize({ width: 2560, height: 300 })
+      expect(await trail(page, 'wind', 2560)).toMatchObject({ trailWidth: 2560, trailHeight: 300, trailPixelRatio: 1 })
+      expect(await page.locator('canvas.maplibregl-canvas').evaluate((c: HTMLCanvasElement) => c.width)).toBe(4096)
+    }
     await page.close()
   }
 })

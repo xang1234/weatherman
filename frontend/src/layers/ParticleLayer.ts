@@ -370,18 +370,20 @@ export abstract class ParticleLayer implements CustomLayerInterface {
     // ── Resize trail textures if canvas size changed ──
     // The trails are drawn at CSS resolution and upscaled onto the map
     // (#93): at DPR 2 that is a quarter of the pixels to fade and draw each
-    // frame. Never more than the drawing buffer.
+    // frame. Never more than the drawing buffer, which MapLibre caps at
+    // maxCanvasSize without lowering getPixelRatio() — so the size comes
+    // from the map's CSS size, not from the buffer and the ratio.
     const canvasWidth = gl.drawingBufferWidth
     const canvasHeight = gl.drawingBufferHeight
     const pixelRatio = this._map.getPixelRatio()
-    const trailScale = Math.min(1, TRAIL_PIXEL_RATIO / pixelRatio)
-    const trailWidth = Math.max(1, Math.round(canvasWidth * trailScale))
-    const trailHeight = Math.max(1, Math.round(canvasHeight * trailScale))
+    const { width: cssWidth, height: cssHeight } = this._map.transform
+    const trailWidth = Math.max(1, Math.min(canvasWidth, Math.round(cssWidth * TRAIL_PIXEL_RATIO)))
+    const trailHeight = Math.max(1, Math.min(canvasHeight, Math.round(cssHeight * TRAIL_PIXEL_RATIO)))
     if (!this._trailTextures || trailWidth !== this._trailWidth || trailHeight !== this._trailHeight) {
       this._resizeTrailTextures(gl, trailWidth, trailHeight)
     }
     if (!this._trailTextures || !this._trailFbos) return
-    const trailPixelRatio = trailWidth / (canvasWidth / pixelRatio)
+    const trailPixelRatio = trailWidth / Math.max(1, cssWidth)
     this._debug.trailWidth = trailWidth
     this._debug.trailHeight = trailHeight
     this._debug.trailPixelRatio = trailPixelRatio
